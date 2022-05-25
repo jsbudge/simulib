@@ -30,7 +30,7 @@ class Platform(object):
         self._vel = lambda lam_t: np.array([ve(lam_t), vn(lam_t), vu(lam_t)])
 
         # attitude spline
-        rr = CubicSpline(t, r)
+        rr = CubicSpline(t, r + np.pi / 2)
         pp = CubicSpline(t, p)
         yy = CubicSpline(t, y)
         self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)])
@@ -76,7 +76,7 @@ class RadarPlatform(Platform):
     def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
         nrange, _ = self.calcRanges(height)
         plength_s = (nrange * 2 / c0 - 1 / TAC) * pulse_length_percent
-        return int(plength_s / self.fs) if use_tac else plength_s
+        return int(plength_s * self.fs) if use_tac else plength_s
 
     def calcNumSamples(self, height, plp=1.):
         nrange, frange = self.calcRanges(height)
