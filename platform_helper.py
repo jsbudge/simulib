@@ -30,13 +30,13 @@ class Platform(object):
         self._vel = lambda lam_t: np.array([ve(lam_t), vn(lam_t), vu(lam_t)])
 
         # attitude spline
-        rr = CubicSpline(t, r + np.pi / 2)
+        rr = CubicSpline(t, r)
         pp = CubicSpline(t, p)
         yy = CubicSpline(t, y)
         self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)])
 
         # heading check
-        self._heading = lambda lam_t: np.arctan2(self._pos(lam_t)[1], self._pos(lam_t)[0])
+        self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[0], self._vel(lam_t)[1])
 
     @property
     def pos(self):
@@ -100,7 +100,8 @@ class SDRPlatform(RadarPlatform):
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
         if ant_offsets is None:
             ant_offsets = np.array([np.array([ant.x, ant.y, ant.z]) for ant in sdr.port])
-        super().__init__(e=e, n=n, u=u, r=sdr.gps_data['r'], p=sdr.gps_data['p'], y=sdr.gps_data['y'],
-                         t=sdr.gps_data.index.values, ant_offsets=ant_offsets, dep_angle=sdr.ant[0].dep_ang,
-                         squint_angle=sdr.ant[0].squint, az_bw=sdr.ant[0].az_bw, el_bw=sdr.ant[0].el_bw, fs=fs)
+        super().__init__(e=e, n=n, u=u, r=sdr.gps_data['r'] + np.pi / 2, p=sdr.gps_data['p'], y=sdr.gps_data['y'],
+                         t=sdr.gps_data.index.values, ant_offsets=ant_offsets, dep_angle=sdr.ant[0].dep_ang / DTR,
+                         squint_angle=sdr.ant[0].squint / DTR, az_bw=sdr.ant[0].az_bw / DTR,
+                         el_bw=sdr.ant[0].el_bw / DTR, fs=fs)
         self._sdr = sdr
