@@ -5,6 +5,7 @@ from scipy.spatial.transform import Rotation as rot
 import open3d as o3d
 import plotly.io as pio
 import plotly.graph_objects as go
+import os
 
 pio.renderers.default = 'browser'
 
@@ -20,7 +21,10 @@ def getDTEDName(lat, lon):
     tmplon = int(np.floor(lon))
     direw = 'w' if tmplon < 0 else 'e'
     dirns = 's' if tmplat < 0 else 'n'
-    return '/data5/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+    if os.name == 'nt':
+        return 'Z:\\dted\\%s%03d\\%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+    else:
+        return '/data5/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
 
 
 def db(x):
@@ -34,7 +38,11 @@ def findPowerOf2(x):
 
 
 def undulationEGM96(lat, lon):
-    with open("/data5/dted/EGM96.DAT", "rb") as f:
+    if os.name == 'nt':
+        egmdatfile = "Z:\\dted\\EGM96.DAT"
+    else:
+        egmdatfile = "/data5/dted/EGM96.DAT"
+    with open(egmdatfile, "rb") as f:
         emg96 = np.fromfile(f, 'double', 1441 * 721, '')
         eg_n = np.ceil(lat / .25) * .25
         eg_s = np.floor(lat / .25) * .25
