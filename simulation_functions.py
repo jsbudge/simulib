@@ -313,11 +313,12 @@ def genPulse(phase_x, phase_y, nnr, nfs, nfc, bandw):
 
 
 def rotate(az, nel, rot_mat):
-    return rot.from_euler('xz', [nel - np.pi / 2, -az]).apply(rot_mat)
+    return rot.from_euler('zx', [[-az, 0.],
+                                 [0., nel - np.pi / 2]]).apply(rot_mat)
 
 
 def azelToVec(az, el):
-    return np.array([np.sin(az) * np.sin(el), np.cos(az) * np.sin(el), np.cos(el)])
+    return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
 
 
 '''
