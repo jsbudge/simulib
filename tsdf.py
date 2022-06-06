@@ -269,60 +269,58 @@ else:
     print('Testing data generation enabled.')
     # Test parameters to get ellipses and such right
     init_llh = (40.141259, -111.666374, 1380.)
-    num_trials = 5
-    max_num_lobs = 6
-    mse_max = 1.6 * DTR
+    num_trials = 10
+    max_num_lobs = 10
+    mse_max = 1.7 * DTR
     # Nonlinear least squares for some LOB analysis
     errorfig = None
-    for num_lobs in range(3, max_num_lobs):
+    err_mu = np.zeros((num_trials, max_num_lobs - 3))
+    err_std = np.zeros_like(err_mu)
+    for trial in range(num_trials):
         # Setup the plane flight line
-        e = np.linspace(0, 3000, num_lobs)
+        e = np.linspace(0, 3000, max_num_lobs - 1)
         n = np.zeros_like(e) + np.random.rand(len(e)) * 2 - 1
         u = np.zeros_like(e) + 5000 / 3.2808 + np.random.rand(len(e)) * 2 - 1
         lat, lon, height = enu2llh(e, n, u, init_llh)
         pos = np.array([e, n, u])
-        err_mu = np.zeros((num_trials,))
-        err_std = np.zeros_like(err_mu)
-        for trial in tqdm(range(num_trials)):
-            mse = mse_max / num_trials * (trial + 1)
-            errors = np.zeros((num_trials,))
-            for ep in range(num_trials):
-                truth = np.array([np.random.randint(0, int(e.max())),
-                                  np.random.randint(int(u.mean() - 400), int(u.mean() + 400)), 0.])
-                llh_truth = enu2llh(*truth, init_llh)
-                truth[2] = getElevation((llh_truth[0], llh_truth[1])) - init_llh[2]
-                az = np.arctan2(truth[0] - e, truth[1] - n) + np.random.normal(0, mse, e.shape)
-                truth_az = np.arctan2(truth[0] - e, truth[1] - n)
-                rng = np.sqrt((e - truth[0]) ** 2 + (n - truth[1]) ** 2 + (u - truth[2]) ** 2)
-                rng_mean = rng.mean()
-                el = -np.arcsin((truth[2] - u) / rng) + np.random.normal(0, mse, e.shape)
-                truth_el = -np.arcsin((truth[2] - u) / rng)
-
-                ps, calc_el = genEllipsePoints(pos, az)
-                errors[ep] = np.linalg.norm(truth - np.mean(ps, axis=0))
-                for lob in range(num_lobs):
-                    lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), 9e8, lat[lob], lon[lob],
-                                      height[lob], az[lob] / DTR)
-                    new_tsdf += lob_str
-                    conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
-                    print('LOB sent.')
-                try:
-                    ell_params = getEllipseParams(ps)
-                    ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
-                    ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0], ell_center[1],
-                                          ell_center[2], ell_params[2], ell_params[3], ell_params[4] / DTR)
-                    new_tsdf += ell_str
-                    conn_sock.sendto(
-                        bytes(ell_str, 'utf-8'), conn_addr)
-                    print('Ellipse sent.')
-                except ValueError:
-                    print('Ellipse bad.')
-            err_mu[trial] = errors.mean()
-            err_std[trial] = errors.std()
+        truth = np.array([np.random.randint(0, int(e.max())),
+                          np.random.randint(int(u.mean() - 400), int(u.mean() + 400)), 0.])
+        llh_truth = enu2llh(*truth, init_llh)
+        truth[2] = getElevation((llh_truth[0], llh_truth[1])) - init_llh[2]
+        az = np.arctan2(truth[0] - e, truth[1] - n) + np.random.normal(0, mse_max, e.shape)
+        truth_az = np.arctan2(truth[0] - e, truth[1] - n)
+        rng = np.sqrt((e - truth[0]) ** 2 + (n - truth[1]) ** 2 + (u - truth[2]) ** 2)
+        rng_mean = rng.mean()
+        el = -np.arcsin((truth[2] - u) / rng) + np.random.normal(0, mse_max, e.shape)
+        truth_el = -np.arcsin((truth[2] - u) / rng)
+        use_el = np.zeros(max_num_lobs) + 45 * DTR
+        for num_lobs in tqdm(range(3, max_num_lobs)):
+            ps, calc_el = genEllipsePoints(pos[:, :num_lobs], az[:num_lobs], el=use_el[:num_lobs])
+            use_el[:num_lobs] = calc_el
+            errors = np.linalg.norm(truth[None, :] - ps, axis=1)
+            for lob in range(num_lobs):
+                lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), 9e8, lat[lob], lon[lob],
+                                  height[lob], az[lob] / DTR)
+                new_tsdf += lob_str
+                conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
+                print('LOB sent.')
+            try:
+                ell_params = getEllipseParams(ps)
+                ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
+                ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0], ell_center[1],
+                                      ell_center[2], ell_params[2], ell_params[3], ell_params[4] / DTR)
+                new_tsdf += ell_str
+                conn_sock.sendto(
+                    bytes(ell_str, 'utf-8'), conn_addr)
+                print('Ellipse sent.')
+            except ValueError:
+                print('Ellipse bad.')
+            err_mu[trial, num_lobs - 3] = errors.mean()
+            err_std[trial, num_lobs - 3] = errors.std()
         if errorfig is None:
-            errorfig = px.scatter(x=(np.arange(num_trials) + 1) * mse_max / num_trials / DTR, y=err_mu)
+            errorfig = px.scatter(x=np.arange(max_num_lobs - 3) + 3, y=err_mu[trial, :])
         else:
-            errorfig.add_scatter(x=(np.arange(num_trials) + 1) * mse_max / num_trials / DTR, y=err_mu)
+            errorfig.add_scatter(x=np.arange(max_num_lobs - 3) + 3, y=err_mu[trial, :])
 
     print('Testing complete.')
     errorfig.show()

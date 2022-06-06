@@ -95,8 +95,9 @@ class RadarPlatform(Platform):
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr_file, origin, ant_offsets=None, fs=2e9):
+    def __init__(self, sdr_file, origin=None, ant_offsets=None, fs=2e9):
         sdr = SDRParse(sdr_file)
+        origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[:, 0])
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
         if ant_offsets is None:
             ant_offsets = np.array([np.array([ant.x, ant.y, ant.z]) for ant in sdr.port])
@@ -105,3 +106,4 @@ class SDRPlatform(RadarPlatform):
                          squint_angle=sdr.ant[0].squint / DTR, az_bw=sdr.ant[0].az_bw / DTR,
                          el_bw=sdr.ant[0].el_bw / DTR, fs=fs)
         self._sdr = sdr
+        self.origin = origin
