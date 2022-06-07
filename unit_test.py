@@ -1,6 +1,6 @@
 import numpy as np
-from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, PlotWithSliders
-from cuda_kernels import genRangeWithoutIntersection, getMaxThreads
+from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap
+from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
 import open3d as o3d
@@ -24,19 +24,143 @@ TAC = 125e6
 DTR = np.pi / 180
 inch_to_m = .0254
 
-# The antenna can run Ka and Ku
-# on individual pulses
-bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_122555.sar'
+bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_130706.sar'
+upsample = 1
+cpi_len = 64
+plp = .5
+pts_per_tri = 2
+debug = False
+nbpj_pts = 300
 
 # Generate the background for simulation
+print('Generating environment...', end='')
 bg = SDREnvironment(bg_file, num_vertices=500000)
-
-# Generate a platform
-rp = SDRPlatform(bg_file, bg.origin)
 
 # Grab vertices and such
 vertices = bg.vertices
 triangles = bg.triangles
 normals = bg.normals
+print('Done.')
 
-init_enu = llh2enu(*init_llh, bg.origin)
+# Generate a platform
+print('Generating platform...', end='')
+rp = SDRPlatform(bg_file, bg.origin)
+
+# Get reference data
+flight = rp.pos(rp.gpst)
+fc = rp._sdr[0].fc
+bwidth = rp._sdr[0].bw
+pan = CubicSpline(rp.gpst, rp.heading(rp.gpst) + np.pi / 2)
+el = lambda x: np.zeros(len(x)) + rp.dep_ang
+print('Done.')
+
+# Generate a backprojected image
+print('Calculating grid parameters...')
+# General calculations for slant ranges, etc.
+plat_height = rp.pos(rp.gpst)[2, :].mean()
+nr = rp.calcPulseLength(plat_height, plp, use_tac=True)
+nsam = rp.calcNumSamples(plat_height, plp)
+ranges = rp.calcRangeBins(plat_height, upsample, plp)
+fft_len = findPowerOf2(nsam + nr)
+up_fft_len = fft_len * upsample
+
+# Chirp and matched filter calculations
+taytay = taylor(up_fft_len)
+tayd = np.fft.fftshift(taylor(cpi_len))
+taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
+chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
+                            bwidth), up_fft_len)
+mfilt = chirp.conj()
+mfilt[:up_fft_len // 2] *= taytay[up_fft_len // 2:]
+mfilt[up_fft_len // 2:] *= taytay[:up_fft_len // 2]
+chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
+mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
+
+# Generate a test strip of data
+tri_vert_indices = cupy.array(triangles, dtype=np.int32)
+vert_xyz = cupy.array(vertices, dtype=np.float64)
+vert_norms = cupy.array(normals, dtype=np.float64)
+scattering_coef = cupy.array(bg.scat_coefs, dtype=np.float64)
+ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
+rbins_gpu = cupy.array(ranges, dtype=np.float64)
+
+# Calculate out points on the ground
+gx, gy = np.meshgrid(np.linspace(-100, 100, nbpj_pts), np.linspace(-100, 100, nbpj_pts))
+gz = np.zeros_like(gx)
+gx_gpu = cupy.array(gx, dtype=np.float64)
+gy_gpu = cupy.array(gy, dtype=np.float64)
+gz_gpu = cupy.array(gz, dtype=np.float64)
+
+if debug:
+    pts_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
+    angs_debug = cupy.zeros((triangles.shape[0], 2), dtype=np.float64)
+else:
+    pts_debug = cupy.zeros((1, 1), dtype=np.float64)
+    angs_debug = cupy.zeros((1, 1), dtype=np.float64)
+
+# GPU device calculations
+threads_per_block = getMaxThreads()
+bpg_ranges = (max(1, triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
+bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
+rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_ranges[0], seed=10)
+
+# Data blocks for imaging
+bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
+
+# Run through loop to get data simulated
+data_t = np.interp(np.linspace(0, len(rp.gpst), int((rp.gpst[-1] - rp.gpst[0]) * 1705.)),
+                   np.arange(len(rp.gpst)), rp.gpst)
+print('Simulating...')
+for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)]):
+    panrx_gpu = cupy.array(pan(ts), dtype=np.float64)
+    elrx_gpu = cupy.array(el(ts), dtype=np.float64)
+    posrx_gpu = cupy.array(rp.pos(ts), dtype=np.float64)
+    data_r = cupy.zeros((nsam, cpi_len), dtype=np.float64)
+    data_i = cupy.zeros((nsam, cpi_len), dtype=np.float64)
+    bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
+    genRangeWithoutIntersection[bpg_ranges, threads_per_block](rng_states, tri_vert_indices, vert_xyz, vert_norms,
+                                                                    scattering_coef, ref_coef_gpu,
+                                                                    posrx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
+                                                                    panrx_gpu,
+                                                                    elrx_gpu, data_r, data_i, pts_debug, angs_debug,
+                                                                    c0 / fc, rp.calcRanges(plat_height)[0] / c0,
+                                                                    rp.fs, rp.az_half_bw, rp.el_half_bw, pts_per_tri,
+                                                                    debug)
+
+    cupy.cuda.Device().synchronize()
+    rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0)
+    upsample_data = cupy.zeros((up_fft_len, cpi_len), dtype=np.complex128)
+    upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
+    upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
+    rtdata = cupy.fft.ifft(upsample_data * chirp_gpu * mfilt_gpu, axis=0)[:nsam * upsample, :]
+    test = rtdata.get()
+    cupy.cuda.Device().synchronize()
+
+    backproject[bpg_bpj, threads_per_block](posrx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu, elrx_gpu,
+                                            panrx_gpu, elrx_gpu, rtdata, bpj_grid,
+                                            c0 / fc, rp.calcRanges(plat_height)[0] / c0,
+                                            rp.fs, bwidth, rp.az_half_bw, rp.el_half_bw, 0)
+    cupy.cuda.Device().synchronize()
+
+    bpj_res += bpj_grid.get()
+
+    del panrx_gpu
+    del elrx_gpu
+    del data_r
+    del data_i
+    del rtdata
+    del upsample_data
+    del bpj_grid
+
+del rbins_gpu
+del gx_gpu
+del gy_gpu
+del gz_gpu
+
+dfig = px.scatter_3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2])
+dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
+dfig.show()
+
+plt.figure()
+plt.imshow(db(bpj_res))
+plt.show()

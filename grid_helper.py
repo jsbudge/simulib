@@ -1,5 +1,6 @@
 import numpy as np
-from simulation_functions import getMapLocation, createMeshFromPoints, getElevationMap, rotate, llh2enu, genPulse, enu2llh
+from simulation_functions import getMapLocation, createMeshFromPoints, getElevationMap, rotate, llh2enu, genPulse, \
+    enu2llh, getElevation
 import open3d as o3d
 from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
@@ -122,10 +123,32 @@ class SDREnvironment(Environment):
     def __init__(self, sdr_file, num_vertices=400000):
         # Load in the SDR file
         sdr = SDRParse(sdr_file)
-        asi = sdr.loadASI(sdr.files['asi'])
+        try:
+            asi = sdr.loadASI(sdr.files['asi'])
+        except KeyError:
+            print('ASI not found.')
+            asi = np.zeros((1000, 1000)) + .001
+            asi[250, 250] = 1
+            asi[750, 750] = 1
         self._sdr = sdr
         self._asi = asi
-        ref_llh = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef'])
+        row_pixel_size = 1
+        col_pixel_size = 1
+        heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+        if sdr.ash is None:
+            hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
+            pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
+                  (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
+            alt = getElevation(pt)
+            mrange = hght / np.tan(sdr.ant[0].dep_ang)
+            ref_llh = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
+                              (pt[0], pt[1], alt))
+        else:
+            ref_llh = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef'])
+            row_pixel_size = sdr.ash['geo']['rowPixelSizeM']
+            col_pixel_size = sdr.ash['geo']['colPixelSizeM']
+            heading = -sdr.ash['flight']['flnHdg'] * DTR
+
         self.origin = ref_llh
         cg_e, cg_n = np.meshgrid(np.arange(asi.shape[0]), np.arange(asi.shape[1]))
         cg_e = cg_e.flatten()
@@ -133,10 +156,10 @@ class SDREnvironment(Environment):
         asi_pts = abs(asi[cg_e, cg_n])
         # Set this so that we only get ~num_vertices points in the mesh
         dec_fac = int(asi.shape[0] * asi.shape[1] / num_vertices)
-        cg_e = (cg_e[::dec_fac] - asi.shape[0] / 2) * sdr.ash['geo']['rowPixelSizeM']
-        cg_n = (cg_n[::dec_fac] - asi.shape[1] / 2) * sdr.ash['geo']['colPixelSizeM']
+        cg_e = (cg_e[::dec_fac] - asi.shape[0] / 2) * row_pixel_size
+        cg_n = (cg_n[::dec_fac] - asi.shape[1] / 2) * col_pixel_size
         asi_pts = asi_pts[::dec_fac]
-        rotated = rot.from_euler('z', -sdr.ash['flight']['flnHdg'] * DTR).apply(
+        rotated = rot.from_euler('z', heading).apply(
             np.array([cg_e, cg_n, np.ones_like(cg_e)]).T)
         lat, lon, alt = enu2llh(rotated[:, 0], rotated[:, 1], np.zeros_like(cg_n), ref_llh)
         e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)

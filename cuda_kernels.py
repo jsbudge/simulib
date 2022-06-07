@@ -22,6 +22,12 @@ def cpudiff(x, y):
 
 
 @cuda.jit(device=True)
+def raisedCosine(x, bw, a0):
+    xf = x / bw + .5
+    return a0 - (1 - a0) * math.cos(2 * np.pi * xf)
+
+
+@cuda.jit(device=True)
 def interp(x, y, tt, bg):
     # Simple 2d linear nearest neighbor interpolation
     x0 = int(x)
@@ -331,7 +337,6 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
     tri, tt = cuda.grid(ndim=2)
-    
     if tri < tri_vert_indices.shape[0] and tt < source_xyz.shape[1]:
         # Load in all the parameters that don't change
         n_samples = pd_r.shape[0]
@@ -341,7 +346,7 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
         tv2 = tri_vert_indices[tri, 1]
         tv3 = tri_vert_indices[tri, 2]
 
-        for n in range(pts_per_tri):
+        for _ in range(pts_per_tri):
             u = xoroshiro128p_uniform_float64(rng_states, tri)
             v = xoroshiro128p_uniform_float64(rng_states, tri)
             if u + v > 1:
@@ -366,8 +371,8 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
                 calc_pts[tri, 0] = tx
                 calc_pts[tri, 1] = ty
                 calc_pts[tri, 2] = tz
-                calc_angs[tri, 0] = math.acos(tz / rng)
-                calc_angs[tri, 1] = math.atan2(tx, ty)
+                calc_angs[tri, 0] = -math.asin(tz / rng)
+                calc_angs[tri, 1] = -math.atan2(tx, ty)
 
             # Calculate out the bounce angles
             rnorm = norm_x * tx / rng + norm_y * ty / rng + norm_z * tz / rng
@@ -383,21 +388,108 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
             ry = ty - receive_xyz[1, tt]
             rz = tz - receive_xyz[2, tt]
             r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
-            r_el = math.acos(rz / r_rng)
-            r_az = math.atan2(rx, ry)
+            r_el = -math.asin(rz / r_rng)
+            r_az = -math.atan2(rx, ry)
             two_way_rng = math.sqrt(tx * tx + ty * ty + tz * tz) + r_rng
             rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
             but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
             if n_samples > but > 0:
-                a = b_x * rx / r_rng + b_y * ry / r_rng + \
-                    b_z * rz / r_rng
-                sigma = .04 * scat_ref
-                reflectivity = scat_ref * a # math.exp(-math.pow((a * a / (2 * sigma)), scat_ref))
+                a = max(abs(b_x * rx / r_rng + b_y * ry / r_rng + \
+                    b_z * rz / r_rng), 1e-8)
+                reflectivity = a #math.log(a, scat_ref) / -math.log(1e-8, scat_ref) + 1
                 att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
                       1 / (two_way_rng * two_way_rng) * reflectivity * 1e2
                 acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_pow
                 cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
                 cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
+
+
+@cuda.jit
+def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, eltx, pulse_data, final_grid,
+                wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly):
+    px, py = cuda.grid(ndim=2)
+    if px < gx.shape[0] and py < gx.shape[1]:
+        # Load in all the parameters that don't change
+        acc_val = 0
+        nPulses = pulse_data.shape[1]
+        n_samples = pulse_data.shape[0]
+        k = 2 * np.pi / wavelength
+
+        # Grab pulse data and sum up for this pixel
+        for tt in range(nPulses):
+            cp = pulse_data[:, tt]
+            # Get LOS vector in XYZ and spherical coordinates at pulse time
+            # Tx first
+            tx = gx[px, py] - source_xyz[0, tt]
+            ty = gy[px, py] - source_xyz[1, tt]
+            tz = gz[px, py] - source_xyz[2, tt]
+            tx_rng = math.sqrt(tx * tx + ty * ty + tz * tz)
+
+            # Rx
+            rx = gx[px, py] - receive_xyz[0, tt]
+            ry = gy[px, py] - receive_xyz[1, tt]
+            rz = gz[px, py] - receive_xyz[2, tt]
+            rx_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
+            r_el = -math.asin(rz / rx_rng)
+            r_az = -math.atan2(rx, ry)
+
+            # Check to see if it's outside of our beam
+            if (abs(diff(r_az, panrx[tt])) > bw_az) or (abs(diff(r_el, elrx[tt])) > bw_el):
+                continue
+
+            # Get index into range compressed data
+            two_way_rng = tx_rng + rx_rng
+            rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+            but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+            if but > n_samples:
+                continue
+
+            # Attenuation of beam in elevation and azimuth
+            att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
+                  1 / (two_way_rng * two_way_rng)
+
+            # Azimuth window to reduce sidelobes
+            # Gaussian window
+            # az_win = math.exp(-azdiff*azdiff/(2*.001))
+            # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
+            az_win = raisedCosine(diff(pantx[tt], r_az), signal_bw, .5)
+            # az_win = 1
+
+            if rbins[but - 1] < tx_rng < rbins[but]:
+                bi0 = but - 1
+                bi1 = but
+            else:
+                bi0 = but
+                bi1 = but + 1
+            if poly == 0:
+                # This is how APS does it (for reference, I guess)
+                a = cp[bi1]
+            elif poly == 1:
+                # Linear interpolation between bins (slower but more accurate)
+                a = (cp[bi0] * (rbins[bi1] - tx_rng) + cp[bi1] * (tx_rng - rbins[bi0])) \
+                    / (rbins[bi1] - rbins[bi0])
+            else:
+                # This is a lagrange polynomial interpolation of the specified order
+                a = 0
+                k = poly + 1
+                ks = bi0 - (k - (k % 2)) / 2
+                while ks < 0:
+                    ks += 1
+                ke = ks + k
+                while ke > n_samples:
+                    ke -= 1
+                    ks -= 1
+                for idx in range(ks, ke):
+                    mm = 1
+                    for jdx in range(ke - ks):
+                        if jdx != idx - ks:
+                            mm *= (tx_rng - rbins[jdx]) / (rbins[idx] - rbins[jdx])
+                    a += mm * cp[idx]
+
+                    # Multiply by phase reference function, attenuation and azimuth window
+            exp_phase = k * two_way_rng
+            acc_val += a * cmath.exp(1j * exp_phase) * att * az_win
+        final_grid[px, py] = acc_val
 
 
 @njit

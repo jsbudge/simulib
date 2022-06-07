@@ -104,7 +104,7 @@ def getEllipseParams(pts):
     cdata = pts - center[None, :]
     ev, trans = np.linalg.eig(cdata.T.dot(cdata))
     axes = np.std(2 * np.linalg.pinv(trans).dot(cdata.T), axis=1)
-    return center[0], center[1], axes[0], axes[1], np.arccos(trans[0, 0])
+    return center[0], center[1], axes[0] * 3, axes[1] * 3, np.arccos(trans[0, 0])
 
 
 def genEllipsePoints(pos, az, el=None):
@@ -151,7 +151,7 @@ argp.add_argument('-buf', nargs='?', default='1024')
 argp.add_argument('-avbuf', nargs='?', default='1024')
 argp.add_argument('-test', nargs='?', default='true')
 argp.add_argument('-save', nargs='?', default='true')
-argp.add_argument('-lob', nargs='?', default='15')
+argp.add_argument('-lob', nargs='?', default='10')
 
 
 # Read in arguments for ports and IP addresses, use defaults if none given
@@ -191,11 +191,11 @@ conn_sock, conn_addr = atlas_socket.accept()
 print(f'Atlas socket connected on {conn_addr[0]}' + f':{conn_addr[1]}')
 atlas_socket.settimeout(20)
 
-# Packet data
-data = np.zeros((av_buffer, 6))
-
 lob = []
 calced_els = np.zeros((lob_limit,)) + 45 * DTR
+target_data = {}
+target_buf = {}
+target_els = {}
 init_llh = None
 
 if not check_stream:
@@ -231,30 +231,36 @@ if not check_stream:
                 init_llh = (lat, lon, alt)
 
             if az_ang != -400:
-                data[buf_idx, :] = [lat, lon, alt, az_ang, el_ang, gps_sec]
-                buf_idx += 1
+                if fc in target_data:
+                    target_data[fc][buf_idx, :] = [lat, lon, alt, az_ang, el_ang, gps_sec]
+                else:
+                    target_data[fc] = np.zeros((av_buffer, 6))
+                    target_buf[fc] = 0
+                    target_data[fc][buf_idx, :] = [lat, lon, alt, az_ang, el_ang, gps_sec]
+                    target_els[fc] = np.zeros((lob_limit,)) + 45 * DTR
+                target_buf[fc] += 1
 
-            if buf_idx == av_buffer:
-                buf_idx = 0
-                lob.append(data.mean(axis=0))
-                lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), fc, lob[-1][0], lob[-1][1], lob[-1][2],
-                                  lob[-1][3])
-                if save_file:
-                    new_tsdf += lob_str
-                conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
-                print('LOB sent.')
-                if len(lob) > 3:
-                    lb_dat = np.array(lob)
-                    ps, calc_el = genEllipsePoints(lb_dat[:, :3], lb_dat[:, 3], calced_els[:len(lob)])
-                    calced_els[:len(lob)] = calc_el
-                    ell_params = getEllipseParams(ps)
-                    ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
-                    ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0], ell_center[1],
-                                          ell_center[2], ell_params[2], ell_params[3], ell_params[4])
+                if target_buf[fc] == av_buffer:
+                    target_buf[fc] = 0
+                    lob.append(target_data[fc].mean(axis=0))
+                    lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), fc, lob[-1][0], lob[-1][1], lob[-1][2],
+                                      lob[-1][3])
                     if save_file:
-                        new_tsdf += ell_str
-                    conn_sock.sendto(bytes(ell_str, 'utf-8'), conn_addr)
-                    print('Ellipse sent.')
+                        new_tsdf += lob_str
+                    conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
+                    print('LOB sent.')
+                    if len(lob) > 3:
+                        lb_dat = np.array(lob)
+                        ps, calc_el = genEllipsePoints(lb_dat[:, :3], lb_dat[:, 3], target_els[fc][:len(lob)])
+                        target_els[fc][:len(lob)] = calc_el
+                        ell_params = getEllipseParams(ps)
+                        ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
+                        ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0], ell_center[1],
+                                              ell_center[2], ell_params[2], ell_params[3], ell_params[4])
+                        if save_file:
+                            new_tsdf += ell_str
+                        conn_sock.sendto(bytes(ell_str, 'utf-8'), conn_addr)
+                        print('Ellipse sent.')
         except socket.timeout:
             print('DF socket timeout.')
             df_socket.close()
@@ -293,10 +299,9 @@ else:
         rng_mean = rng.mean()
         el = -np.arcsin((truth[2] - u) / rng) + np.random.normal(0, mse_max, e.shape)
         truth_el = -np.arcsin((truth[2] - u) / rng)
-        use_el = np.zeros(max_num_lobs) + 45 * DTR
         for num_lobs in tqdm(range(3, max_num_lobs)):
-            ps, calc_el = genEllipsePoints(pos[:, :num_lobs], az[:num_lobs], el=use_el[:num_lobs])
-            use_el[:num_lobs] = calc_el
+            ps, calc_el = genEllipsePoints(pos[:, :num_lobs], az[:num_lobs], el=calced_els[:num_lobs])
+            calced_els[:num_lobs] = calc_el
             errors = np.linalg.norm(truth[None, :] - ps, axis=1)
             for lob in range(num_lobs):
                 lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), 9e8, lat[lob], lon[lob],

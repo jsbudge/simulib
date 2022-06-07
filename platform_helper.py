@@ -69,8 +69,8 @@ class RadarPlatform(Platform):
         self.fs = fs
 
     def calcRanges(self, height):
-        nrange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang + self.el_half_bw - np.pi / 2)
-        frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw - np.pi / 2)
+        nrange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw)
+        frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang + self.el_half_bw)
         return nrange, frange
 
     def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
@@ -95,8 +95,9 @@ class RadarPlatform(Platform):
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr_file, origin=None, ant_offsets=None, fs=2e9):
+    def __init__(self, sdr_file, origin=None, ant_offsets=None, fs=None):
         sdr = SDRParse(sdr_file)
+        fs = fs if fs is not None else sdr[0].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[:, 0])
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
         if ant_offsets is None:
