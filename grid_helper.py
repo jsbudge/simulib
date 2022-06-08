@@ -4,6 +4,8 @@ from simulation_functions import getMapLocation, createMeshFromPoints, getElevat
 import open3d as o3d
 from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
+from scipy.interpolate import RectBivariateSpline
+from scipy.signal import medfilt2d
 
 
 fs = 2e9
@@ -30,17 +32,17 @@ class Environment(object):
             refs = reflectivity if reflectivity is not None else np.ones((pts.shape[0],))
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(pts)
-            pcd.colors = o3d.utility.Vector3dVector(np.array([refs, scats, np.zeros_like(scats)]).T)
+            pcd.colors = o3d.utility.Vector3dVector(np.array([refs, scats, refs]).T)
             self._refscale = refscale
             self._scatscale = scatscale
 
             # Downsample if possible to reduce number of triangles
-            pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()) / 1.5)
-            its = 0
+            # pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
+            '''its = 0
             while np.std(pcd.compute_nearest_neighbor_distance()) > 2. and its < 30:
                 dists = pcd.compute_nearest_neighbor_distance()
                 pcd = pcd.voxel_down_sample(voxel_size=np.mean(dists) / 1.5)
-                its += 1
+                its += 1'''
 
             avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
             radius = 3 * avg_dist
@@ -63,7 +65,7 @@ class Environment(object):
             self._mesh = rec_mesh
             self._pcd = pcd
 
-    def setScatteringCoeffs(self, coef, scale=1):
+    def setScatteringCoeffs(self, coef, scale=10):
         if coef.shape[0] != self.vertices.shape[0]:
             raise RuntimeError('Scattering coefficients must be the same size as vertex points')
         old_stuff = np.asarray(self._pcd.colors)
@@ -71,11 +73,12 @@ class Environment(object):
         self._pcd.colors = o3d.utility.Vector3dVector(old_stuff)
         self._scatscale = scale
 
-    def setReflectivityCoeffs(self, coef):
+    def setReflectivityCoeffs(self, coef, scale=10):
         if coef.shape[0] != self.vertices.shape[0]:
             raise RuntimeError('Reflectivity coefficients must be the same size as vertex points')
         old_stuff = np.asarray(self._pcd.colors)
         old_stuff[:, 0] = coef
+        old_stuff[:, 2] = coef
         self._pcd.colors = o3d.utility.Vector3dVector(old_stuff)
         self._refscale = scale
 
@@ -122,7 +125,8 @@ class SDREnvironment(Environment):
 
     def __init__(self, sdr_file, num_vertices=400000):
         # Load in the SDR file
-        sdr = SDRParse(sdr_file)
+        sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
+        print('SDR loaded')
         try:
             asi = sdr.loadASI(sdr.files['asi'])
         except KeyError:
@@ -150,20 +154,33 @@ class SDREnvironment(Environment):
             heading = -sdr.ash['flight']['flnHdg'] * DTR
 
         self.origin = ref_llh
-        cg_e, cg_n = np.meshgrid(np.arange(asi.shape[0]), np.arange(asi.shape[1]))
-        cg_e = cg_e.flatten()
-        cg_n = cg_n.flatten()
-        asi_pts = abs(asi[cg_e, cg_n])
-        # Set this so that we only get ~num_vertices points in the mesh
-        dec_fac = int(asi.shape[0] * asi.shape[1] / num_vertices)
-        cg_e = (cg_e[::dec_fac] - asi.shape[0] / 2) * row_pixel_size
-        cg_n = (cg_n[::dec_fac] - asi.shape[1] / 2) * col_pixel_size
-        asi_pts = asi_pts[::dec_fac]
-        rotated = rot.from_euler('z', heading).apply(
-            np.array([cg_e, cg_n, np.ones_like(cg_e)]).T)
-        lat, lon, alt = enu2llh(rotated[:, 0], rotated[:, 1], np.zeros_like(cg_n), ref_llh)
-        e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)
+        grid = abs(asi)
+        ig = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), grid)
+        '''gxx, gyy = np.gradient(medfilt2d(grid, 15))
+        ggrid = abs(gxx + gyy)
+        ggrid = ggrid - ggrid.min()
+        ggrid = ggrid / ggrid.max()
+        pdf = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), ggrid)'''
+        ptx = np.random.uniform(0, grid.shape[0] - 1, num_vertices)
+        pty = np.random.uniform(0, grid.shape[1] - 1, num_vertices)
 
+        '''resample = np.random.rand(len(ptx)) > pdf(ptx, pty, grid=False)
+        its = 0
+        while sum(resample) > 0 and its < 50:
+            ptx[resample] = np.random.uniform(0, grid.shape[0] - 1, sum(resample))
+            pty[resample] = np.random.uniform(0, grid.shape[1] - 1, sum(resample))
+            resample[resample] = np.random.rand(sum(resample)) > pdf(ptx[resample], pty[resample], grid=False)
+            its += 1'''
+        asi_pts = ig(ptx, pty, grid=False)
+        ptx -= grid.shape[0] / 2
+        pty -= grid.shape[1] / 2
+        ptx *= row_pixel_size
+        pty *= col_pixel_size
+        rotated = rot.from_euler('z', heading).apply(
+            np.array([ptx, pty, np.ones_like(ptx)]).T)
+        lat, lon, alt = enu2llh(rotated[:, 0], rotated[:, 1], np.zeros_like(ptx), ref_llh)
+        e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)
+        print('resampled')
         # Get the point cloud information
         asi_max = asi_pts.max()
         super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=asi_pts / asi_max,

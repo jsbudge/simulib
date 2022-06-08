@@ -14,6 +14,7 @@ from scipy.signal.windows import taylor
 import plotly.express as px
 import plotly.io as pio
 from tqdm import tqdm
+from SDRParsing import SDRParse
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -26,30 +27,35 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_130706.sar'
 upsample = 1
-cpi_len = 64
+cpi_len = 128
 plp = .5
-pts_per_tri = 2
+pts_per_tri = 3
 debug = False
 nbpj_pts = 300
 
+print('Loading SDR file...')
+sdr = SDRParse(bg_file)
+
 # Generate the background for simulation
 print('Generating environment...', end='')
-bg = SDREnvironment(bg_file, num_vertices=500000)
+bg = SDREnvironment(sdr, num_vertices=200000)
 
 # Grab vertices and such
 vertices = bg.vertices
 triangles = bg.triangles
 normals = bg.normals
+isCircle = np.linalg.norm(vertices[:, :2], axis=1) < 400
+bg.setReflectivityCoeffs(isCircle * 10000, 10000)
 print('Done.')
 
 # Generate a platform
 print('Generating platform...', end='')
-rp = SDRPlatform(bg_file, bg.origin)
+rp = SDRPlatform(sdr, bg.origin)
 
 # Get reference data
 flight = rp.pos(rp.gpst)
-fc = rp._sdr[0].fc
-bwidth = rp._sdr[0].bw
+fc = sdr[0].fc
+bwidth =sdr[0].bw
 pan = CubicSpline(rp.gpst, rp.heading(rp.gpst) + np.pi / 2)
 el = lambda x: np.zeros(len(x)) + rp.dep_ang
 print('Done.')
@@ -85,7 +91,7 @@ ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
-gx, gy = np.meshgrid(np.linspace(-100, 100, nbpj_pts), np.linspace(-100, 100, nbpj_pts))
+gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
 gz = np.zeros_like(gx)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
@@ -133,7 +139,8 @@ for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_l
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
     rtdata = cupy.fft.ifft(upsample_data * chirp_gpu * mfilt_gpu, axis=0)[:nsam * upsample, :]
-    test = rtdata.get()
+    if ts[0] < rp.gpst.mean():
+        test = rtdata.get()
     cupy.cuda.Device().synchronize()
 
     backproject[bpg_bpj, threads_per_block](posrx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu, elrx_gpu,
@@ -157,10 +164,9 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-dfig = px.scatter_3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2])
+dfig = px.scatter_3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], color=bg.ref_coefs)
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 dfig.show()
 
-plt.figure()
-plt.imshow(db(bpj_res))
-plt.show()
+bfig = px.imshow(db(bpj_res))
+bfig.show()

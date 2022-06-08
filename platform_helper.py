@@ -96,7 +96,7 @@ class SDRPlatform(RadarPlatform):
     _sdr = None
 
     def __init__(self, sdr_file, origin=None, ant_offsets=None, fs=None):
-        sdr = SDRParse(sdr_file)
+        sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         fs = fs if fs is not None else sdr[0].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[:, 0])
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
