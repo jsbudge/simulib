@@ -155,14 +155,18 @@ class SDREnvironment(Environment):
 
         self.origin = ref_llh
         grid = abs(asi)
-        ig = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), grid)
-        '''gxx, gyy = np.gradient(medfilt2d(grid, 15))
+        # ig = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), grid)
+        gxx, gyy = np.gradient(medfilt2d(grid, 15))
         ggrid = abs(gxx + gyy)
         ggrid = ggrid - ggrid.min()
         ggrid = ggrid / ggrid.max()
-        pdf = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), ggrid)'''
-        ptx = np.random.uniform(0, grid.shape[0] - 1, num_vertices)
-        pty = np.random.uniform(0, grid.shape[1] - 1, num_vertices)
+        # pdf = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), ggrid)
+        # ptx = np.random.uniform(0, grid.shape[0] - 1, num_vertices)
+        # pty = np.random.uniform(0, grid.shape[1] - 1, num_vertices)
+        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
+        ptx = ptx.flatten()
+        pty = pty.flatten()
+        asi_pts = grid[ptx, pty]
 
         '''resample = np.random.rand(len(ptx)) > pdf(ptx, pty, grid=False)
         its = 0
@@ -171,9 +175,9 @@ class SDREnvironment(Environment):
             pty[resample] = np.random.uniform(0, grid.shape[1] - 1, sum(resample))
             resample[resample] = np.random.rand(sum(resample)) > pdf(ptx[resample], pty[resample], grid=False)
             its += 1'''
-        asi_pts = ig(ptx, pty, grid=False)
-        ptx -= grid.shape[0] / 2
-        pty -= grid.shape[1] / 2
+        # asi_pts = ig(ptx, pty, grid=False)
+        ptx = ptx - grid.shape[0] / 2
+        pty = pty - grid.shape[1] / 2
         ptx *= row_pixel_size
         pty *= col_pixel_size
         rotated = rot.from_euler('z', heading).apply(

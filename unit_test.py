@@ -29,8 +29,8 @@ bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_130706.sar'
 upsample = 1
 cpi_len = 128
 plp = .5
-pts_per_tri = 3
-debug = False
+pts_per_tri = 1
+debug = True
 nbpj_pts = 300
 
 print('Loading SDR file...')
@@ -44,7 +44,7 @@ bg = SDREnvironment(sdr, num_vertices=200000)
 vertices = bg.vertices
 triangles = bg.triangles
 normals = bg.normals
-isCircle = np.linalg.norm(vertices[:, :2], axis=1) < 400
+isCircle = np.linalg.norm(vertices[:, :2], axis=1) < 3
 bg.setReflectivityCoeffs(isCircle * 10000, 10000)
 print('Done.')
 
@@ -55,7 +55,7 @@ rp = SDRPlatform(sdr, bg.origin)
 # Get reference data
 flight = rp.pos(rp.gpst)
 fc = sdr[0].fc
-bwidth =sdr[0].bw
+bwidth = sdr[0].bw
 pan = CubicSpline(rp.gpst, rp.heading(rp.gpst) + np.pi / 2)
 el = lambda x: np.zeros(len(x)) + rp.dep_ang
 print('Done.')
@@ -63,7 +63,8 @@ print('Done.')
 # Generate a backprojected image
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
-plat_height = rp.pos(rp.gpst)[2, :].mean()
+# plat_height = rp.pos(rp.gpst)[2, :].mean()
+plat_height = 4
 nr = rp.calcPulseLength(plat_height, plp, use_tac=True)
 nsam = rp.calcNumSamples(plat_height, plp)
 ranges = rp.calcRangeBins(plat_height, upsample, plp)
@@ -117,12 +118,14 @@ bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 data_t = np.interp(np.linspace(0, len(rp.gpst), int((rp.gpst[-1] - rp.gpst[0]) * 1705.)),
                    np.arange(len(rp.gpst)), rp.gpst)
 print('Simulating...')
+pulse_pos = 0
 for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)]):
+    tmp_len = len(ts)
     panrx_gpu = cupy.array(pan(ts), dtype=np.float64)
     elrx_gpu = cupy.array(el(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.pos(ts), dtype=np.float64)
-    data_r = cupy.zeros((nsam, cpi_len), dtype=np.float64)
-    data_i = cupy.zeros((nsam, cpi_len), dtype=np.float64)
+    data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
+    data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](rng_states, tri_vert_indices, vert_xyz, vert_norms,
                                                                     scattering_coef, ref_coef_gpu,
@@ -135,13 +138,20 @@ for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_l
 
     cupy.cuda.Device().synchronize()
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0)
-    upsample_data = cupy.zeros((up_fft_len, cpi_len), dtype=np.complex128)
+    upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    rtdata = cupy.fft.ifft(upsample_data * chirp_gpu * mfilt_gpu, axis=0)[:nsam * upsample, :]
-    if ts[0] < rp.gpst.mean():
-        test = rtdata.get()
+    rtdata = cupy.fft.ifft(upsample_data * chirp_gpu[:, :tmp_len] *
+                           mfilt_gpu[:, :tmp_len], axis=0)[:nsam * upsample, :] + \
+             cupy.random.normal(0, 1e-6, (nsam * upsample, tmp_len)) + 1j * \
+             cupy.random.normal(0, 1e-6, (nsam * upsample, tmp_len))
     cupy.cuda.Device().synchronize()
+    # rtdata = cupy.array(sdr.getPulses(np.arange(pulse_pos, pulse_pos + len(ts)), 0), dtype=np.complex128)
+    if ts[0] < rp.gpst.mean():
+        locp = rp.pos(ts[0])
+        test = rtdata.get()
+        angd = angs_debug.get()
+        locd = pts_debug.get()
 
     backproject[bpg_bpj, threads_per_block](posrx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu, elrx_gpu,
                                             panrx_gpu, elrx_gpu, rtdata, bpj_grid,
@@ -170,3 +180,6 @@ dfig.show()
 
 bfig = px.imshow(db(bpj_res))
 bfig.show()
+
+tfig = px.imshow(db(np.fft.fft(test, axis=1)), aspect='auto')
+tfig.show()

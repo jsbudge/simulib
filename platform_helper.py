@@ -108,3 +108,19 @@ class SDRPlatform(RadarPlatform):
                          el_bw=sdr.ant[0].el_bw / DTR, fs=fs)
         self._sdr = sdr
         self.origin = origin
+
+    def calcRanges(self, fdelay):
+        nrange = ((self._sdr[0].transmit_off_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC) * c0 / 2
+        frange = nrange + self._sdr[0].nsam * c0 / 2 / self.fs
+        return nrange, frange
+
+    def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
+        return self._sdr[0].pulse_length_N if use_tac else self._sdr[0].pulse_length_S
+
+    def calcNumSamples(self, height, plp=1.):
+        return self._sdr[0].nsam
+
+    def calcRangeBins(self, height, upsample=1, plp=1.):
+        nrange, frange = self.calcRanges(height)
+        MPP = c0 / self.fs / 2
+        return nrange + np.arange(self.calcNumSamples(height, plp)) * MPP

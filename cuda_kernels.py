@@ -381,12 +381,17 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
             b_z = -(2 * rnorm * norm_z - tz / rng)
 
             # Calc power multiplier based on range, reflectivity
-            scat_ref = vert_reflectivity[tv1] * u + vert_reflectivity[tv2] * v + vert_reflectivity[tv3] * w
+            if u < v and u < w:
+                scat_ref = vert_reflectivity[tv1]
+            elif v < u and v < w:
+                scat_ref = vert_reflectivity[tv2]
+            else:
+                scat_ref = vert_reflectivity[tv3]
             scat_sig = vert_scattering[tv1] * u + vert_scattering[tv2] * v + vert_scattering[tv3] * w
 
-            rx = tx - receive_xyz[0, tt]
-            ry = ty - receive_xyz[1, tt]
-            rz = tz - receive_xyz[2, tt]
+            rx = bar_x - receive_xyz[0, tt]
+            ry = bar_y - receive_xyz[1, tt]
+            rz = bar_z - receive_xyz[2, tt]
             r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
             r_el = -math.asin(rz / r_rng)
             r_az = -math.atan2(rx, ry)
@@ -396,10 +401,9 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
             if n_samples > but > 0:
                 a = abs(b_x * rx / r_rng + b_y * ry / r_rng + \
                     b_z * rz / r_rng)
-                a = a if a > 1e-8 else 1e-8
-                reflectivity = math.log10(a) / -math.log10(1e-8) + 1.
+                reflectivity = 1. #math.pow((scat_sig / -a + scat_sig) / 20, 10)
                 att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
-                      1 / (two_way_rng * two_way_rng) * reflectivity * 1e2
+                    1 / (two_way_rng * two_way_rng) * reflectivity
                 acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_ref
                 cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
                 cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
