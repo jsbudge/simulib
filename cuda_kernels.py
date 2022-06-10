@@ -332,7 +332,7 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             
             
 @cuda.jit
-def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_norms, vert_scattering, vert_reflectivity,
+def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_scattering, vert_reflectivity,
                                 source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, calc_pts, calc_angs,
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
@@ -347,11 +347,10 @@ def genRangeWithoutIntersection(rng_states, tri_vert_indices, vert_xyz, vert_nor
         tv3 = tri_vert_indices[tri, 2]
 
         for _ in range(pts_per_tri):
-            u = xoroshiro128p_uniform_float64(rng_states, tri)
-            v = xoroshiro128p_uniform_float64(rng_states, tri)
+            u = tri / vert_xyz.shape[0]
+            v = 1 - tri / vert_xyz.shape[0]
             if u + v > 1:
-                u /= 2
-                v /= 2
+                u = 1 - v
             w = 1 - (u + v)
             # Get barycentric coordinates for bounce points
             bar_x = vert_xyz[tv1, 0] * u + vert_xyz[tv2, 0] * v + vert_xyz[tv3, 0] * w

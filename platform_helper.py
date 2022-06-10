@@ -2,6 +2,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from SDRParsing import SDRParse
 from simulation_functions import llh2enu
+from scipy.spatial.transform import Rotation as rot
 
 c0 = 299792458.0
 TAC = 125e6
@@ -90,6 +91,12 @@ class RadarPlatform(Platform):
                     np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
         MPP = c0 / self.fs / upsample / 2
         return nrange + np.arange(nsam * upsample) * MPP + c0 / self.fs
+
+    def intoBodyFrame(self, pt, t):
+        return rot.from_euler('zxy', self._att(t)).apply(pt)
+
+    def fromBodyFrame(self, pt, t):
+        return rot.from_euler('zxy', self._att(t)).inv().apply(pt)
 
 
 class SDRPlatform(RadarPlatform):

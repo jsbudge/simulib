@@ -29,23 +29,24 @@ bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_130706.sar'
 upsample = 1
 cpi_len = 128
 plp = .5
-pts_per_tri = 1
+pts_per_tri = 4
 debug = True
-nbpj_pts = 300
+nbpj_pts = 700
 
 print('Loading SDR file...')
 sdr = SDRParse(bg_file)
 
 # Generate the background for simulation
 print('Generating environment...', end='')
+# bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
 bg = SDREnvironment(sdr, num_vertices=200000)
 
 # Grab vertices and such
 vertices = bg.vertices
 triangles = bg.triangles
 normals = bg.normals
-isCircle = np.linalg.norm(vertices[:, :2], axis=1) < 3
-bg.setReflectivityCoeffs(isCircle * 10000, 10000)
+# isCircle = np.linalg.norm(vertices[:, :2], axis=1) == np.linalg.norm(vertices[:, :2], axis=1).min()
+# bg.setReflectivityCoeffs(isCircle * 10000, 10000)
 print('Done.')
 
 # Generate a platform
@@ -76,7 +77,7 @@ taytay = taylor(up_fft_len)
 tayd = np.fft.fftshift(taylor(cpi_len))
 taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
 chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
-                            bwidth), up_fft_len)
+                            bwidth) * 1e4, up_fft_len)
 mfilt = chirp.conj()
 mfilt[:up_fft_len // 2] *= taytay[up_fft_len // 2:]
 mfilt[up_fft_len // 2:] *= taytay[:up_fft_len // 2]
@@ -109,7 +110,7 @@ else:
 threads_per_block = getMaxThreads()
 bpg_ranges = (max(1, triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
 bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
-rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_ranges[0], seed=10)
+# rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
 
 # Data blocks for imaging
 bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
@@ -121,13 +122,14 @@ print('Simulating...')
 pulse_pos = 0
 for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)]):
     tmp_len = len(ts)
+    att = rp.att(ts)
     panrx_gpu = cupy.array(pan(ts), dtype=np.float64)
     elrx_gpu = cupy.array(el(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.pos(ts), dtype=np.float64)
     data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
-    genRangeWithoutIntersection[bpg_ranges, threads_per_block](rng_states, tri_vert_indices, vert_xyz, vert_norms,
+    genRangeWithoutIntersection[bpg_ranges, threads_per_block](tri_vert_indices, vert_xyz, vert_norms,
                                                                     scattering_coef, ref_coef_gpu,
                                                                     posrx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                     panrx_gpu,
@@ -138,13 +140,11 @@ for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_l
 
     cupy.cuda.Device().synchronize()
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0)
-    upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
-    upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
-    upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    rtdata = cupy.fft.ifft(upsample_data * chirp_gpu[:, :tmp_len] *
-                           mfilt_gpu[:, :tmp_len], axis=0)[:nsam * upsample, :] + \
-             cupy.random.normal(0, 1e-6, (nsam * upsample, tmp_len)) + 1j * \
-             cupy.random.normal(0, 1e-6, (nsam * upsample, tmp_len))
+    # upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
+    # upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
+    # upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
+    rtdata = cupy.fft.ifft(rtdata * chirp_gpu[:, :tmp_len] *
+                           mfilt_gpu[:, :tmp_len], axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
     # rtdata = cupy.array(sdr.getPulses(np.arange(pulse_pos, pulse_pos + len(ts)), 0), dtype=np.complex128)
     if ts[0] < rp.gpst.mean():
@@ -166,7 +166,7 @@ for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_l
     del data_r
     del data_i
     del rtdata
-    del upsample_data
+    # del upsample_data
     del bpj_grid
 
 del rbins_gpu

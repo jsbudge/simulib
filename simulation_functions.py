@@ -2,6 +2,8 @@ import numpy as np
 from osgeo import gdal
 from scipy.interpolate import RectBivariateSpline
 from scipy.spatial.transform import Rotation as rot
+import scipy.ndimage.filters as filters
+import scipy.ndimage.morphology as morphology
 import open3d as o3d
 import plotly.io as pio
 import plotly.graph_objects as go
@@ -25,6 +27,17 @@ def getDTEDName(lat, lon):
         return 'Z:\\dted\\%s%03d\\%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
     else:
         return '/data5/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+
+
+def detect_local_extrema(arr):
+    neighborhood = morphology.generate_binary_structure(len(arr.shape), 2)
+    local_min = filters.minimum_filter(arr, footprint=neighborhood) == arr
+    # local_max = filters.maximum_filter(arr, footprint=neighborhood) == arr
+    background = arr == 0
+    eroded_background = morphology.binary_erosion(
+        background, structure=neighborhood, border_value=1)
+    detected_extrema = local_min ^ eroded_background # + local_max ^ eroded_background
+    return np.where(detected_extrema)
 
 
 def db(x):

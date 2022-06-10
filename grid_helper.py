@@ -1,6 +1,6 @@
 import numpy as np
 from simulation_functions import getMapLocation, createMeshFromPoints, getElevationMap, rotate, llh2enu, genPulse, \
-    enu2llh, getElevation
+    enu2llh, getElevation, detect_local_extrema
 import open3d as o3d
 from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
@@ -44,9 +44,9 @@ class Environment(object):
                 pcd = pcd.voxel_down_sample(voxel_size=np.mean(dists) / 1.5)
                 its += 1'''
 
-            avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
+            '''avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
             radius = 3 * avg_dist
-            radii = [radius, radius * 2]
+            radii = [radius, radius * 2]'''
             pcd.estimate_normals()
             try:
                 pcd.orient_normals_consistent_tangent_plane(100)
@@ -54,9 +54,9 @@ class Environment(object):
                 pass
 
             # Generate mesh
-            rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                pcd, o3d.utility.DoubleVector(radii))
-            # rec_mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+            # rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+            #     pcd, o3d.utility.DoubleVector(radii))
+            rec_mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
 
             rec_mesh.remove_duplicated_vertices()
             rec_mesh.remove_duplicated_triangles()
@@ -108,16 +108,17 @@ class Environment(object):
 
 class MapEnvironment(Environment):
 
-    def __init__(self, origin, ref_llh, extent, npts_background=500, resample=False):
+    def __init__(self, origin, extent, npts_background=500, resample=False):
         lats = np.linspace(origin[0] - extent[0] / 2 / 111111, origin[0] + extent[0] / 2 / 111111, npts_background)
         lons = np.linspace(origin[1] - extent[1] / 2 / 111111, origin[1] + extent[1] / 2 / 111111, npts_background)
         lt, ln = np.meshgrid(lats, lons)
         ltp = lt.flatten()
         lnp = ln.flatten()
-        e, n, u = llh2enu(ltp, lnp, getElevationMap(ltp, lnp), ref_llh)
+        e, n, u = llh2enu(ltp, lnp, getElevationMap(ltp, lnp), origin)
         if resample:
             nlat, nlon, nh = resampleGrid(u.reshape(lt.shape), lats, lons, int(len(u) * .8))
-            e, n, u = llh2enu(nlat, nlon, nh + ref_llh[2], ref_llh)
+            e, n, u = llh2enu(nlat, nlon, nh + origin[2], origin)
+        self.origin = origin
         super().__init__(np.array([e, n, u]).T)
 
 
@@ -155,17 +156,11 @@ class SDREnvironment(Environment):
 
         self.origin = ref_llh
         grid = abs(asi)
-        # ig = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), grid)
-        gxx, gyy = np.gradient(medfilt2d(grid, 15))
-        ggrid = abs(gxx + gyy)
-        ggrid = ggrid - ggrid.min()
-        ggrid = ggrid / ggrid.max()
-        # pdf = RectBivariateSpline(np.arange(grid.shape[0]), np.arange(grid.shape[1]), ggrid)
-        # ptx = np.random.uniform(0, grid.shape[0] - 1, num_vertices)
-        # pty = np.random.uniform(0, grid.shape[1] - 1, num_vertices)
-        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
-        ptx = ptx.flatten()
-        pty = pty.flatten()
+        grid = medfilt2d(grid, 21)
+        ptx, pty = detect_local_extrema(grid)
+        # ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
+        # ptx = ptx.flatten()
+        # pty = pty.flatten()
         asi_pts = grid[ptx, pty]
 
         '''resample = np.random.rand(len(ptx)) > pdf(ptx, pty, grid=False)
