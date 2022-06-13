@@ -1,5 +1,5 @@
 import numpy as np
-from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap
+from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap, enu2llh
 from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
@@ -29,7 +29,7 @@ bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_130706.sar'
 upsample = 1
 cpi_len = 128
 plp = .5
-pts_per_tri = 4
+pts_per_tri = 1
 debug = True
 nbpj_pts = 700
 
@@ -57,7 +57,7 @@ rp = SDRPlatform(sdr, bg.origin)
 flight = rp.pos(rp.gpst)
 fc = sdr[0].fc
 bwidth = sdr[0].bw
-pan = CubicSpline(rp.gpst, rp.heading(rp.gpst) + np.pi / 2)
+pan = CubicSpline(rp.gpst, rp.heading(rp.gpst) - np.pi / 2)
 el = lambda x: np.zeros(len(x)) + rp.dep_ang
 print('Done.')
 
@@ -65,7 +65,7 @@ print('Done.')
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
-plat_height = 4
+plat_height = 0
 nr = rp.calcPulseLength(plat_height, plp, use_tac=True)
 nsam = rp.calcNumSamples(plat_height, plp)
 ranges = rp.calcRangeBins(plat_height, upsample, plp)
@@ -93,7 +93,7 @@ ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
-gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
+gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts) + 328.28, np.linspace(-150, 150, nbpj_pts) + 110.37)
 gz = np.zeros_like(gx)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
@@ -101,7 +101,7 @@ gz_gpu = cupy.array(gz, dtype=np.float64)
 
 if debug:
     pts_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
-    angs_debug = cupy.zeros((triangles.shape[0], 2), dtype=np.float64)
+    angs_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
 else:
     pts_debug = cupy.zeros((1, 1), dtype=np.float64)
     angs_debug = cupy.zeros((1, 1), dtype=np.float64)
@@ -116,13 +116,14 @@ bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per
 bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
 # Run through loop to get data simulated
-data_t = np.interp(np.linspace(0, len(rp.gpst), int((rp.gpst[-1] - rp.gpst[0]) * 1705.)),
+data_t = np.interp(np.linspace(0, len(rp.gpst),
+                               int((rp.gpst[-1] - rp.gpst[0]) * rp._sdr[0].nframes / (rp.gpst[-1] - rp.gpst[0]))),
                    np.arange(len(rp.gpst)), rp.gpst)
 print('Simulating...')
 pulse_pos = 0
 for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)]):
     tmp_len = len(ts)
-    att = rp.att(ts)
+    # att = rp.att(ts)
     panrx_gpu = cupy.array(pan(ts), dtype=np.float64)
     elrx_gpu = cupy.array(el(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.pos(ts), dtype=np.float64)
@@ -140,15 +141,15 @@ for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_l
 
     cupy.cuda.Device().synchronize()
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0)
-    # upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
-    # upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
-    # upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    rtdata = cupy.fft.ifft(rtdata * chirp_gpu[:, :tmp_len] *
+    upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
+    upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
+    upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
+    rtdata = cupy.fft.ifft(upsample_data * chirp_gpu[:, :tmp_len] *
                            mfilt_gpu[:, :tmp_len], axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
     # rtdata = cupy.array(sdr.getPulses(np.arange(pulse_pos, pulse_pos + len(ts)), 0), dtype=np.complex128)
-    if ts[0] < rp.gpst.mean():
-        locp = rp.pos(ts[0])
+    if ts[0] < rp.gpst.mean() <= ts[-1]:
+        locp = rp.pos(ts[-1])
         test = rtdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
@@ -166,7 +167,7 @@ for ts in tqdm([data_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_l
     del data_r
     del data_i
     del rtdata
-    # del upsample_data
+    del upsample_data
     del bpj_grid
 
 del rbins_gpu
@@ -183,3 +184,11 @@ bfig.show()
 
 tfig = px.imshow(db(np.fft.fft(test, axis=1)), aspect='auto')
 tfig.show()
+
+v1 = vertices[triangles[:, 0], :]
+v2 = vertices[triangles[:, 1], :]
+v3 = vertices[triangles[:, 2], :]
+
+tri_pts = v1 * .33 + v2 * .33 + v3 * .33
+dists = np.linalg.norm(tri_pts - np.array([328.28, 110.37, 23]), axis=1)
+closest = np.where(dists == dists.min())[0][0]

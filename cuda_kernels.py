@@ -347,8 +347,8 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
         tv3 = tri_vert_indices[tri, 2]
 
         for _ in range(pts_per_tri):
-            u = tri / vert_xyz.shape[0]
-            v = 1 - tri / vert_xyz.shape[0]
+            u = .33
+            v = .33
             if u + v > 1:
                 u = 1 - v
             w = 1 - (u + v)
@@ -371,7 +371,7 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
                 calc_pts[tri, 1] = ty
                 calc_pts[tri, 2] = tz
                 calc_angs[tri, 0] = -math.asin(tz / rng)
-                calc_angs[tri, 1] = -math.atan2(tx, ty)
+                calc_angs[tri, 1] = math.atan2(tx, ty)
 
             # Calculate out the bounce angles
             rnorm = norm_x * tx / rng + norm_y * ty / rng + norm_z * tz / rng
@@ -393,8 +393,8 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             rz = bar_z - receive_xyz[2, tt]
             r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
             r_el = -math.asin(rz / r_rng)
-            r_az = -math.atan2(rx, ry)
-            two_way_rng = math.sqrt(tx * tx + ty * ty + tz * tz) + r_rng
+            r_az = math.atan2(rx, ry)
+            two_way_rng = rng + r_rng
             rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
             but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
             if n_samples > but > 0:
@@ -403,6 +403,7 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
                 reflectivity = 1. #math.pow((scat_sig / -a + scat_sig) / 20, 10)
                 att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
                     1 / (two_way_rng * two_way_rng) * reflectivity
+                calc_angs[tri, 2] = att
                 acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_ref
                 cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
                 cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
@@ -435,7 +436,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             rz = gz[px, py] - receive_xyz[2, tt]
             rx_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
             r_el = -math.asin(rz / rx_rng)
-            r_az = -math.atan2(rx, ry)
+            r_az = math.atan2(rx, ry)
 
             # Check to see if it's outside of our beam
             if (abs(diff(r_az, panrx[tt])) > bw_az) or (abs(diff(r_el, elrx[tt])) > bw_el):
@@ -457,7 +458,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # az_win = math.exp(-azdiff*azdiff/(2*.001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
             az_win = raisedCosine(diff(pantx[tt], r_az), signal_bw, .5)
-            # az_win = 1
+            # az_win = 1.
 
             if rbins[but - 1] < tx_rng < rbins[but]:
                 bi0 = but - 1

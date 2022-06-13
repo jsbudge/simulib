@@ -149,7 +149,7 @@ argp.add_argument('-ip', nargs='?', default='2721')
 argp.add_argument('-op', nargs='?', default='54322')
 argp.add_argument('-buf', nargs='?', default='1024')
 argp.add_argument('-avbuf', nargs='?', default='1024')
-argp.add_argument('-test', nargs='?', default='true')
+argp.add_argument('-test', nargs='?', default='false')
 argp.add_argument('-save', nargs='?', default='true')
 argp.add_argument('-lob', nargs='?', default='10')
 

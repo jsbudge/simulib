@@ -37,7 +37,7 @@ class Environment(object):
             self._scatscale = scatscale
 
             # Downsample if possible to reduce number of triangles
-            # pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
+            pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
             '''its = 0
             while np.std(pcd.compute_nearest_neighbor_distance()) > 2. and its < 30:
                 dists = pcd.compute_nearest_neighbor_distance()
@@ -156,7 +156,7 @@ class SDREnvironment(Environment):
 
         self.origin = ref_llh
         grid = abs(asi)
-        grid = medfilt2d(grid, 21)
+        grid = medfilt2d(grid, 35)
         ptx, pty = detect_local_extrema(grid)
         # ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
         # ptx = ptx.flatten()
