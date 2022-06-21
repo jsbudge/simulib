@@ -5,13 +5,14 @@ import sys
 import argparse
 from lxml import etree
 from datetime import datetime, timedelta, tzinfo, timezone
-from simulation_functions import llh2enu, azelToVec, getElevation, enu2llh
+from simulation_functions import llh2enu, getElevation, enu2llh
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as rot
 import plotly.express as px
 import plotly.io as pio
 import pdb
 from tqdm import tqdm
+import pandas as pd
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -25,6 +26,10 @@ DTR = np.pi / 180.
 deg2m = 1 / 111111.111
 
 
+def azelToVec(az, el):
+    return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
+
+
 def getAlt(altpos, altaz, altel):
     en_unit = azelToVec(altaz, altel)
     enu_extpos = altpos + en_unit
@@ -33,14 +38,14 @@ def getAlt(altpos, altaz, altel):
     dz = llh_extpos[2] - els
     dsl = dz / 2
     iters = 0
-    while abs(dz) >= 1 and iters <= 50:
+    while abs(dz) >= .5 and iters <= 90:
         enu_extpos = altpos + en_unit * dsl
         llh_extpos = enu2llh(*enu_extpos, init_llh)
         els = getElevation((llh_extpos[0], llh_extpos[1]))
         dz = llh_extpos[2] - els
         dsl = dsl + dz / 2
         iters += 1
-    return els - init_llh[2]
+    return els# - init_llh[2]
 
 
 def getExtPos(altpos, altaz, altel):
@@ -76,7 +81,7 @@ def tsdfLOB(time, freq, lat, lon, alt, az_ang, err=1.6):
     # Platform location
     lob_base[2][0][0][2][3][0][0][0][0].text = f'{lat:.6f} {lon:.6f} {alt:.6f}'
     # Observed azimuth angle
-    lob_base[2][0][0][2][5].text = f'{az_ang}'
+    lob_base[2][0][0][2][5].text = f'{az_ang / DTR}'
     # Angle error
     lob_base[2][0][0][2][6].text = f'{err}'
     lob_tree = etree.ElementTree(lob_base)
@@ -180,17 +185,17 @@ df_port = int(inp_args.ip)
 print(f'Input port set to {df_port}')
 buffer_size = int(inp_args.buf)
 av_buffer = int(inp_args.avbuf)
-check_stream = inp_args.test == 'true'
+check_stream = True  # inp_args.test == 'true'
 save_file = inp_args.save != 'true'
 save_fnme = inp_args.save
 lob_limit = int(inp_args.lob)
 debug = True
-debug_fnme = '/home/jeff/repo/simulib/debug.txt'
+debug_fnme = '/home/jeff/repo/simulib/coll4.txt'
 freq_threshold = 20e6
 elldist_threshold = 100
 start_elang = 45 * DTR
 
-if debug:
+if debug and not check_stream:
     with open(debug_fnme, 'w') as dfn:
         dfn.write('fc,az_ang,el_ang,lat,lon,alt,gps_week,gps_sec\n')
 
@@ -216,9 +221,15 @@ if not check_stream:
     df_socket.settimeout(10000)
     print(f'DF Socket connected on {hostip}' + f':{df_port}')
     print('Listening for DF packets...')
+else:
+    print(f'Testing data enabled with {debug_fnme}')
+    df = pd.read_csv(debug_fnme)
+    df = df.loc[df['fc'] != 0.0]
+    df_iter = df.iterrows()
 
-    while True:
-        try:
+while True:
+    try:
+        if not check_stream:
             msg, addr = df_socket.recvfrom(buffer_size)
 
             # Parse the packet out
@@ -240,183 +251,110 @@ if not check_stream:
             if debug:
                 with open(debug_fnme, 'a') as dfn:
                     dfn.write(f'{fc},{az_ang},{el_ang},{lat},{lon},{alt},{gps_week},{gps_sec}\n')
+        else:
+            idx, row = next(df_iter)
+            fc, az_ang, el_ang, lat, lon, alt, gps_week, gps_sec = row.values
+        if az_ang == -400:
+            continue
+        az_ang = az_ang * DTR
+        el_ang = el_ang * DTR
 
-            if init_llh is None:
-                init_llh = (lat, lon, alt)
+        if init_llh is None:
+            init_llh = (lat, lon, alt)
 
-            if az_ang != -400:
-                print('.', end='')
-                # Get target ID based on frequency stuff
-                tid = 0
-                if len(target_id) == 0:
-                    target_id.append(fc)
-                else:
-                    # Thresholding based on frequency since bin sizes vary in the DF tool
-                    min_fdist = np.array([abs(fc - t) if abs(fc - t) < freq_threshold else np.inf for t in target_id])
-                    if min_fdist.min() == np.inf:
-                        target_id.append(fc)
-                        tid = len(target_id) - 1
-                    else:
-                        tid = np.where(min_fdist == min_fdist.min())[0][0]
-                        # Since the frequency reported changes rapidly, try and average to get the best ID frequency
-                        target_id[tid] = (target_id[tid] + fc) / 2
-
-                # Update the target data averaging
-                if tid in target_data:
-                    # Restart the averaging if a LOB has been sent
-                    if target_buf[tid] == 0:
-                        target_data[tid] = np.array([lat, lon, alt, az_ang, start_elang, gps_sec])
-                    else:
-                        target_data[tid] = target_data[tid] + \
-                                          (np.array([lat, lon, alt, az_ang, start_elang, gps_sec]) -
-                                           target_data[tid]) / (target_buf[tid] + 1)
-                else:
-                    # Target is not in the system, add it
-                    target_buf[tid] = 0
-                    target_data[tid] = np.array([lat, lon, alt, az_ang, start_elang, gps_sec])
-                target_buf[tid] += 1
-
-                # If there are enough averages in the buffer, send a LOB
-                if target_buf[tid] == av_buffer:
-
-                    # Add the LOB to the ellipse buffer
-                    if tid not in lob_data:
-                        lob_data[tid] = []
-                    lob_data[tid].append(target_data[tid])
-
-                    # Remove excess LOBs once we've hit our limit
-                    while len(lob_data[tid]) > lob_limit:
-                        lob_data[tid].pop(0)
-
-                    # Send the LOB to the connected ATLAS socket
-                    lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), fc, lob_data[tid][-1][0],
-                                      lob_data[tid][-1][1], lob_data[tid][-1][2], lob_data[tid][-1][3])
-                    conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
-                    print('LOB sent.')
-
-                    # Save LOB to a TSDF file if wanted
-                    if save_file:
-                        new_tsdf += lob_str
-
-                    # If enough LOBs in the buffer, create an ellipse
-                    if len(lob_data[tid]) > 3:
-                        lb_dat = np.array(lob_data[tid])
-                        ps, calc_el = genEllipsePoints(lb_dat[:, :3].T, lb_dat[:, 3], lb_dat[:, 4])
-                        for l in range(len(lob_data[tid])):
-                            lob_data[tid][l][4] = calc_el[l]
-                        ell_params = getEllipseParams(ps)
-                        ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
-
-                        # Quick check to make sure the ellipse isn't under the plane
-                        if np.sqrt((ell_center[0] - lat)**2 + (ell_center[1] - lon)**2) / deg2m > elldist_threshold:
-                            ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0],
-                                                  ell_center[1], ell_center[2], ell_params[2], ell_params[3],
-                                                  ell_params[4])
-
-                            # Send the ellipse along to ATLAS
-                            conn_sock.sendto(bytes(ell_str, 'utf-8'), conn_addr)
-                            print('Ellipse sent.')
-
-                            # Save to TSDF if desired
-                            if save_file:
-                                new_tsdf += ell_str
-                        else:
-                            print('Ellipse too close to plane. Parameters:')
-                            print(ell_params)
-                            print(ell_center)
-                            
-                    # Reset the buffer count so we can start a new LOB
-                    target_buf[tid] = 0
+        print('.', end='')
+        # Get target ID based on frequency stuff
+        tid = 0
+        if not target_id:
+            target_id.append(fc)
+        else:
+            # Thresholding based on frequency since bin sizes vary in the DF tool
+            min_fdist = np.array([abs(fc - t) if abs(fc - t) < freq_threshold else np.inf for t in target_id])
+            if min_fdist.min() == np.inf:
+                target_id.append(fc)
+                tid = len(target_id) - 1
             else:
-                print('!', end='')
-        except socket.timeout:
-            print('DF socket timeout.')
-            df_socket.close()
-            print('DF socket closed.')
-            break
-        except KeyboardInterrupt:
+                tid = np.where(min_fdist == min_fdist.min())[0][0]
+                # Since the frequency reported changes rapidly, try and average to get the best ID frequency
+                target_id[tid] = (target_id[tid] + fc) / 2
+
+        # Update the target data averaging
+        if tid in target_data:
+            # Restart the averaging if a LOB has been sent
+            if target_buf[tid] == 0:
+                target_data[tid] = np.array([lat, lon, alt, az_ang, start_elang, gps_sec])
+            else:
+                target_data[tid] = target_data[tid] + \
+                                  (np.array([lat, lon, alt, az_ang, start_elang, gps_sec]) -
+                                   target_data[tid]) / (target_buf[tid] + 1)
+        else:
+            # Target is not in the system, add it
+            target_buf[tid] = 0
+            target_data[tid] = np.array([lat, lon, alt, az_ang, start_elang, gps_sec])
+        target_buf[tid] += 1
+
+        # If there are enough averages in the buffer, send a LOB
+        if target_buf[tid] == av_buffer:
+
+            # Add the LOB to the ellipse buffer
+            if tid not in lob_data:
+                lob_data[tid] = []
+            lob_data[tid].append(target_data[tid])
+
+            # Remove excess LOBs once we've hit our limit
+            while len(lob_data[tid]) > lob_limit:
+                lob_data[tid].pop(0)
+
+            # Send the LOB to the connected ATLAS socket
+            lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), fc, lob_data[tid][-1][0],
+                              lob_data[tid][-1][1], lob_data[tid][-1][2], lob_data[tid][-1][3])
+            conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
+            print('LOB sent.')
+
+            # Save LOB to a TSDF file if wanted
+            if save_file:
+                new_tsdf += lob_str
+
+            # If enough LOBs in the buffer, create an ellipse
+            if len(lob_data[tid]) > 1:
+                lb_dat = np.array(lob_data[tid])
+                ps, calc_el = genEllipsePoints(lb_dat[:, :3].T, lb_dat[:, 3], lb_dat[:, 4])
+                for l in range(len(lob_data[tid])):
+                    lob_data[tid][l][4] = calc_el[l]
+                ell_params = getEllipseParams(ps)
+                ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
+
+                # Quick check to make sure the ellipse isn't under the plane
+                if np.sqrt((ell_center[0] - lat)**2 + (ell_center[1] - lon)**2) / deg2m > elldist_threshold:
+                    ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0],
+                                          ell_center[1], ell_center[2], ell_params[2], ell_params[3],
+                                          ell_params[4])
+
+                    # Send the ellipse along to ATLAS
+                    conn_sock.sendto(bytes(ell_str, 'utf-8'), conn_addr)
+                    print('Ellipse sent.')
+
+                    # Save to TSDF if desired
+                    if save_file:
+                        new_tsdf += ell_str
+                else:
+                    print('Ellipse too close to plane. Parameters:')
+                    print(ell_params)
+                    print(ell_center)
+
+            # Reset the buffer count so we can start a new LOB
+            target_buf[tid] = 0
+    except socket.timeout:
+        print('DF socket timeout.')
+        df_socket.close()
+        print('DF socket closed.')
+        break
+    except KeyboardInterrupt:
+        if not check_stream:
             print('Closing DF socket...')
             df_socket.close()
             print('DF socket closed.')
-            break
-else:
-    print('Testing data generation enabled.')
-    # Test parameters to get ellipses and such right
-    init_llh = (40.141259, -111.666374, 1380.)
-    calced_els = np.zeros((lob_limit,)) + start_elang
-    num_trials = 10
-    max_num_lobs = 10
-    mse_max = 1.7 * DTR
-    # Nonlinear least squares for some LOB analysis
-    errorfig = None
-    err_mu = np.zeros((num_trials, max_num_lobs - 3))
-    err_std = np.zeros_like(err_mu)
-    for trial in range(num_trials):
-        # Setup the plane flight line
-        e = np.linspace(0, 3000, max_num_lobs - 1)
-        n = np.zeros_like(e) + np.random.rand(len(e)) * 2 - 1
-        u = np.zeros_like(e) + 5000 / 3.2808 + np.random.rand(len(e)) * 2 - 1
-        lat, lon, height = enu2llh(e, n, u, init_llh)
-        pos = np.array([e, n, u])
-        truth = np.array([np.random.randint(0, int(e.max())),
-                          np.random.randint(int(u.mean() - 400), int(u.mean() + 400)), 0.])
-        llh_truth = enu2llh(*truth, init_llh)
-        truth[2] = getElevation((llh_truth[0], llh_truth[1])) - init_llh[2]
-        az = np.arctan2(truth[0] - e, truth[1] - n) + np.random.normal(0, mse_max, e.shape)
-        truth_az = np.arctan2(truth[0] - e, truth[1] - n)
-        rng = np.sqrt((e - truth[0]) ** 2 + (n - truth[1]) ** 2 + (u - truth[2]) ** 2)
-        rng_mean = rng.mean()
-        el = -np.arcsin((truth[2] - u) / rng) + np.random.normal(0, mse_max, e.shape)
-        truth_el = -np.arcsin((truth[2] - u) / rng)
-        for num_lobs in tqdm(range(3, max_num_lobs)):
-            ps, calc_el = genEllipsePoints(pos[:, :num_lobs], az[:num_lobs], el=calced_els[:num_lobs])
-            calced_els[:num_lobs] = calc_el
-            errors = np.linalg.norm(truth[None, :] - ps, axis=1)
-            for lob in range(num_lobs):
-                lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), 9e8, lat[lob], lon[lob],
-                                  height[lob], az[lob] / DTR)
-                new_tsdf += lob_str
-                conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
-                print('LOB sent.')
-            try:
-                ell_params = getEllipseParams(ps)
-                ell_center = enu2llh(ell_params[0], ell_params[1], 0, init_llh)
-                ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0], ell_center[1],
-                                      ell_center[2], ell_params[2], ell_params[3], ell_params[4] / DTR)
-                new_tsdf += ell_str
-                conn_sock.sendto(
-                    bytes(ell_str, 'utf-8'), conn_addr)
-                print('Ellipse sent.')
-            except ValueError:
-                print('Ellipse bad.')
-            err_mu[trial, num_lobs - 3] = errors.mean()
-            err_std[trial, num_lobs - 3] = errors.std()
-        if errorfig is None:
-            errorfig = px.scatter(x=np.arange(max_num_lobs - 3) + 3, y=err_mu[trial, :])
-        else:
-            errorfig.add_scatter(x=np.arange(max_num_lobs - 3) + 3, y=err_mu[trial, :])
-
-    print('Testing complete.')
-    errorfig.show()
-
-
-    def get_ellipse_pts(params, npts=100, tmin=0, tmax=2*np.pi):
-        x0, y0, ap, bp, phi = params
-        # A grid of the parametric variable, t.
-        t = np.linspace(tmin, tmax, npts)
-        x = x0 + ap * np.cos(t) * np.cos(phi) - bp * np.sin(t) * np.sin(phi)
-        y = y0 + ap * np.cos(t) * np.sin(phi) + bp * np.sin(t) * np.cos(phi)
-        return x, y
-
-
-    ell_xy = get_ellipse_pts(getEllipseParams(ps[:, :2]))
-    cone_pt = np.array([azelToVec(az[m], calc_el[m]) for m in range(num_lobs)]) * 100
-    datafig = px.scatter_3d(x=ps[:, 0], y=ps[:, 1], z=ps[:, 2])
-    datafig.add_scatter3d(x=ell_xy[0], y=ell_xy[1], z=np.zeros_like(ell_xy[0]) + ps[:, 2].mean())
-    datafig.add_scatter3d(x=e, y=n, z=u)
-    datafig.add_scatter3d(x=[truth[0]], y=[truth[1]], z=[truth[2]])
-    datafig.add_cone(x=e, y=n, z=u, u=cone_pt[:, 0], v=cone_pt[:, 1], w=cone_pt[:, 2])
-    datafig.show()
+        break
 
 if save_file:
     with open(save_fnme, 'w') as f:

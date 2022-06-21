@@ -12,6 +12,7 @@ from numba.cuda.random import create_xoroshiro128p_states
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
 import plotly.express as px
+import plotly.graph_objects as go
 import plotly.io as pio
 from tqdm import tqdm
 from SDRParsing import SDRParse
@@ -175,7 +176,7 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-dfig = px.scatter_3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], color=bg.ref_coefs)
+dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], color=bg.ref_coefs)])
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 dfig.show()
 
