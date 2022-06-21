@@ -88,7 +88,7 @@ def tsdfLOB(time, freq, lat, lon, alt, az_ang, err=1.6):
     return ' '.join(etree.tostring(lob_tree.getroot(), encoding='unicode', xml_declaration=False).split()).replace('> <', '><') + '\r\n'
 
 
-def tsdfEllipse(time, lat, lon, alt, smaxis, sminaxis, ell_ang):
+def tsdfEllipse(time, lat, lon, alt, smaxis, sminaxis, ell_ang, ell_name):
     ell_base = tsdf_root[1]
     # Create time
     ell_base[0][0][0][1].text = time
@@ -102,6 +102,8 @@ def tsdfEllipse(time, lat, lon, alt, smaxis, sminaxis, ell_ang):
     ell_base[1][0][0][2][0][0][0][2].text = f'{sminaxis}'
     # orientation
     ell_base[1][0][0][2][0][0][0][3].text = f'{ell_ang}'
+    # Name of target
+    ell_base[1][0][0][2][2].text = f'tx-{ell_name}'
     ell_tree = etree.ElementTree(ell_base)
     return ' '.join(etree.tostring(ell_tree.getroot(), encoding='unicode', xml_declaration=False).split()).replace('> <', '><') + '\r\n'
 
@@ -155,7 +157,7 @@ argp = argparse.ArgumentParser(description='Setup TSDF streamer for ATLAS and St
 argp.add_argument('-ip', nargs='?', default='2721')
 argp.add_argument('-op', nargs='?', default='54322')
 argp.add_argument('-buf', nargs='?', default='1024')
-argp.add_argument('-avbuf', nargs='?', default='20')
+argp.add_argument('-avbuf', nargs='?', default='3')
 argp.add_argument('-test', nargs='?', default='false')
 argp.add_argument('-save', nargs='?', default='true')
 argp.add_argument('-lob', nargs='?', default='10')
@@ -190,7 +192,7 @@ save_file = inp_args.save != 'true'
 save_fnme = inp_args.save
 lob_limit = int(inp_args.lob)
 debug = True
-debug_fnme = '/home/jeff/repo/simulib/coll4.txt'
+debug_fnme = '/home/jeff/repo/simulib/coll3.txt'
 freq_threshold = 20e6
 elldist_threshold = 100
 start_elang = 45 * DTR
@@ -227,6 +229,7 @@ else:
     df = df.loc[df['fc'] != 0.0]
     df_iter = df.iterrows()
 
+prev_gps = 0
 while True:
     try:
         if not check_stream:
@@ -254,9 +257,11 @@ while True:
         else:
             idx, row = next(df_iter)
             fc, az_ang, el_ang, lat, lon, alt, gps_week, gps_sec = row.values
-        if az_ang == -400:
+        if az_ang == -400 or gps_sec - prev_gps < .5:
             continue
+        prev_gps = gps_sec
         az_ang = az_ang * DTR
+        az_ang = az_ang + 2 * np.pi if az_ang < 0 else az_ang
         el_ang = el_ang * DTR
 
         if init_llh is None:
@@ -328,7 +333,7 @@ while True:
                 if np.sqrt((ell_center[0] - lat)**2 + (ell_center[1] - lon)**2) / deg2m > elldist_threshold:
                     ell_str = tsdfEllipse(getDatetime(*datetime_to_tow(datetime.now())), ell_center[0],
                                           ell_center[1], ell_center[2], ell_params[2], ell_params[3],
-                                          ell_params[4])
+                                          ell_params[4], tid)
 
                     # Send the ellipse along to ATLAS
                     conn_sock.sendto(bytes(ell_str, 'utf-8'), conn_addr)
