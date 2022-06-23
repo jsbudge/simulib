@@ -160,7 +160,7 @@ argp.add_argument('-buf', nargs='?', default='1024')
 argp.add_argument('-avbuf', nargs='?', default='3')
 argp.add_argument('-test', nargs='?', default='false')
 argp.add_argument('-save', nargs='?', default='true')
-argp.add_argument('-lob', nargs='?', default='10')
+argp.add_argument('-lob', nargs='?', default='4')
 
 
 # Read in arguments for ports and IP addresses, use defaults if none given
@@ -187,12 +187,12 @@ df_port = int(inp_args.ip)
 print(f'Input port set to {df_port}')
 buffer_size = int(inp_args.buf)
 av_buffer = int(inp_args.avbuf)
-check_stream = True  # inp_args.test == 'true'
+check_stream = inp_args.test == 'true'
 save_file = inp_args.save != 'true'
 save_fnme = inp_args.save
 lob_limit = int(inp_args.lob)
 debug = True
-debug_fnme = '/home/jeff/repo/simulib/coll3.txt'
+debug_fnme = '/home/jeff/repo/simulib/debug.txt'
 freq_threshold = 20e6
 elldist_threshold = 100
 start_elang = 45 * DTR
@@ -257,7 +257,7 @@ while True:
         else:
             idx, row = next(df_iter)
             fc, az_ang, el_ang, lat, lon, alt, gps_week, gps_sec = row.values
-        if az_ang == -400 or gps_sec - prev_gps < .5:
+        if az_ang == -400 or gps_sec - prev_gps < .1:
             continue
         prev_gps = gps_sec
         az_ang = az_ang * DTR
@@ -321,7 +321,8 @@ while True:
                 new_tsdf += lob_str
 
             # If enough LOBs in the buffer, create an ellipse
-            if len(lob_data[tid]) > 1:
+            # if len(lob_data[tid]) > 1:
+            if False:
                 lb_dat = np.array(lob_data[tid])
                 ps, calc_el = genEllipsePoints(lb_dat[:, :3].T, lb_dat[:, 3], lb_dat[:, 4])
                 for l in range(len(lob_data[tid])):
