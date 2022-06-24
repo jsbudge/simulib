@@ -156,11 +156,11 @@ class SDREnvironment(Environment):
 
         self.origin = ref_llh
         grid = abs(asi)
-        grid = medfilt2d(grid, 35)
-        ptx, pty = detect_local_extrema(grid)
-        # ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
-        # ptx = ptx.flatten()
-        # pty = pty.flatten()
+        # grid = medfilt2d(grid, 35)
+        # ptx, pty = detect_local_extrema(grid)
+        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
+        ptx = ptx.flatten()
+        pty = pty.flatten()
         asi_pts = grid[ptx, pty]
 
         '''resample = np.random.rand(len(ptx)) > pdf(ptx, pty, grid=False)

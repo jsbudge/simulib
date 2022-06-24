@@ -40,7 +40,7 @@ sdr = SDRParse(bg_file)
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=200000)
+bg = SDREnvironment(sdr, num_vertices=20000)
 
 # Grab vertices and such
 vertices = bg.vertices
@@ -74,14 +74,16 @@ fft_len = findPowerOf2(nsam + nr)
 up_fft_len = fft_len * upsample
 
 # Chirp and matched filter calculations
-taytay = taylor(up_fft_len)
+taywin = int(sdr_f[0].bw / fs * up_fft_len)
+taytay = taylor(taywin)
 tayd = np.fft.fftshift(taylor(cpi_len))
 taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
 chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
                             bwidth) * 1e4, up_fft_len)
 mfilt = chirp.conj()
-mfilt[:up_fft_len // 2] *= taytay[up_fft_len // 2:]
-mfilt[up_fft_len // 2:] *= taytay[:up_fft_len // 2]
+mfilt[:taywin // 2] *= taytay[taywin // 2 + 1:]
+mfilt[-taywin // 2:] *= taytay[:taywin // 2 + 1]
+mfilt[taywin // 2:-taywin // 2] = 0
 chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
 mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
@@ -95,7 +97,8 @@ rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
 gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts) + 328.28, np.linspace(-150, 150, nbpj_pts) + 110.37)
-gz = np.zeros_like(gx)
+latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.origin)
+gz = (getElevationMap(latg, long) - bg.origin[2]).reshape(gx.shape)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
@@ -176,8 +179,10 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], color=bg.ref_coefs)])
+dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
+                                 vertexcolor=db(bg.ref_coefs))])
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
+dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
 dfig.show()
 
 bfig = px.imshow(db(bpj_res))

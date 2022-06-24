@@ -36,7 +36,7 @@ def detect_local_extrema(arr):
     background = arr == 0
     eroded_background = morphology.binary_erosion(
         background, structure=neighborhood, border_value=1)
-    detected_extrema = local_min ^ eroded_background # + local_max ^ eroded_background
+    detected_extrema = local_min ^ eroded_background  # + local_max ^ eroded_background
     return np.where(detected_extrema)
 
 

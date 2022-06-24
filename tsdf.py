@@ -13,6 +13,7 @@ import plotly.io as pio
 import pdb
 from tqdm import tqdm
 import pandas as pd
+from time import sleep
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -187,12 +188,12 @@ df_port = int(inp_args.ip)
 print(f'Input port set to {df_port}')
 buffer_size = int(inp_args.buf)
 av_buffer = int(inp_args.avbuf)
-check_stream = inp_args.test == 'true'
+check_stream = True #inp_args.test == 'true'
 save_file = inp_args.save != 'true'
 save_fnme = inp_args.save
 lob_limit = int(inp_args.lob)
 debug = True
-debug_fnme = '/home/jeff/repo/simulib/debug.txt'
+debug_fnme = '/home/jeff/repo/simulib/coll6.txt'
 freq_threshold = 20e6
 elldist_threshold = 100
 start_elang = 45 * DTR
@@ -226,7 +227,7 @@ if not check_stream:
 else:
     print(f'Testing data enabled with {debug_fnme}')
     df = pd.read_csv(debug_fnme)
-    df = df.loc[df['fc'] != 0.0]
+    df = df.loc[df['fc'] > 900e6]
     df_iter = df.iterrows()
 
 prev_gps = 0
@@ -259,8 +260,9 @@ while True:
             fc, az_ang, el_ang, lat, lon, alt, gps_week, gps_sec = row.values
         if az_ang == -400 or gps_sec - prev_gps < .1:
             continue
+        sleep(.5)
         prev_gps = gps_sec
-        az_ang = az_ang * DTR
+        az_ang = az_ang * DTR + np.pi
         az_ang = az_ang + 2 * np.pi if az_ang < 0 else az_ang
         el_ang = el_ang * DTR
 
@@ -360,6 +362,9 @@ while True:
             print('Closing DF socket...')
             df_socket.close()
             print('DF socket closed.')
+        break
+    except StopIteration:
+        print('Ran out of data.')
         break
 
 if save_file:
