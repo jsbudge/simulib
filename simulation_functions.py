@@ -15,6 +15,8 @@ WGS_A = 6378137.0
 WGS_F = 1 / 298.257223563
 WGS_B = 6356752.314245179
 WGS_E2 = 6.69437999014e-3
+c0 = 299792458.0
+DTR = np.pi / 180
 
 
 def getDTEDName(lat, lon):
@@ -331,7 +333,48 @@ def rotate(az, nel, rot_mat):
 
 
 def azelToVec(az, el):
-    return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
+    return -np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), np.sin(el)])
+
+
+def hornPattern(fc, width, height, theta=None, phi=None, deg_per_bin=.5, az_only=False):
+    _lambda = c0 / fc
+    d = _lambda / 2.
+    if theta is None:
+        theta = np.arange(0, np.pi, deg_per_bin * DTR)
+    if phi is None:
+        phi = [0] if az_only else np.arange(-np.pi / 2, np.pi / 2, deg_per_bin * DTR)
+    theta, phi = np.meshgrid(theta, phi)
+    lcw = np.arange(-width / 2, width / 2, d)
+    lch = np.arange(-height / 2, height / 2, d)
+    lch, lcw = np.meshgrid(lch, lcw)
+    lchm = lch.flatten()
+    lcwm = lcw.flatten()
+    k = 2 * np.pi / _lambda
+    locs = np.array([lcwm, np.zeros_like(lcwm), lchm]).T
+    ublock = azelToVec(theta.flatten(), phi.flatten())
+    AF = np.sum(np.exp(-1j * k * locs.dot(ublock)), axis=0)
+    AF = AF.flatten() if az_only else AF.reshape(theta.shape)
+
+    # Return degree array and antenna pattern
+    return theta, phi, AF
+
+
+def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_only=False):
+    _, _, el_pat = hornPattern(fc, .0766, .0646, theta=theta, phi=phi, deg_per_bin=deg_per_bin, az_only=az_only)
+    _lambda = c0 / fc
+    if theta is None:
+        theta = np.arange(0, np.pi, deg_per_bin * DTR)
+    if phi is None:
+        phi = [0] if az_only else np.arange(-np.pi / 2, np.pi / 2, deg_per_bin * DTR)
+    theta, phi = np.meshgrid(theta, phi)
+    k = 2 * np.pi / _lambda
+    # az, el = np.meshgrid(theta, theta)
+    ublock = azelToVec(theta.flatten(), phi.flatten())
+    AF = np.exp(-1j * k * pos.dot(ublock)) * el_pat[None, :]
+    weights = weights if weights is not None else np.ones(pos.shape[0])
+    AF = AF.T.dot(weights).flatten() if az_only else AF.T.dot(weights).reshape(theta.shape)
+    # Return degree array and antenna pattern
+    return theta, phi, AF
 
 
 '''
