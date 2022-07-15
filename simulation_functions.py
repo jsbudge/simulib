@@ -104,7 +104,7 @@ def getElevationMap(lats, lons):
     return (raster[blatmin, blonmin] * rightLonDiff * lowLatDiff
             + raster[blatmin, blonmax] * leftLonDiff * lowLatDiff
             + raster[blatmax, blonmin] * rightLonDiff * upLatDiff
-            + raster[blatmax, blonmax] * leftLonDiff * upLatDiff)
+            + raster[blatmax, blonmax] * leftLonDiff * upLatDiff) + undulationEGM96(bin_lat, bin_lon)
 
 
 def getElevation(pt):

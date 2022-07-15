@@ -6,6 +6,7 @@ from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
 from scipy.interpolate import RectBivariateSpline
 from scipy.signal import medfilt2d
+from scipy.spatial.distance import pdist, squareform
 
 
 fs = 2e9
@@ -156,11 +157,23 @@ class SDREnvironment(Environment):
 
         self.origin = ref_llh
         grid = abs(asi)
-        # grid = medfilt2d(grid, 35)
-        # ptx, pty = detect_local_extrema(grid)
-        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 15), np.arange(0, grid.shape[1], 15))
+        '''rowup = 1
+        colup = 1
+        if row_pixel_size < 1:
+            rowup = int(1 / row_pixel_size)
+        if col_pixel_size < 1:
+            colup = int(1 / col_pixel_size)
+        grid = grid[::rowup, ::colup]
+        row_pixel_size *= rowup
+        col_pixel_size *= colup'''
+        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 5), np.arange(0, grid.shape[1], 5))
         ptx = ptx.flatten()
         pty = pty.flatten()
+        '''if len(ptx) > num_vertices:
+            dists = np.mean(squareform(pdist(np.array([ptx, pty]).T)), axis=0)
+            dist_mins = np.argsort(dists)
+            ptx = ptx[dist_mins[-num_vertices:]]
+            pty = pty[dist_mins[-num_vertices:]]'''
         asi_pts = grid[ptx, pty]
 
         '''resample = np.random.rand(len(ptx)) > pdf(ptx, pty, grid=False)
@@ -179,7 +192,8 @@ class SDREnvironment(Environment):
             np.array([ptx, pty, np.ones_like(ptx)]).T)
         lat, lon, alt = enu2llh(rotated[:, 0], rotated[:, 1], np.zeros_like(ptx), ref_llh)
         e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)
-        print('resampled')
+        self._grid = grid
+        self._grid_info = []
         # Get the point cloud information
         asi_max = asi_pts.max()
         super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=asi_pts / asi_max,

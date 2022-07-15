@@ -28,7 +28,7 @@ def raisedCosine(x, bw, a0):
 
 
 @cuda.jit(device=True)
-def interp(x, y, tt, bg):
+def interp(x, y, bg):
     # Simple 2d linear nearest neighbor interpolation
     x0 = int(x)
     y0 = int(y)
@@ -36,8 +36,8 @@ def interp(x, y, tt, bg):
     y1 = int(y0 + 1 if y - y0 >= 0 else -1)
     xdiff = x - x0
     ydiff = y - y0
-    return bg[tt, x1, y1].real * xdiff * ydiff + bg[tt, x1, y0].real * xdiff * (1 - ydiff) + bg[tt, x0, y1].real * \
-           (1 - xdiff) * ydiff + bg[tt, x0, y0].real * (1 - xdiff) * (1 - ydiff)
+    return bg[x1, y1] * xdiff * ydiff + bg[x1, y0] * xdiff * (1 - ydiff) + bg[x0, y1] * \
+           (1 - xdiff) * ydiff + bg[x0, y0] * (1 - xdiff) * (1 - ydiff)
 
 
 '''@cuda.jit(device=True)
@@ -347,8 +347,8 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
         tv3 = tri_vert_indices[tri, 2]
 
         for _ in range(pts_per_tri):
-            u = .33
-            v = .33
+            u = tt / source_xyz.shape[1]
+            v = tri / tri_vert_indices.shape[0]
             if u + v > 1:
                 u = 1 - v
             w = 1 - (u + v)
@@ -439,7 +439,9 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             r_az = math.atan2(rx, ry)
 
             # Check to see if it's outside of our beam
-            if (abs(diff(r_az, panrx[tt])) > bw_az) or (abs(diff(r_el, elrx[tt])) > bw_el):
+            az_diffrx = diff(r_az, panrx[tt])
+            el_diffrx = diff(r_el, elrx[tt])
+            if (abs(az_diffrx) > bw_az) or (abs(el_diffrx) > bw_el):
                 continue
 
             # Get index into range compressed data
@@ -450,14 +452,14 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
                 continue
 
             # Attenuation of beam in elevation and azimuth
-            att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
-                  1 / (two_way_rng * two_way_rng)
+            att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
+                                        bw_az, bw_el) * tx_rng * rx_rng
 
             # Azimuth window to reduce sidelobes
             # Gaussian window
-            # az_win = math.exp(-azdiff*azdiff/(2*.001))
+            # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
-            az_win = raisedCosine(diff(pantx[tt], r_az), signal_bw, .5)
+            az_win = raisedCosine(az_diffrx, signal_bw, .5)
             # az_win = 1.
 
             if rbins[but - 1] < tx_rng < rbins[but]:
@@ -492,6 +494,8 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
                     a += mm * cp[idx]
 
             # Multiply by phase reference function, attenuation and azimuth window
+            # if tt == 0:
+            #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
             exp_phase = k * two_way_rng
             acc_val += a * cmath.exp(1j * exp_phase) * att * az_win
         final_grid[px, py] = acc_val
