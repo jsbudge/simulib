@@ -31,24 +31,6 @@ def azelToVec(az, el):
     return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
 
 
-def getAlt(altpos, altaz, altel):
-    en_unit = azelToVec(altaz, altel)
-    enu_extpos = altpos + en_unit
-    llh_extpos = enu2llh(*enu_extpos, init_llh)
-    els = getElevation((llh_extpos[0], llh_extpos[1]))
-    dz = llh_extpos[2] - els
-    dsl = dz / 2
-    iters = 0
-    while abs(dz) >= .5 and iters <= 90:
-        enu_extpos = altpos + en_unit * dsl
-        llh_extpos = enu2llh(*enu_extpos, init_llh)
-        els = getElevation((llh_extpos[0], llh_extpos[1]))
-        dz = llh_extpos[2] - els
-        dsl = dsl + dz / 2
-        iters += 1
-    return els# - init_llh[2]
-
-
 def getExtPos(altpos, altaz, altel):
     en_unit = azelToVec(altaz, altel)
     enu_extpos = altpos + en_unit
@@ -122,8 +104,7 @@ def genEllipsePoints(pos, az, el=None):
 
     def resid_func(theta):
         r = np.zeros(((len(theta) - 1) * 3,))
-        alts = [getAlt(pos[:, m], az[m], theta[m]) for m in range(len(theta))]
-        mus = [(pos[2, m] - alts[m]) / np.sin(theta[m]) for m in range(len(theta))]
+        mus = [pos[2, m] / np.sin(theta[m]) for m in range(len(theta))]
         dir_vecs = [azelToVec(az[m], theta[m]) for m in range(len(theta))]
         for idx in range(1, len(theta)):
             r[(idx - 1) * 3:idx * 3] = np.array([dir_vecs[0][0] * mus[0] - dir_vecs[idx][0] * mus[idx],
@@ -158,10 +139,10 @@ argp = argparse.ArgumentParser(description='Setup TSDF streamer for ATLAS and St
 argp.add_argument('-ip', nargs='?', default='2721')
 argp.add_argument('-op', nargs='?', default='54322')
 argp.add_argument('-buf', nargs='?', default='1024')
-argp.add_argument('-avbuf', nargs='?', default='3')
+argp.add_argument('-avbuf', nargs='?', default='100')
 argp.add_argument('-test', nargs='?', default='false')
 argp.add_argument('-save', nargs='?', default='true')
-argp.add_argument('-lob', nargs='?', default='4')
+argp.add_argument('-lob', nargs='?', default='8')
 
 
 # Read in arguments for ports and IP addresses, use defaults if none given
@@ -193,10 +174,12 @@ save_file = inp_args.save != 'true'
 save_fnme = inp_args.save
 lob_limit = int(inp_args.lob)
 debug = True
-debug_fnme = '/home/jeff/repo/simulib/coll6.txt'
+debug_fnme = '/home/jeff/repo/simulib/SAR_06232022_115647_DFResults.csv'
 freq_threshold = 20e6
 elldist_threshold = 100
-start_elang = 45 * DTR
+listen_time = .1
+wait_time = 1.
+start_elang = 36 * DTR
 
 if debug and not check_stream:
     with open(debug_fnme, 'w') as dfn:
@@ -258,16 +241,15 @@ while True:
         else:
             idx, row = next(df_iter)
             fc, az_ang, el_ang, lat, lon, alt, gps_week, gps_sec = row.values
-        if az_ang == -400 or gps_sec - prev_gps < .1:
+        if az_ang == -400 or gps_sec - prev_gps < wait_time:
             continue
-        sleep(.5)
-        prev_gps = gps_sec
-        az_ang = az_ang * DTR + np.pi
+        az_ang = az_ang * DTR
         az_ang = az_ang + 2 * np.pi if az_ang < 0 else az_ang
         el_ang = el_ang * DTR
 
         if init_llh is None:
-            init_llh = (lat, lon, alt)
+            init_llh = (lat, lon, getElevation((lat, lon)))
+        easting, northing, up = llh2enu(lat, lon, alt, init_llh)
 
         print('.', end='')
         # Get target ID based on frequency stuff
@@ -289,19 +271,20 @@ while True:
         if tid in target_data:
             # Restart the averaging if a LOB has been sent
             if target_buf[tid] == 0:
-                target_data[tid] = np.array([lat, lon, alt, az_ang, start_elang, gps_sec])
+                target_data[tid] = np.array([easting, northing, up, az_ang, start_elang, gps_sec])
             else:
                 target_data[tid] = target_data[tid] + \
-                                  (np.array([lat, lon, alt, az_ang, start_elang, gps_sec]) -
+                                  (np.array([easting, northing, up, az_ang, start_elang, gps_sec]) -
                                    target_data[tid]) / (target_buf[tid] + 1)
         else:
             # Target is not in the system, add it
             target_buf[tid] = 0
-            target_data[tid] = np.array([lat, lon, alt, az_ang, start_elang, gps_sec])
+            target_data[tid] = np.array([easting, northing, up, az_ang, start_elang, gps_sec])
         target_buf[tid] += 1
 
         # If there are enough averages in the buffer, send a LOB
-        if target_buf[tid] == av_buffer:
+        if target_buf[tid] == av_buffer or prev_gps - gps_sec > wait_time + listen_time:
+            prev_gps = gps_sec
 
             # Add the LOB to the ellipse buffer
             if tid not in lob_data:
@@ -313,8 +296,10 @@ while True:
                 lob_data[tid].pop(0)
 
             # Send the LOB to the connected ATLAS socket
-            lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), fc, lob_data[tid][-1][0],
-                              lob_data[tid][-1][1], lob_data[tid][-1][2], lob_data[tid][-1][3])
+            lob_lat, lob_lon, lob_alt = enu2llh(lob_data[tid][-1][0], lob_data[tid][-1][1], lob_data[tid][-1][2],
+                                                init_llh)
+            lob_str = tsdfLOB(getDatetime(*datetime_to_tow(datetime.now())), fc, lob_lat,
+                              lob_lon, lob_alt, lob_data[tid][-1][3])
             conn_sock.sendto(bytes(lob_str, 'utf-8'), conn_addr)
             print('LOB sent.')
 
@@ -323,8 +308,8 @@ while True:
                 new_tsdf += lob_str
 
             # If enough LOBs in the buffer, create an ellipse
-            # if len(lob_data[tid]) > 1:
-            if False:
+            if len(lob_data[tid]) > 2:
+            # if False:
                 lb_dat = np.array(lob_data[tid])
                 ps, calc_el = genEllipsePoints(lb_dat[:, :3].T, lb_dat[:, 3], lb_dat[:, 4])
                 for l in range(len(lob_data[tid])):

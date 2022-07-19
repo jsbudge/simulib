@@ -92,19 +92,19 @@ def getElevationMap(lats, lons):
     bin_lon = (lons - gt[0]) / gt[1]
 
     # Linear interpolation using bins
-    blatmin = bin_lat.astype(int)
-    lowLatDiff = bin_lat - blatmin
-    blatmax = (bin_lat + 1).astype(int)
-    upLatDiff = blatmax - bin_lat
-    blonmin = bin_lon.astype(int)
-    leftLonDiff = bin_lon - blonmin
-    blonmax = (bin_lon + 1).astype(int)
-    rightLonDiff = blonmax - bin_lon
+    x1 = bin_lat.astype(int)
+    x2 = (bin_lat + 1).astype(int)
+    y1 = bin_lon.astype(int)
+    y2 = (bin_lon + 1).astype(int)
+    test = np.array([raster[x1, y1], raster[x1, y2], raster[x2, y1], raster[x2, y2]])
 
-    return (raster[blatmin, blonmin] * rightLonDiff * lowLatDiff
-            + raster[blatmin, blonmax] * leftLonDiff * lowLatDiff
-            + raster[blatmax, blonmin] * rightLonDiff * upLatDiff
-            + raster[blatmax, blonmax] * leftLonDiff * upLatDiff) + undulationEGM96(bin_lat, bin_lon)
+    poly = np.array([np.sum(test * np.array([x2 * y2, -x2 * y1, -x1 * y2, x1 * y1]), axis=0),
+           np.sum(test * np.array([-y2, y1, y2, -y1]), axis=0),
+           np.sum(test * np.array([-x2, x2, x1, -x1]), axis=0),
+           np.sum(test * np.array([np.ones_like(x2), -np.ones_like(x2), -np.ones_like(x2), np.ones_like(x2)]), axis=0)])
+
+    return np.sum(poly * np.array([np.ones_like(x2), bin_lat, bin_lon, bin_lat * bin_lon]), axis=0) + \
+           undulationEGM96(lats, lons)
 
 
 def getElevation(pt):

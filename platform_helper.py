@@ -17,9 +17,10 @@ class Platform(object):
     _heading = None
 
     def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, gimbal=None, gimbal_offset=None,
-                 gimbal_rotations=None, ant_offset=None):
+                 gimbal_rotations=None, tx_offset=None, rx_offset=None):
         self._gpst = t
-        self._ant = ant_offset
+        self._txant = tx_offset
+        self._rxant = rx_offset
         self._gimbal = gimbal
         self._gimbal_offset = gimbal_offset
 
@@ -34,49 +35,98 @@ class Platform(object):
         gtheta = None
         if gimbal is not None:
             # Matrix to rotate from body to inertial frame for each INS point
-            Rbi = [rot.from_rotvec([p[i], r[i], y[i]]) for i in range(len(p))]
+            cr = np.cos(gimbal_rotations[0])
+            sr = np.sin(gimbal_rotations[0])
+            cp = np.cos(gimbal_rotations[1])
+            sp = np.sin(gimbal_rotations[1])
+            cy = np.cos(gimbal_rotations[2])
+            sy = np.sin(gimbal_rotations[2])
+            cpan = np.cos(gimbal[:, 0])
+            ct = np.cos(gimbal[:, 1])
+            span = np.sin(gimbal[:, 0])
+            st = np.sin(gimbal[:, 1])
+            tx_offset = tx_offset if tx_offset is not None else np.array([0., 0., 0.])
+            rx_offset = rx_offset if rx_offset is not None else np.array([0., 0., 0.])
 
-            # Account for gimbal frame mounting rotations
-            Rgb2g = rot.from_rotvec(np.array([0, gimbal_rotations[0], 0]))
-            Rb2gblg = rot.from_rotvec(np.array([gimbal_rotations[1], 0, 0]))
-            Rblgb = rot.from_rotvec(np.array([0, 0, gimbal_rotations[2]]))
-            # This is because the gimbal is mounted upside down
-            Rmgg = rot.from_rotvec([0, -np.pi, 0])
-            Rgb = Rmgg * Rgb2g * Rb2gblg * Rblgb
-            ant_offsets = ant_offset if ant_offset is not None else np.array([0., 0., 0.])
+            # Gimbal to body frame rotations
+            J = [cpan * tx_offset[0] + span * ct * tx_offset[1] - span * st * tx_offset[2],
+                          -span * tx_offset[0] + cpan * ct * tx_offset[1] - cpan * st * tx_offset[2],
+                          st * tx_offset[1] + ct * tx_offset[2]]
+            g2b = np.array([(-cp * cy - sr * sp * sy) * J[0] + cp * sy * J[1] + (cr * sp * sy - sr * cy) * J[2],
+                            (cr * sy - sr * sp * cy) * J[0] + cp * cy * J[1] + (sr * sy + cr * sp * cy) * J[2],
+                            sr * cp * J[0] + sp * J[1] - cr * cp * J[2]])
+            a2_itx = gimbal_offset[:, None] + g2b
 
-            # Convert gimbal angles to rotations
-            Rmg = [rot.from_rotvec([gimbal[n, 1], 0, gimbal[n, 0]])
-                   for n in range(gimbal.shape[0])]
+            # Repeat for receive antenna
+            J = [cpan * rx_offset[0] + span * ct * rx_offset[1] - span * st * rx_offset[2],
+                 -span * rx_offset[0] + cpan * ct * rx_offset[1] - cpan * st * rx_offset[2],
+                 st * rx_offset[1] + ct * rx_offset[2]]
+            g2b = np.array([(-cp * cy - sr * sp * sy) * J[0] + cp * sy * J[1] + (cr * sp * sy - sr * cy) * J[2],
+                            (cr * sy - sr * sp * cy) * J[0] + cp * cy * J[1] + (sr * sy + cr * sp * cy) * J[2],
+                            sr * cp * J[0] + sp * J[1] - cr * cp * J[2]])
+            a2_irx = gimbal_offset[:, None] + g2b
 
-            # Apply rotations through antenna frame, gimbal frame, and add to gimbal offsets
-            gamma_b_gpc = [(Rgb * n).inv().apply(ant_offsets).flatten() + gimbal_offset for n in Rmg]
+            # Boresight angle using lever arm in Z direction
+            Jb = [-span * st, -cpan * st, ct]
+            bore_offsets = np.array([(-cp * cy - sr * sp * sy) * Jb[0] + cp * sy * Jb[1] + (cr * sp * sy - sr * cy) * Jb[2],
+                            (cr * sy - sr * sp * cy) * Jb[0] + cp * cy * Jb[1] + (sr * sy + cr * sp * cy) * Jb[2],
+                            sr * cp * Jb[0] + sp * Jb[1] - cr * cp * Jb[2]])
 
-            # Rotate gimbal/antenna offsets into inertial frame
-            rotated_offsets = np.array([Rbi[i].inv().apply(gamma_b_gpc[i]).flatten()
-                                        for i in range(gimbal.shape[0])])
+            # Final body to inertial frame calc
+            cr = np.cos(r)
+            sr = np.sin(r)
+            cp = np.cos(p)
+            sp = np.sin(p)
+            cy = np.cos(y)
+            sy = np.sin(y)
+            b2_itx = np.array([(cr * cy + sr * sp * sy) * a2_itx[0] + cp * a2_itx[1] + (sr * cy - cr * sp * sy) * a2_itx[2],
+                            (-cr * sy + sr * sp * sy) * a2_itx[0] + cp * a2_itx[1] + (-sr * sy - cr * sp * cy) * a2_itx[2],
+                            -sr * cp * a2_itx[0] + sp * a2_itx[1] + cr * cp * a2_itx[2]])
+            b2_irx = np.array(
+                [(cr * cy + sr * sp * sy) * a2_irx[0] + cp * a2_irx[1] + (sr * cy - cr * sp * sy) * a2_irx[2],
+                 (-cr * sy + sr * sp * sy) * a2_irx[0] + cp * a2_irx[1] + (-sr * sy - cr * sp * cy) * a2_irx[2],
+                 -sr * cp * a2_irx[0] + sp * a2_irx[1] + cr * cp * a2_irx[2]])
 
             # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
-            e += rotated_offsets[:, 1]
-            n += rotated_offsets[:, 0]
-            u -= rotated_offsets[:, 2]
+            te = e + b2_itx[0]
+            tn = n + b2_itx[1]
+            tu = u + b2_itx[2]
+            re = e + b2_irx[0]
+            rn = n + b2_irx[1]
+            ru = u + b2_irx[2]
 
             # Rotate antenna into inertial frame in the same way as above
-            boresight = np.array([0, 0, 1])
-            bai = np.array([(Rbi[n].inv() * (Rgb * Rmg[n]).inv()).apply(boresight).flatten()
-                            for n in range(len(Rbi))])
+            bai = np.array([(cr * cy + sr * sp * sy) * bore_offsets[0] + cp * bore_offsets[1] +
+                            (sr * cy - cr * sp * sy) * bore_offsets[2],
+                            (-cr * sy + sr * sp * sy) * bore_offsets[0] + cp * bore_offsets[1] +
+                            (-sr * sy - cr * sp * cy) * bore_offsets[2],
+                            -sr * cp * bore_offsets[0] + sp * bore_offsets[1] + cr * cp * bore_offsets[2]])
 
             # Calculate antenna azimuth/elevation for beampattern
             # gphi = y - np.pi / 2 if gphi is None else gphi
             # gtheta = np.zeros(len(t)) + 20 * DTR if gtheta is None else gtheta
-            gtheta = np.arcsin(-bai[:, 2])
-            gphi = np.arctan2(-bai[:, 1], bai[:, 0])
+            gtheta = np.arcsin(-bai[2, :])
+            gphi = np.arctan2(bai[0, :], bai[1, :])
+        else:
+            te = re = e
+            tn = rn = n
+            tu = ru = u
+            gphi = y - np.pi / 2
+            gtheta = np.zeros(len(t)) + 20 * DTR
 
         # Build the position spline
         ee = CubicSpline(t, e)
         nn = CubicSpline(t, n)
         uu = CubicSpline(t, u)
         self._pos = lambda lam_t: np.array([ee(lam_t), nn(lam_t), uu(lam_t)])
+        ee = CubicSpline(t, te)
+        nn = CubicSpline(t, tn)
+        uu = CubicSpline(t, tu)
+        self._txpos = lambda lam_t: np.array([ee(lam_t), nn(lam_t), uu(lam_t)])
+        ee = CubicSpline(t, re)
+        nn = CubicSpline(t, rn)
+        uu = CubicSpline(t, ru)
+        self._rxpos = lambda lam_t: np.array([ee(lam_t), nn(lam_t), uu(lam_t)])
 
         # Build a velocity spline
         ve = CubicSpline(t, np.gradient(e))
@@ -88,8 +138,6 @@ class Platform(object):
         self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[0], self._vel(lam_t)[1])
 
         # Beampattern stuff
-        gphi = self._heading(t) - np.pi / 2 if gphi is None else gphi
-        gtheta = np.zeros(len(t)) + 45 * DTR if gtheta is None else gtheta
         self.pan = CubicSpline(t, gphi)
         self.tilt = CubicSpline(t, gtheta)
 
@@ -109,13 +157,21 @@ class Platform(object):
     def gpst(self):
         return self._gpst
 
+    @property
+    def rxpos(self):
+        return self._rxpos
+
+    @property
+    def txpos(self):
+        return self._txpos
+
 
 class RadarPlatform(Platform):
 
-    def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, ant_offset=None, gimbal=None,
-                 gimbal_offset=None, gimbal_rotations=None, dep_angle=45.,
+    def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, tx_offset=None, rx_offset=None,
+                 gimbal=None, gimbal_offset=None, gimbal_rotations=None, dep_angle=45.,
                  squint_angle=0., az_bw=10., el_bw=10., fs=2e9):
-        super().__init__(e, n, u, r, p, y, t, gimbal, gimbal_offset, gimbal_rotations, ant_offset)
+        super().__init__(e, n, u, r, p, y, t, gimbal, gimbal_offset, gimbal_rotations, tx_offset, rx_offset)
         self.dep_ang = dep_angle * DTR
         self.squint_ang = squint_angle * DTR
         self.az_half_bw = az_bw * DTR / 2
@@ -157,7 +213,7 @@ class RadarPlatform(Platform):
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr_file, origin=None, ant_offsets=None, fs=None, channel=0):
+    def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0):
         sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         fs = fs if fs is not None else sdr[channel].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[:, 0])
@@ -173,16 +229,16 @@ class SDRPlatform(RadarPlatform):
                          sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Pitch_D'] * DTR,
                          sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Yaw_D'] * DTR])
         channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2 * DTR
-        ant_num = sdr[channel].trans_num
-        if ant_offsets is None:
-            # ant_offsets = np.array([sdr.port[ant_num].x, sdr.port[ant_num].y, sdr.port[ant_num].z])
-            ant_offsets = sum([np.array([sdr.port[n].x, sdr.port[n].y, sdr.port[n].z]) for n in range(len(sdr.port))]) / len(sdr.port)
+        tx_num = sdr[channel].trans_num
+        tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
+        rx_num = sdr[channel].rec_num
+        rx_offset = np.array([sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]) if rx_offset is None else rx_offset
         super().__init__(e=e, n=n, u=u, r=sdr.gps_data['r'].values, p=sdr.gps_data['p'].values,
                          y=sdr.gps_data['y'].values,
-                         t=sdr.gps_data.index.values, ant_offset=ant_offsets, gimbal=np.array([pan, tilt]).T,
+                         t=sdr.gps_data.index.values, tx_offset=tx_offset, rx_offset=rx_offset, gimbal=np.array([pan, tilt]).T,
                          gimbal_offset=goff, gimbal_rotations=grot, dep_angle=channel_dep,
-                         squint_angle=sdr.ant[ant_num].squint / DTR, az_bw=sdr.ant[ant_num].az_bw / DTR,
-                         el_bw=sdr.ant[ant_num].el_bw / DTR, fs=fs)
+                         squint_angle=sdr.ant[tx_num].squint / DTR, az_bw=sdr.ant[tx_num].az_bw / DTR,
+                         el_bw=sdr.ant[tx_num].el_bw / DTR, fs=fs)
         self._sdr = sdr
         self.origin = origin
 

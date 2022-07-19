@@ -26,12 +26,12 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
-upsample = 4
+upsample = 8
 cpi_len = 64
 plp = .5
 pts_per_tri = 1
 debug = True
-nbpj_pts = 600
+nbpj_pts = 300
 
 print('Loading SDR file...')
 sdr = SDRParse(bg_file)
@@ -135,18 +135,18 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     # att = rp.att(ts)
     panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
-    posrx_gpu = cupy.array(rp.pos(ts), dtype=np.float64)
+    posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
+    postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
     data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](tri_vert_indices, vert_xyz, vert_norms,
                                                                 scattering_coef, ref_coef_gpu,
-                                                                posrx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
-                                                                panrx_gpu,
-                                                                elrx_gpu, data_r, data_i, pts_debug, angs_debug,
-                                                                c0 / fc, ranges[0] / c0,
+                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
+                                                                panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
+                                                                angs_debug, c0 / fc, ranges[0] / c0,
                                                                 rp.fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                                               pts_per_tri, debug)
+                                                                pts_per_tri, debug)
 
     cupy.cuda.Device().synchronize()
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * chirp_gpu[:, :tmp_len] * mfilt_gpu[:, :tmp_len]
@@ -155,17 +155,15 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
     rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
-    # rtdata = cupy.array(sdr.getPulses(np.arange(pulse_pos, pulse_pos + len(ts)), 0), dtype=np.complex128)
-    if ts[0] < rp.gpst.mean() <= ts[-1]:
+    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
         test = rtdata.get()
         angd = angs_debug.get()
-        locd = pts_debug.get()
+        locd = pts_debug.get()'''
 
-    backproject[bpg_bpj, threads_per_block](posrx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu, elrx_gpu,
-                                            panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                            c0 / fc, ranges[0] / c0,
-                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 1)
+    backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
+                                            elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
+                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0)
     cupy.cuda.Device().synchronize()
 
     bpj_res += bpj_grid.get()
@@ -184,7 +182,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
         locp = rp.pos(ts[-1])
         test = rtdata.get()
 
-    backproject[bpg_bpj, threads_per_block](posrx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
+    backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu,
                                             panrx_gpu, elrx_gpu, rtdata, bpj_grid,
                                             c0 / fc, ranges[0] / c0,
@@ -192,13 +190,15 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     cupy.cuda.Device().synchronize()
     bpj_truedata += bpj_grid.get()
 
-    del panrx_gpu
-    del elrx_gpu
-    del data_r
-    del data_i
-    del rtdata
-    del upsample_data
-    del bpj_grid
+del panrx_gpu
+del postx_gpu
+del posrx_gpu
+del elrx_gpu
+del data_r
+del data_i
+del rtdata
+del upsample_data
+del bpj_grid
 
 del rbins_gpu
 del gx_gpu

@@ -45,9 +45,9 @@ class Environment(object):
                 pcd = pcd.voxel_down_sample(voxel_size=np.mean(dists) / 1.5)
                 its += 1'''
 
-            '''avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
+            avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
             radius = 3 * avg_dist
-            radii = [radius, radius * 2]'''
+            radii = [radius, radius * 2]
             pcd.estimate_normals()
             try:
                 pcd.orient_normals_consistent_tangent_plane(100)
@@ -55,9 +55,9 @@ class Environment(object):
                 pass
 
             # Generate mesh
-            # rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-            #     pcd, o3d.utility.DoubleVector(radii))
-            rec_mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+            rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                pcd, o3d.utility.DoubleVector(radii))
+            # rec_mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
 
             rec_mesh.remove_duplicated_vertices()
             rec_mesh.remove_duplicated_triangles()
