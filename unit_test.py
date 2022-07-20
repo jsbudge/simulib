@@ -26,7 +26,7 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
-upsample = 8
+upsample = 4
 cpi_len = 64
 plp = .5
 pts_per_tri = 1
@@ -155,11 +155,11 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
     rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
-    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
+    if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
         test = rtdata.get()
         angd = angs_debug.get()
-        locd = pts_debug.get()'''
+        locd = pts_debug.get()
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
@@ -178,9 +178,9 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     cupy.cuda.Device().synchronize()
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
-    if ts[0] < rp.gpst.mean() <= ts[-1]:
+    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
-        test = rtdata.get()
+        test = rtdata.get()'''
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu,

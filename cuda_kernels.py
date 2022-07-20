@@ -326,7 +326,7 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
                   1 / (two_way_rng * two_way_rng) * reflectivity
             debug_att[pt_idx, tt] = att
-            acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * 1e1
+            acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
             cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
             cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
             
@@ -380,12 +380,7 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             b_z = -(2 * rnorm * norm_z - tz / rng)
 
             # Calc power multiplier based on range, reflectivity
-            if u < v and u < w:
-                scat_ref = vert_reflectivity[tv1]
-            elif v < u and v < w:
-                scat_ref = vert_reflectivity[tv2]
-            else:
-                scat_ref = vert_reflectivity[tv3]
+            scat_ref = vert_reflectivity[tv1] * u + vert_reflectivity[tv2] * v + vert_reflectivity[tv3] * w
             scat_sig = vert_scattering[tv1] * u + vert_scattering[tv2] * v + vert_scattering[tv3] * w
 
             rx = bar_x - receive_xyz[0, tt]
@@ -400,7 +395,7 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             if n_samples > but > 0:
                 a = abs(b_x * rx / r_rng + b_y * ry / r_rng + \
                     b_z * rz / r_rng)
-                reflectivity = 1. #math.pow((scat_sig / -a + scat_sig) / 20, 10)
+                reflectivity = math.pow((scat_sig / -a + scat_sig) / 20, 10)
                 att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
                     1 / (two_way_rng * two_way_rng) * reflectivity
                 calc_angs[tri, 2] = att
@@ -459,7 +454,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
-            az_win = raisedCosine(az_diffrx, signal_bw, .5)
+            az_win = raisedCosine(el_diffrx, signal_bw, .5)
             # az_win = 1.
 
             if rbins[but - 1] < tx_rng < rbins[but]:

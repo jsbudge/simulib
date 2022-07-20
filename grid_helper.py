@@ -1,12 +1,12 @@
 import numpy as np
 from simulation_functions import getMapLocation, createMeshFromPoints, getElevationMap, rotate, llh2enu, genPulse, \
-    enu2llh, getElevation, detect_local_extrema
+    enu2llh, getElevation, detect_local_extrema, db
 import open3d as o3d
 from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
 from scipy.interpolate import RectBivariateSpline
-from scipy.signal import medfilt2d
-from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import Delaunay
+import pickle
 
 
 fs = 2e9
@@ -33,7 +33,12 @@ class Environment(object):
             refs = reflectivity if reflectivity is not None else np.ones((pts.shape[0],))
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(pts)
-            pcd.colors = o3d.utility.Vector3dVector(np.array([refs, scats, refs]).T)
+            colors = np.zeros((len(reflectivity), 3))
+            colors[:, 0] = 1 - reflectivity * 2
+            colors[:, 2] = reflectivity * 2
+            colors[colors < 0] = 0
+            colors[colors > 1] = 1
+            pcd.colors = o3d.utility.Vector3dVector(colors)
             self._refscale = refscale
             self._scatscale = scatscale
 
@@ -85,6 +90,10 @@ class Environment(object):
 
     def visualize(self):
         o3d.visualization.draw_geometries([self._pcd, self._mesh])
+
+    def save(self, fnme):
+        with open(fnme, 'wb') as f:
+            pickle.dump(self, f)
 
     @property
     def vertices(self):
@@ -156,34 +165,25 @@ class SDREnvironment(Environment):
             heading = -sdr.ash['flight']['flnHdg'] * DTR
 
         self.origin = ref_llh
-        grid = abs(asi)
-        '''rowup = 1
-        colup = 1
-        if row_pixel_size < 1:
-            rowup = int(1 / row_pixel_size)
-        if col_pixel_size < 1:
-            colup = int(1 / col_pixel_size)
+
+        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=asi_pts / asi_max,
+                         refscale=asi_max)
+
+    def generate(self):
+        grid = db(asi)
+        rowup = int(1 / row_pixel_size) if row_pixel_size < 1 else 1
+        colup = int(1 / col_pixel_size) if col_pixel_size < 1 else 1
         grid = grid[::rowup, ::colup]
+        # Reduce grid to int8
+        # mu = grid[grid != -300].mean()
+        # std = grid[grid != -300].std()
+        # grid = np.digitize(grid, np.linspace(mu - std * 3, mu + std * 3, 255))
         row_pixel_size *= rowup
-        col_pixel_size *= colup'''
-        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0], 5), np.arange(0, grid.shape[1], 5))
+        col_pixel_size *= colup
+        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0]), np.arange(0, grid.shape[1]))
         ptx = ptx.flatten()
         pty = pty.flatten()
-        '''if len(ptx) > num_vertices:
-            dists = np.mean(squareform(pdist(np.array([ptx, pty]).T)), axis=0)
-            dist_mins = np.argsort(dists)
-            ptx = ptx[dist_mins[-num_vertices:]]
-            pty = pty[dist_mins[-num_vertices:]]'''
         asi_pts = grid[ptx, pty]
-
-        '''resample = np.random.rand(len(ptx)) > pdf(ptx, pty, grid=False)
-        its = 0
-        while sum(resample) > 0 and its < 50:
-            ptx[resample] = np.random.uniform(0, grid.shape[0] - 1, sum(resample))
-            pty[resample] = np.random.uniform(0, grid.shape[1] - 1, sum(resample))
-            resample[resample] = np.random.rand(sum(resample)) > pdf(ptx[resample], pty[resample], grid=False)
-            its += 1'''
-        # asi_pts = ig(ptx, pty, grid=False)
         ptx = ptx - grid.shape[0] / 2
         pty = pty - grid.shape[1] / 2
         ptx *= row_pixel_size
@@ -196,5 +196,3 @@ class SDREnvironment(Environment):
         self._grid_info = []
         # Get the point cloud information
         asi_max = asi_pts.max()
-        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=asi_pts / asi_max,
-                         refscale=asi_max)
