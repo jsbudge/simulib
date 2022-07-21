@@ -103,8 +103,8 @@ def getElevationMap(lats, lons):
            np.sum(test * np.array([-x2, x2, x1, -x1]), axis=0),
            np.sum(test * np.array([np.ones_like(x2), -np.ones_like(x2), -np.ones_like(x2), np.ones_like(x2)]), axis=0)])
 
-    return np.sum(poly * np.array([np.ones_like(x2), bin_lat, bin_lon, bin_lat * bin_lon]), axis=0) + \
-           undulationEGM96(lats, lons)
+    return np.sum(poly * np.array([np.ones_like(x2), bin_lat, bin_lon, bin_lat * bin_lon]), axis=0)#  + \
+           # undulationEGM96(lats, lons)
 
 
 def getElevation(pt):
@@ -154,7 +154,7 @@ def getElevation(pt):
                                    + dtedData[1, 0] * rightLonDiff * upLatDiff
                                    + dtedData[1, 1] * leftLonDiff * upLatDiff)
 
-    return elevation + undulationEGM96(lat, lon)
+    return elevation#  + undulationEGM96(lat, lon)
 
 
 def llh2enu(lat, lon, h, refllh):

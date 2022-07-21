@@ -347,10 +347,8 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
         tv3 = tri_vert_indices[tri, 2]
 
         for _ in range(pts_per_tri):
-            u = tt / source_xyz.shape[1]
-            v = tri / tri_vert_indices.shape[0]
-            if u + v > 1:
-                u = 1 - v
+            u = .33
+            v = .33
             w = 1 - (u + v)
             # Get barycentric coordinates for bounce points
             bar_x = vert_xyz[tv1, 0] * u + vert_xyz[tv2, 0] * v + vert_xyz[tv3, 0] * w
@@ -380,7 +378,7 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             b_z = -(2 * rnorm * norm_z - tz / rng)
 
             # Calc power multiplier based on range, reflectivity
-            scat_ref = vert_reflectivity[tv1] * u + vert_reflectivity[tv2] * v + vert_reflectivity[tv3] * w
+            scat_ref = (vert_reflectivity[tv1] + vert_reflectivity[tv2] + vert_reflectivity[tv3]) / 3.
             scat_sig = vert_scattering[tv1] * u + vert_scattering[tv2] * v + vert_scattering[tv3] * w
 
             rx = bar_x - receive_xyz[0, tt]
@@ -395,9 +393,9 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             if n_samples > but > 0:
                 a = abs(b_x * rx / r_rng + b_y * ry / r_rng + \
                     b_z * rz / r_rng)
-                reflectivity = math.pow((scat_sig / -a + scat_sig) / 20, 10)
+                reflectivity = 1 #math.pow((scat_sig / -a + scat_sig) / 20, 10)
                 att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
-                    1 / (two_way_rng * two_way_rng) * reflectivity
+                    1 / two_way_rng * reflectivity
                 calc_angs[tri, 2] = att
                 acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_ref
                 cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
@@ -448,7 +446,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-                                        bw_az, bw_el) / tx_rng / rx_rng
+                                        bw_az, bw_el) / two_way_rng
 
             # Azimuth window to reduce sidelobes
             # Gaussian window

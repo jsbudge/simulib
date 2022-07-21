@@ -39,7 +39,7 @@ sdr = SDRParse(bg_file)
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=200000)
+bg = SDREnvironment(sdr, num_vertices=200000, tri_err=30)
 
 # Grab vertices and such
 vertices = bg.vertices
@@ -205,11 +205,11 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-'''dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
+dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
                                  vertexcolor=db(bg.ref_coefs))])
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
-dfig.show()'''
+dfig.show()
 
 bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_res).flatten())
 bfig.show()

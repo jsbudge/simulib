@@ -25,51 +25,58 @@ class Environment(object):
     _refscale = 1
     _scatscale = 1
 
-    def __init__(self, pts=None, scattering=None, reflectivity=None, scatscale=1, refscale=1):
+    def __init__(self, pts=None, scattering=None, reflectivity=None, triangles=None, scatscale=1, refscale=1):
 
         if pts is not None:
             # Create the point cloud for the mesh basis
             scats = scattering if scattering is not None else np.ones((pts.shape[0],))
             refs = reflectivity if reflectivity is not None else np.ones((pts.shape[0],))
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(pts)
             colors = np.zeros((len(reflectivity), 3))
-            colors[:, 0] = 1 - reflectivity * 2
-            colors[:, 2] = reflectivity * 2
-            colors[colors < 0] = 0
-            colors[colors > 1] = 1
-            pcd.colors = o3d.utility.Vector3dVector(colors)
+            colors[:, 0] = refs
+            colors[:, 1] = scats
+            colors[:, 2] = refs
+
             self._refscale = refscale
             self._scatscale = scatscale
 
             # Downsample if possible to reduce number of triangles
-            pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
-            '''its = 0
-            while np.std(pcd.compute_nearest_neighbor_distance()) > 2. and its < 30:
-                dists = pcd.compute_nearest_neighbor_distance()
-                pcd = pcd.voxel_down_sample(voxel_size=np.mean(dists) / 1.5)
-                its += 1'''
+            if triangles is None:
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(pts)
+                pcd.colors = o3d.utility.Vector3dVector(colors)
+                pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
 
-            avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
-            radius = 3 * avg_dist
-            radii = [radius, radius * 2]
-            pcd.estimate_normals()
-            try:
-                pcd.orient_normals_consistent_tangent_plane(100)
-            except RuntimeError:
-                pass
+                avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
+                radius = 3 * avg_dist
+                radii = [radius, radius * 2]
+                pcd.estimate_normals()
+                try:
+                    pcd.orient_normals_consistent_tangent_plane(100)
+                except RuntimeError:
+                    pass
 
-            # Generate mesh
-            rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                pcd, o3d.utility.DoubleVector(radii))
-            # rec_mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+                # Generate mesh
+                rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                    pcd, o3d.utility.DoubleVector(radii))
 
-            rec_mesh.remove_duplicated_vertices()
-            rec_mesh.remove_duplicated_triangles()
-            rec_mesh.remove_degenerate_triangles()
-            rec_mesh.remove_unreferenced_vertices()
+                rec_mesh.remove_duplicated_vertices()
+                rec_mesh.remove_duplicated_triangles()
+                rec_mesh.remove_degenerate_triangles()
+                rec_mesh.remove_unreferenced_vertices()
+            else:
+                rec_mesh = o3d.geometry.TriangleMesh()
+                rec_mesh.vertices = o3d.utility.Vector3dVector(pts)
+                rec_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+                rec_mesh.triangles = o3d.utility.Vector3iVector(triangles)
+                rec_mesh.compute_vertex_normals()
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = rec_mesh.vertices
+                pcd.colors = rec_mesh.vertex_colors
+                pcd.normals = rec_mesh.vertex_normals
             self._mesh = rec_mesh
             self._pcd = pcd
+        else:
+            pass
 
     def setScatteringCoeffs(self, coef, scale=10):
         if coef.shape[0] != self.vertices.shape[0]:
@@ -87,6 +94,9 @@ class Environment(object):
         old_stuff[:, 2] = coef
         self._pcd.colors = o3d.utility.Vector3dVector(old_stuff)
         self._refscale = scale
+
+    def getDistance(self, pos):
+        return np.linalg.norm(self.vertices - pos[None, :], axis=1)
 
     def visualize(self):
         o3d.visualization.draw_geometries([self._pcd, self._mesh])
@@ -133,8 +143,11 @@ class MapEnvironment(Environment):
 
 
 class SDREnvironment(Environment):
+    rps = 1
+    cps = 1
+    heading = 0.
 
-    def __init__(self, sdr_file, num_vertices=400000):
+    def __init__(self, sdr_file, num_vertices=100000, tri_err=35):
         # Load in the SDR file
         sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         print('SDR loaded')
@@ -147,9 +160,7 @@ class SDREnvironment(Environment):
             asi[750, 750] = 1
         self._sdr = sdr
         self._asi = asi
-        row_pixel_size = 1
-        col_pixel_size = 1
-        heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+        self.heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
         if sdr.ash is None:
             hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
             pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
@@ -160,39 +171,85 @@ class SDREnvironment(Environment):
                               (pt[0], pt[1], alt))
         else:
             ref_llh = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef'])
-            row_pixel_size = sdr.ash['geo']['rowPixelSizeM']
-            col_pixel_size = sdr.ash['geo']['colPixelSizeM']
-            heading = -sdr.ash['flight']['flnHdg'] * DTR
+            self.rps = sdr.ash['geo']['rowPixelSizeM']
+            self.cps = sdr.ash['geo']['colPixelSizeM']
+            self.heading = -sdr.ash['flight']['flnHdg'] * DTR
 
         self.origin = ref_llh
-
-        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=asi_pts / asi_max,
-                         refscale=asi_max)
-
-    def generate(self):
         grid = db(asi)
-        rowup = int(1 / row_pixel_size) if row_pixel_size < 1 else 1
-        colup = int(1 / col_pixel_size) if col_pixel_size < 1 else 1
+
+        # Set grid to be one meter resolution
+        rowup = int(1 / self.rps) if self.rps < 1 else 1
+        colup = int(1 / self.cps) if self.cps < 1 else 1
         grid = grid[::rowup, ::colup]
+        self.rps *= rowup
+        self.cps *= colup
+
         # Reduce grid to int8
         # mu = grid[grid != -300].mean()
         # std = grid[grid != -300].std()
         # grid = np.digitize(grid, np.linspace(mu - std * 3, mu + std * 3, 255))
-        row_pixel_size *= rowup
-        col_pixel_size *= colup
-        ptx, pty = np.meshgrid(np.arange(0, grid.shape[0]), np.arange(0, grid.shape[1]))
-        ptx = ptx.flatten()
-        pty = pty.flatten()
-        asi_pts = grid[ptx, pty]
+
+        # Generate 2d triangle mesh
+        ptx, pty, reflectivity, simplices = mesh(grid, tri_err, num_vertices)
+
+        # Rotate everything into lat/lon/alt for 3d mesh
         ptx = ptx - grid.shape[0] / 2
         pty = pty - grid.shape[1] / 2
-        ptx *= row_pixel_size
-        pty *= col_pixel_size
-        rotated = rot.from_euler('z', heading).apply(
-            np.array([ptx, pty, np.ones_like(ptx)]).T)
+        ptx *= self.rps
+        pty *= self.cps
+        rotated = rot.from_euler('z', self.heading).apply(
+            np.array([ptx, pty, np.zeros_like(ptx)]).T)
         lat, lon, alt = enu2llh(rotated[:, 0], rotated[:, 1], np.zeros_like(ptx), ref_llh)
         e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)
         self._grid = grid
         self._grid_info = []
-        # Get the point cloud information
-        asi_max = asi_pts.max()
+        ref_max = reflectivity.max()
+
+        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=reflectivity / ref_max,
+                         triangles=simplices, refscale=ref_max)
+
+
+def mesh(grid, tri_err, num_vertices):
+    # Generate a mesh using SVS metrics to make triangles in the right spots
+    ptx, pty = np.meshgrid(np.arange(grid.shape[0] - 1), np.arange(grid.shape[1] - 1))
+    ptx = ptx.flatten()
+    pty = pty.flatten()
+    im = grid[ptx, pty]
+    nonzeros = im != -300
+    ptx = ptx[nonzeros]
+    pty = pty[nonzeros]
+    im = im[nonzeros]
+    pts = np.array([ptx, pty]).T
+    init_pts = np.array([[0, 0],
+                         [0, grid.shape[1] - 1],
+                         [grid.shape[0] - 1, 0],
+                         [grid.shape[0] - 1, grid.shape[1] - 1]])
+    tri = Delaunay(init_pts, incremental=True, qhull_options='QJ')
+    total_err = np.inf
+    its = 0
+    total_its = 20
+    while total_err > tri_err and its < total_its:
+        pts_tri = tri.find_simplex(pts).astype(int)
+        total_err = 0
+        add_pts = []
+        for t in range(tri.simplices.shape[0]):
+            # Calculate out SVS error of triangle
+            pts_idx = np.where(pts_tri == t)[0]
+            if len(pts_idx) > 0:
+                tric = im[pts_idx].mean()
+                errors = abs(im[pts_idx] - tric) ** 2
+                if np.mean(errors) > tri_err:
+                    winner = pts_idx[errors == errors.max()][0]
+                    add_pts.append([ptx[winner], pty[winner]])
+                    total_err += sum(errors)
+                    if len(add_pts) + tri.points.shape[0] >= num_vertices:
+                        its = total_its
+                        break
+        total_err /= len(pts_tri)
+        tri.add_points(np.array(add_pts))
+        its += 1
+    ptx = tri.points[:, 0]
+    pty = tri.points[:, 1]
+    reflectivity = grid[ptx.astype(int), pty.astype(int)]
+    return ptx, pty, reflectivity, tri.simplices

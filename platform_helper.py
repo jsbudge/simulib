@@ -31,8 +31,6 @@ class Platform(object):
         self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)])
 
         # Take into account the gimbal if necessary
-        gphi = None
-        gtheta = None
         if gimbal is not None:
             # Matrix to rotate from body to inertial frame for each INS point
             cr = np.cos(gimbal_rotations[0])
