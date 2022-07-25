@@ -170,7 +170,8 @@ class SDREnvironment(Environment):
             ref_llh = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
                               (pt[0], pt[1], alt))
         else:
-            ref_llh = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef'])
+            ref_llh = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
+                       getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
             self.rps = sdr.ash['geo']['rowPixelSizeM']
             self.cps = sdr.ash['geo']['colPixelSizeM']
             self.heading = -sdr.ash['flight']['flnHdg'] * DTR

@@ -39,7 +39,8 @@ sdr = SDRParse(bg_file)
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=200000, tri_err=30)
+bg = SDREnvironment(sdr, num_vertices=50000, tri_err=30)
+test = getElevation((bg.origin[0], bg.origin[1]))
 
 # Grab vertices and such
 vertices = bg.vertices
@@ -100,7 +101,8 @@ rbins_gpu = cupy.array(ranges, dtype=np.float64)
 # Calculate out points on the ground
 gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
 latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.origin)
-gz = (getElevationMap(latg, long) - bg.origin[2]).reshape(gx.shape)
+shift = getElevation((bg.origin[0], bg.origin[1])) - bg.origin[2]
+gz = (getElevationMap(latg, long) - bg.origin[2] - shift).reshape(gx.shape)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)

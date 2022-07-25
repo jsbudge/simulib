@@ -83,6 +83,10 @@ def getElevationMap(lats, lons):
 
     # grab geo transform with resolutions
     gt = ds.GetGeoTransform()
+    bin_lat = (lats - gt[3]) / gt[-1]
+    bin_lon = (lons - gt[0]) / gt[1]
+    blmin = bin_lat.min()
+    blmax = bin_lat.max()
 
     # read in raster data
     raster = ds.GetRasterBand(1).ReadAsArray()
@@ -92,19 +96,28 @@ def getElevationMap(lats, lons):
     bin_lon = (lons - gt[0]) / gt[1]
 
     # Linear interpolation using bins
-    x1 = bin_lat.astype(int)
-    x2 = (bin_lat + 1).astype(int)
-    y1 = bin_lon.astype(int)
-    y2 = (bin_lon + 1).astype(int)
-    test = np.array([raster[x1, y1], raster[x1, y2], raster[x2, y1], raster[x2, y2]])
+    bx1 = bin_lat.astype(int)
+    bx2 = (bin_lat + 1).astype(int)
+    by1 = bin_lon.astype(int)
+    by2 = (bin_lon + 1).astype(int)
+    x1 = bx1 * gt[-1]
+    x2 = bx2 * gt[-1]
+    y1 = by1 * gt[1]
+    y2 = by2 * gt[1]
+    x = lats - gt[3]
+    y = lons - gt[0]
+    dted_mat = np.array([[raster[bx1, by1], raster[bx1, by2], raster[bx2, by1], raster[bx2, by2]]])
 
-    poly = np.array([np.sum(test * np.array([x2 * y2, -x2 * y1, -x1 * y2, x1 * y1]), axis=0),
-           np.sum(test * np.array([-y2, y1, y2, -y1]), axis=0),
-           np.sum(test * np.array([-x2, x2, x1, -x1]), axis=0),
-           np.sum(test * np.array([np.ones_like(x2), -np.ones_like(x2), -np.ones_like(x2), np.ones_like(x2)]), axis=0)])
+    coeff_mat = np.array([[x2 * y2, -y2, -x2, np.ones_like(x2)],
+                          [-x2 * y1, y1, x2, -np.ones_like(x2)],
+                          [-x1 * y2, y2, x1, -np.ones_like(x2)],
+                          [x1 * y1, -y1, -x1, np.ones_like(x2)]])
 
-    return np.sum(poly * np.array([np.ones_like(x2), bin_lat, bin_lon, bin_lat * bin_lon]), axis=0)#  + \
-           # undulationEGM96(lats, lons)
+    poly = np.einsum('ijn,jkn->ikn', dted_mat, coeff_mat)
+
+    sol = np.einsum('ijn,jkn->ikn', poly, np.array([[np.ones_like(x2), x, y, x * y]]).swapaxes(0, 1))
+
+    return 1 / ((x2 - x1) * (y2 - y1)) * sol.flatten() + undulationEGM96(lats, lons)
 
 
 def getElevation(pt):
@@ -124,8 +137,6 @@ def getElevation(pt):
     # yskew is useless (0.0)
     # yres is the resolution in the y-direction (in degrees/sample)
     ulx, xres, xskew, uly, yskew, yres = ds.GetGeoTransform()
-    # pre-compute 1/elevation_grid_spacing
-    elevSpacInv = 1.0 / abs(xres * yres)
     # calculate the x and y indices into the DTED data for the lat/lon
     px = int(np.round((lon - ulx) / xres))
     py = int(np.round((lat - uly) / yres))
@@ -138,23 +149,19 @@ def getElevation(pt):
         dtedData = rasterBand.ReadAsArray(px, py, 2, 2)
 
         # use bilinear interpolation to get the elevation for the lat/lon
-        leftLon = px * xres + ulx
-        upLat = py * yres + uly
+        x = (lon - ulx)
+        y = (lat - uly)
+        x1 = int((lon - ulx) / xres) * xres
+        x2 = int((lon - ulx) / xres + 1) * xres
+        y1 = int((lat - uly) / yres) * yres
+        y2 = int((lat - uly) / yres + 1) * yres
+        elevation = 1 / ((x2 - x1) * (y2 - y1)) * \
+                    dtedData.ravel().dot(np.array([[x2 * y2, -y2, -x2, 1],
+                                                    [-x2 * y1, y1, x2, -1],
+                                                    [-x1 * y2, y2, x1, -1],
+                                                    [x1 * y1, -y1, -x1, 1]])).dot(np.array([1, x, y, x * y]))
 
-        # pre compute the differences for the bilinear interpolation
-        rightLonDiff = (leftLon + xres) - lon
-        upLatDiff = upLat - lat
-        # lowLatDiff = lat - lowLat
-        leftLonDiff = lon - leftLon
-        lowLatDiff = lat - (upLat + yres)
-        # upLatDiff = (lowLat + yres) - lat
-
-        elevation = elevSpacInv * (dtedData[0, 0] * rightLonDiff * lowLatDiff
-                                   + dtedData[0, 1] * leftLonDiff * lowLatDiff
-                                   + dtedData[1, 0] * rightLonDiff * upLatDiff
-                                   + dtedData[1, 1] * leftLonDiff * upLatDiff)
-
-    return elevation#  + undulationEGM96(lat, lon)
+    return elevation + undulationEGM96(lat, lon)
 
 
 def llh2enu(lat, lon, h, refllh):
