@@ -8,7 +8,6 @@ from scipy.interpolate import CubicSpline
 import cupy as cupy
 import cupyx.scipy.signal
 from numba import cuda, njit
-from numba.cuda.random import create_xoroshiro128p_states
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
 import plotly.express as px
@@ -39,8 +38,7 @@ sdr = SDRParse(bg_file)
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=50000, tri_err=30)
-test = getElevation((bg.origin[0], bg.origin[1]))
+bg = SDREnvironment(sdr, num_vertices=200000, tri_err=20)
 
 # Grab vertices and such
 vertices = bg.vertices
@@ -52,7 +50,7 @@ print('Done.')
 
 # Generate a platform
 print('Generating platform...', end='')
-rp = SDRPlatform(sdr, bg.origin)
+rp = SDRPlatform(sdr, bg.ref)
 
 # Get reference data
 flight = rp.pos(rp.gpst)
@@ -94,15 +92,17 @@ mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 tri_vert_indices = cupy.array(triangles, dtype=np.int32)
 vert_xyz = cupy.array(vertices, dtype=np.float64)
 vert_norms = cupy.array(normals, dtype=np.float64)
-scattering_coef = cupy.array(bg.scat_coefs, dtype=np.float64)
+scattering_coef_gpu = cupy.array(bg.scat_coefs, dtype=np.float64)
 ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
+shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
 gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
-latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.origin)
-shift = getElevation((bg.origin[0], bg.origin[1])) - bg.origin[2]
-gz = (getElevationMap(latg, long) - bg.origin[2] - shift).reshape(gx.shape)
+gx += shift_x
+gy += shift_y
+latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.ref)
+gz = (getElevationMap(latg, long) - bg.ref[2]).reshape(gx.shape)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
@@ -113,6 +113,7 @@ if debug:
 else:
     pts_debug = cupy.zeros((1, 1), dtype=np.float64)
     angs_debug = cupy.zeros((1, 1), dtype=np.float64)
+test = None
 
 # GPU device calculations
 threads_per_block = getMaxThreads()
@@ -143,12 +144,12 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](tri_vert_indices, vert_xyz, vert_norms,
-                                                                scattering_coef, ref_coef_gpu,
-                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
-                                                                panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
-                                                                angs_debug, c0 / fc, ranges[0] / c0,
-                                                                rp.fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                                                pts_per_tri, debug)
+                                                               scattering_coef_gpu, ref_coef_gpu,
+                                                               postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
+                                                               panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
+                                                               angs_debug, c0 / fc, ranges[0] / c0,
+                                                               rp.fs * upsample, rp.az_half_bw, rp.el_half_bw,
+                                                               pts_per_tri, debug)
 
     cupy.cuda.Device().synchronize()
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * chirp_gpu[:, :tmp_len] * mfilt_gpu[:, :tmp_len]
@@ -208,7 +209,7 @@ del gy_gpu
 del gz_gpu
 
 dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
-                                 vertexcolor=db(bg.ref_coefs))])
+                                 facecolor=bg.ref_coefs)])
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
 dfig.show()

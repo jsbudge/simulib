@@ -378,8 +378,8 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             b_z = -(2 * rnorm * norm_z - tz / rng)
 
             # Calc power multiplier based on range, reflectivity
-            scat_ref = (vert_reflectivity[tv1] + vert_reflectivity[tv2] + vert_reflectivity[tv3]) / 3.
-            scat_sig = vert_scattering[tv1] * u + vert_scattering[tv2] * v + vert_scattering[tv3] * w
+            scat_ref = vert_reflectivity[tri]
+            scat_sig = vert_scattering[tri]
 
             rx = bar_x - receive_xyz[0, tt]
             ry = bar_y - receive_xyz[1, tt]

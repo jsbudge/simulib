@@ -83,10 +83,6 @@ def getElevationMap(lats, lons):
 
     # grab geo transform with resolutions
     gt = ds.GetGeoTransform()
-    bin_lat = (lats - gt[3]) / gt[-1]
-    bin_lon = (lons - gt[0]) / gt[1]
-    blmin = bin_lat.min()
-    blmax = bin_lat.max()
 
     # read in raster data
     raster = ds.GetRasterBand(1).ReadAsArray()
@@ -96,10 +92,19 @@ def getElevationMap(lats, lons):
     bin_lon = (lons - gt[0]) / gt[1]
 
     # Linear interpolation using bins
+    # Shift the indexes into the data in case the point is in the wrong spot
     bx1 = bin_lat.astype(int)
+    bx1[bin_lat % 1 < .5] = (bin_lat[bin_lat % 1 < .5] - 1).astype(int)
+    bx2 = (bin_lat + 1).astype(int)
+    bx2[bin_lat % 1 < .5] = (bin_lat[bin_lat % 1 < .5]).astype(int)
+    by1 = bin_lon.astype(int)
+    by1[bin_lon % 1 < .5] = (bin_lon[bin_lon % 1 < .5] - 1).astype(int)
+    by2 = (bin_lon + 1).astype(int)
+    by2[bin_lon % 1 < .5] = (bin_lon[bin_lon % 1 < .5]).astype(int)
+    '''bx1 = bin_lat.astype(int)
     bx2 = (bin_lat + 1).astype(int)
     by1 = bin_lon.astype(int)
-    by2 = (bin_lon + 1).astype(int)
+    by2 = (bin_lon + 1).astype(int)'''
     x1 = bx1 * gt[-1]
     x2 = bx2 * gt[-1]
     y1 = by1 * gt[1]
@@ -138,8 +143,8 @@ def getElevation(pt):
     # yres is the resolution in the y-direction (in degrees/sample)
     ulx, xres, xskew, uly, yskew, yres = ds.GetGeoTransform()
     # calculate the x and y indices into the DTED data for the lat/lon
-    px = int(np.round((lon - ulx) / xres))
-    py = int(np.round((lat - uly) / yres))
+    px = int((lon - ulx) / xres) - 1 if (lon - ulx) / xres % 1 < .5 else 0
+    py = int((lat - uly) / yres) - 1 if (lat - uly) / yres % 1 < .5 else 0
 
     # only if these x and y indices are within the bounds of the DTED, get the
     # raster band and try to read in the DTED values

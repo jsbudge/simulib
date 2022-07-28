@@ -6,8 +6,8 @@ from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
 from scipy.interpolate import RectBivariateSpline
 from scipy.spatial import Delaunay
+from scipy.signal import medfilt2d
 import pickle
-
 
 fs = 2e9
 c0 = 299792458.0
@@ -25,19 +25,21 @@ class Environment(object):
     _refscale = 1
     _scatscale = 1
 
-    def __init__(self, pts=None, scattering=None, reflectivity=None, triangles=None, scatscale=1, refscale=1):
+    def __init__(self, pts=None, scattering=None, reflectivity=None, triangles=None):
 
         if pts is not None:
             # Create the point cloud for the mesh basis
-            scats = scattering if scattering is not None else np.ones((pts.shape[0],))
-            refs = reflectivity if reflectivity is not None else np.ones((pts.shape[0],))
+            scats = scattering if scattering is not None else np.ones((triangles.shape[0],))
+            refs = reflectivity if reflectivity is not None else np.ones((triangles.shape[0],))
+            col_scale = (refs - refs.min()) / refs.max()
+            col_scale /= col_scale.max()
             colors = np.zeros((len(reflectivity), 3))
-            colors[:, 0] = refs
-            colors[:, 1] = scats
-            colors[:, 2] = refs
+            colors[:, 0] = col_scale
+            colors[:, 1] = col_scale
+            colors[:, 2] = col_scale
 
-            self._refscale = refscale
-            self._scatscale = scatscale
+            self._ref = refs
+            self._scat = scats
 
             # Downsample if possible to reduce number of triangles
             if triangles is None:
@@ -78,22 +80,15 @@ class Environment(object):
         else:
             pass
 
-    def setScatteringCoeffs(self, coef, scale=10):
-        if coef.shape[0] != self.vertices.shape[0]:
-            raise RuntimeError('Scattering coefficients must be the same size as vertex points')
-        old_stuff = np.asarray(self._pcd.colors)
-        old_stuff[:, 1] = coef
-        self._pcd.colors = o3d.utility.Vector3dVector(old_stuff)
-        self._scatscale = scale
+    def setScatteringCoeffs(self, coef):
+        if coef.shape[0] != self.triangles.shape[0]:
+            raise RuntimeError('Scattering coefficients must be the same size as triangle points')
+        self._scat = coef
 
-    def setReflectivityCoeffs(self, coef, scale=10):
-        if coef.shape[0] != self.vertices.shape[0]:
-            raise RuntimeError('Reflectivity coefficients must be the same size as vertex points')
-        old_stuff = np.asarray(self._pcd.colors)
-        old_stuff[:, 0] = coef
-        old_stuff[:, 2] = coef
-        self._pcd.colors = o3d.utility.Vector3dVector(old_stuff)
-        self._refscale = scale
+    def setReflectivityCoeffs(self, coef):
+        if coef.shape[0] != self.triangles.shape[0]:
+            raise RuntimeError('Reflectivity coefficients must be the same size as triangle points')
+        self._ref = coef
 
     def getDistance(self, pos):
         return np.linalg.norm(self.vertices - pos[None, :], axis=1)
@@ -119,11 +114,11 @@ class Environment(object):
 
     @property
     def ref_coefs(self):
-        return np.asarray(self._pcd.colors)[:, 0] * self._refscale
+        return self._ref
 
     @property
     def scat_coefs(self):
-        return np.asarray(self._pcd.colors)[:, 1] * self._scatscale
+        return self._scat
 
 
 class MapEnvironment(Environment):
@@ -158,6 +153,8 @@ class SDREnvironment(Environment):
             asi = np.zeros((1000, 1000)) + .001
             asi[250, 250] = 1
             asi[750, 750] = 1
+        except TypeError:
+            asi = sdr.loadASI(sdr.files['asi'][list(sdr.files['asi'].keys())[0]])
         self._sdr = sdr
         self._asi = asi
         self.heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
@@ -167,16 +164,20 @@ class SDREnvironment(Environment):
                   (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
             alt = getElevation(pt)
             mrange = hght / np.tan(sdr.ant[0].dep_ang)
-            ref_llh = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
+            ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
                               (pt[0], pt[1], alt))
         else:
-            ref_llh = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
+            origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
                        getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+            ref_llh = (sdr.ash['geo']['refLat'], sdr.ash['geo']['refLon'],
+                       sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']
             self.cps = sdr.ash['geo']['colPixelSizeM']
             self.heading = -sdr.ash['flight']['flnHdg'] * DTR
 
-        self.origin = ref_llh
+        self.origin = origin
+        self.ref = ref_llh
+        shift_x, shift_y, _ = llh2enu(*origin, ref_llh)
         grid = db(asi)
 
         # Set grid to be one meter resolution
@@ -187,9 +188,10 @@ class SDREnvironment(Environment):
         self.cps *= colup
 
         # Reduce grid to int8
-        # mu = grid[grid != -300].mean()
-        # std = grid[grid != -300].std()
-        # grid = np.digitize(grid, np.linspace(mu - std * 3, mu + std * 3, 255))
+        grid = medfilt2d(grid, 5)
+        mu = grid[grid > -200].mean()
+        std = grid[grid > -200].std()
+        grid = np.digitize(grid, np.linspace(mu - std * 3, mu + std * 3, 1000))
 
         # Generate 2d triangle mesh
         ptx, pty, reflectivity, simplices = mesh(grid, tri_err, num_vertices)
@@ -201,14 +203,13 @@ class SDREnvironment(Environment):
         pty *= self.cps
         rotated = rot.from_euler('z', self.heading).apply(
             np.array([ptx, pty, np.zeros_like(ptx)]).T)
-        lat, lon, alt = enu2llh(rotated[:, 0], rotated[:, 1], np.zeros_like(ptx), ref_llh)
+        lat, lon, alt = enu2llh(rotated[:, 0] + shift_x, rotated[:, 1] + shift_y, np.zeros_like(ptx), ref_llh)
         e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)
         self._grid = grid
         self._grid_info = []
-        ref_max = reflectivity.max()
 
-        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=reflectivity / ref_max,
-                         triangles=simplices, refscale=ref_max)
+        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=reflectivity,
+                         triangles=simplices)
 
 
 def mesh(grid, tri_err, num_vertices):
@@ -217,7 +218,7 @@ def mesh(grid, tri_err, num_vertices):
     ptx = ptx.flatten()
     pty = pty.flatten()
     im = grid[ptx, pty]
-    nonzeros = im != -300
+    nonzeros = im > 0
     ptx = ptx[nonzeros]
     pty = pty[nonzeros]
     im = im[nonzeros]
@@ -232,16 +233,19 @@ def mesh(grid, tri_err, num_vertices):
     total_its = 20
     while total_err > tri_err and its < total_its:
         pts_tri = tri.find_simplex(pts).astype(int)
+        sort_args = pts_tri.argsort()
+        sorted_arr = pts_tri[sort_args]
+        _, cut = np.unique(sorted_arr, return_index=True)
+        out = np.split(sort_args, cut)
         total_err = 0
         add_pts = []
-        for t in range(tri.simplices.shape[0]):
+        for simplex in out:
             # Calculate out SVS error of triangle
-            pts_idx = np.where(pts_tri == t)[0]
-            if len(pts_idx) > 0:
-                tric = im[pts_idx].mean()
-                errors = abs(im[pts_idx] - tric) ** 2
+            if len(simplex) > 1:
+                tric = im[simplex].mean()
+                errors = abs(im[simplex] - tric) ** 2
                 if np.mean(errors) > tri_err:
-                    winner = pts_idx[errors == errors.max()][0]
+                    winner = simplex[errors == errors.max()][0]
                     add_pts.append([ptx[winner], pty[winner]])
                     total_err += sum(errors)
                     if len(add_pts) + tri.points.shape[0] >= num_vertices:
@@ -252,5 +256,8 @@ def mesh(grid, tri_err, num_vertices):
         its += 1
     ptx = tri.points[:, 0]
     pty = tri.points[:, 1]
-    reflectivity = grid[ptx.astype(int), pty.astype(int)]
+    reflectivity = \
+        (grid[tri.points[tri.simplices[:, 0], 0].astype(int), tri.points[tri.simplices[:, 0], 1].astype(int)] +
+         grid[tri.points[tri.simplices[:, 1], 0].astype(int), tri.points[tri.simplices[:, 1], 1].astype(int)] +
+         grid[tri.points[tri.simplices[:, 2], 0].astype(int), tri.points[tri.simplices[:, 2], 1].astype(int)]) / 3
     return ptx, pty, reflectivity, tri.simplices
