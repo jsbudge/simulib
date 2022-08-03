@@ -1,10 +1,9 @@
 import numpy as np
-from simulation_functions import getMapLocation, createMeshFromPoints, getElevationMap, rotate, llh2enu, genPulse, \
-    enu2llh, getElevation, detect_local_extrema, db
+from simulation_functions import getElevationMap, llh2enu, \
+    enu2llh, getElevation, db, resampleGrid
 import open3d as o3d
 from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
-from scipy.interpolate import RectBivariateSpline
 from scipy.spatial import Delaunay
 from scipy.signal import medfilt2d
 import pickle
@@ -165,10 +164,10 @@ class SDREnvironment(Environment):
             alt = getElevation(pt)
             mrange = hght / np.tan(sdr.ant[0].dep_ang)
             ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
-                              (pt[0], pt[1], alt))
+                                       (pt[0], pt[1], alt))
         else:
             origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
-                       getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+                      getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
             ref_llh = (sdr.ash['geo']['refLat'], sdr.ash['geo']['refLon'],
                        sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']
