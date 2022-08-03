@@ -144,16 +144,19 @@ class SDREnvironment(Environment):
     def __init__(self, sdr_file, num_vertices=100000, tri_err=35):
         # Load in the SDR file
         sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
+        grid = None
         print('SDR loaded')
         try:
             asi = sdr.loadASI(sdr.files['asi'])
         except KeyError:
             print('ASI not found.')
-            asi = np.zeros((1000, 1000)) + .001
-            asi[250, 250] = 1
-            asi[750, 750] = 1
+            asi = np.random.rand(2000, 2000)
+            asi[250, 250] = 10
+            asi[750, 750] = 10
+            grid = asi
         except TypeError:
             asi = sdr.loadASI(sdr.files['asi'][list(sdr.files['asi'].keys())[0]])
+            grid = db(asi)
         self._sdr = sdr
         self._asi = asi
         self.heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
@@ -177,7 +180,6 @@ class SDREnvironment(Environment):
         self.origin = origin
         self.ref = ref_llh
         shift_x, shift_y, _ = llh2enu(*origin, ref_llh)
-        grid = db(asi)
 
         # Set grid to be one meter resolution
         rowup = int(1 / self.rps) if self.rps < 1 else 1

@@ -1,5 +1,6 @@
 import numpy as np
-from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap, enu2llh
+from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap, enu2llh, \
+    loadPostCorrectionsGPSData, loadPreCorrectionsGPSData, loadGPSData
 from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
@@ -25,6 +26,7 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
+# bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
 upsample = 4
 cpi_len = 64
 plp = .5
@@ -38,7 +40,7 @@ sdr = SDRParse(bg_file)
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=200000, tri_err=20)
+bg = SDREnvironment(sdr, num_vertices=10000, tri_err=30)
 
 # Grab vertices and such
 vertices = bg.vertices
@@ -50,7 +52,9 @@ print('Done.')
 
 # Generate a platform
 print('Generating platform...', end='')
-rp = SDRPlatform(sdr, bg.ref)
+t0 = loadPostCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
+t1 = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
+rp = SDRPlatform(sdr, bg.ref, gps_data=t0)
 
 # Get reference data
 flight = rp.pos(rp.gpst)
@@ -211,8 +215,22 @@ del gz_gpu
 dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
                                  facecolor=bg.ref_coefs)])
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
-dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+tx_flight = rp.txpos(rp.gpst)
+rx_flight = rp.rxpos(rp.gpst)
+dfig.add_scatter3d(x=tx_flight[0, :], y=tx_flight[1, :], z=tx_flight[2, :])
+# dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
 dfig.show()
+
+te, tn, tu = llh2enu(t0['tx_lat'], t0['tx_lon'], t0['tx_alt'], bg.ref)
+re, rn, ru = llh2enu(t0['rx_lat'], t0['rx_lon'], t0['rx_alt'], bg.ref)
+e, n, u = llh2enu(t1['lat'], t1['lon'], t1['alt'], bg.ref)
+ee, nn, uu = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], bg.ref)
+ffig = px.scatter_3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
+ffig.add_scatter3d(x=tx_flight[0, :], y=tx_flight[1, :], z=tx_flight[2, :])
+ffig.add_scatter3d(x=rx_flight[0, :], y=rx_flight[1, :], z=rx_flight[2, :])
+ffig.add_scatter3d(x=te, y=tn, z=tu)
+ffig.add_scatter3d(x=re, y=rn, z=ru)
+ffig.show()
 
 bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_res).flatten())
 bfig.show()

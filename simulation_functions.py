@@ -143,8 +143,8 @@ def getElevation(pt):
     # yres is the resolution in the y-direction (in degrees/sample)
     ulx, xres, xskew, uly, yskew, yres = ds.GetGeoTransform()
     # calculate the x and y indices into the DTED data for the lat/lon
-    px = int((lon - ulx) / xres) - 1 if (lon - ulx) / xres % 1 < .5 else 0
-    py = int((lat - uly) / yres) - 1 if (lat - uly) / yres % 1 < .5 else 0
+    px = int((lon - ulx) / xres) - (1 if (lon - ulx) / xres % 1 < .5 else 0)
+    py = int((lat - uly) / yres) - (1 if (lat - uly) / yres % 1 < .5 else 0)
 
     # only if these x and y indices are within the bounds of the DTED, get the
     # raster band and try to read in the DTED values
@@ -433,3 +433,358 @@ class PlotWithSliders(object):
         self._fig.update_layout(updatemenus=update_menus, sliders=slider)
         self._fig.update_layout(sliders=slider)
         self._fig.show()
+
+
+'''
+--------------------------------------DEBUG DATA PARSER STUFF-----------------------------------------------------------
+'''
+
+
+def loadRawData(filename, num_pulses, start_pulse=0):
+    with open(filename, 'rb') as fid:
+        num_frames = np.fromfile(fid, 'uint32', 1, '')[0]
+        if start_pulse + num_pulses > num_frames:
+            num_pulses = num_frames - start_pulse
+            print(f"Too many frames for file! Using {num_pulses} pulses instead")
+        num_samples = np.fromfile(fid, 'uint16', 1, '')[0]
+        attenuation = np.fromfile(fid, 'uint8', num_frames, '')
+        sys_time = np.fromfile(fid, 'double', num_frames, '')
+        raw_data = np.zeros((num_samples, num_pulses)).astype(np.int16)
+        fid.seek(fid.tell() + start_pulse * 2 * num_samples)
+        for i in range(num_pulses):
+            raw_data[:, i] = np.fromfile(fid, 'int16', num_samples, '') * 10 ** (attenuation[start_pulse + i] / 20)
+    return raw_data, num_pulses, attenuation, sys_time
+
+
+def getRawDataGen(filename, num_pulses, num_desired_frames=None, start_pulse=0, isIQ=False):
+    with open(filename, 'rb') as fid:
+        num_frames = np.fromfile(fid, 'uint32', 1, '')[0]
+        if isIQ:
+            num_samples = np.fromfile(fid, 'uint32', 1, '')[0]
+        else:
+            num_samples = np.fromfile(fid, 'uint16', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', num_frames, '')
+        sys_time = np.fromfile(fid, 'double', num_frames, '')
+        ndf = num_frames if num_desired_frames is None else num_desired_frames
+        if isIQ:
+            fid.seek(fid.tell() + start_pulse * 2 * num_samples)
+            for npulse in range(0, ndf, num_pulses):
+                proc_pulses = num_pulses if npulse + num_pulses < ndf else ndf - npulse
+                raw_data = np.zeros((num_samples, proc_pulses)).astype(np.complex128)
+                pulse_range = np.arange(npulse + start_pulse, npulse + proc_pulses + start_pulse)
+                for i in range(proc_pulses):
+                    tmp = np.fromfile(fid, 'int16', num_samples * 2, '')
+                    raw_data[:, i] = (tmp[0::2] + 1j * tmp[1::2]) * 10 ** (attenuation[pulse_range[0] + i] / 20)
+                yield raw_data, pulse_range, attenuation[pulse_range], sys_time[pulse_range]
+        else:
+            fid.seek(fid.tell() + start_pulse * 2 * num_samples)
+            for npulse in range(0, ndf, num_pulses):
+                proc_pulses = num_pulses if npulse + num_pulses < ndf else ndf - npulse
+                raw_data = np.zeros((num_samples, proc_pulses)).astype(np.int16)
+                pulse_range = np.arange(npulse + start_pulse, npulse + proc_pulses + start_pulse)
+                for i in range(proc_pulses):
+                    raw_data[:, i] = np.fromfile(fid, 'int16', num_samples, '') * 10 ** (
+                            attenuation[pulse_range[0] + i] / 20)
+                yield raw_data, pulse_range, attenuation[pulse_range], sys_time[pulse_range]
+
+
+def getRawData(filename, num_pulses, start_pulse=0, isIQ=False):
+    """
+    Parses raw data from an APS debug .dat file.
+    :param filename: str Name of .dat file to parse.
+    :param num_pulses: int Number of pulses to parse.
+    :param start_pulse: int The function will start with this pulse number.
+    :param isIQ: bool if True, assumes data is stored as complex numbers. Otherwise, reads data as ints.
+    :return:
+        raw_data: numpy array Array of pulse data, size of number_samples_per_pulse x num_pulses.
+        pulse_range: numpy array List of each pulse's number in the parsed file.
+        attenuation: numpy array List of attenuation factors associated with each pulse.
+        sys_time: numpy array List of system times, in TAC, associated with each pulse.
+    """
+    with open(filename, 'rb') as fid:
+        num_frames = np.fromfile(fid, 'uint32', 1, '')[0]
+        if isIQ:
+            num_samples = np.fromfile(fid, 'uint32', 1, '')[0]
+        else:
+            num_samples = np.fromfile(fid, 'uint16', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', num_frames, '')
+        sys_time = np.fromfile(fid, 'double', num_frames, '')
+        proc_pulses = num_pulses if start_pulse + num_pulses < num_frames else num_frames - start_pulse
+        pulse_range = np.arange(start_pulse, start_pulse + proc_pulses)
+        if isIQ:
+            fid.seek(fid.tell() + start_pulse * 4 * num_samples)
+            raw_data = np.zeros((num_samples, proc_pulses)).astype(np.complex128)
+            for i in range(proc_pulses):
+                tmp = np.fromfile(fid, 'int16', num_samples * 2, '')
+                raw_data[:, i] = (tmp[0::2] + 1j * tmp[1::2]) * 10 ** (attenuation[start_pulse + i] / 20)
+            return raw_data, pulse_range, attenuation[pulse_range], sys_time[pulse_range]
+        else:
+            fid.seek(fid.tell() + start_pulse * 2 * num_samples)
+            raw_data = np.zeros((num_samples, proc_pulses)).astype(np.int16)
+            for i in range(proc_pulses):
+                raw_data[:, i] = np.fromfile(fid, 'int16', num_samples, '') * 10 ** (
+                        attenuation[start_pulse + i] / 20)
+            return raw_data, pulse_range, attenuation[pulse_range], sys_time[pulse_range]
+
+
+def getFullRawData(filename, num_pulses, start_pulse=0, isIQ=False):
+    """
+    Parses raw data from an APS debug .dat file.
+    :param filename: str Name of .dat file to parse.
+    :param num_pulses: int Number of pulses to parse.
+    :param start_pulse: int The function will start with this pulse number.
+    :param isIQ: bool if True, assumes data is stored as complex numbers. Otherwise, reads data as ints.
+    :return:
+        raw_data: numpy array Array of pulse data, size of number_samples_per_pulse x num_pulses.
+        pulse_range: numpy array List of each pulse's number in the parsed file.
+        attenuation: numpy array List of attenuation factors associated with each pulse.
+        sys_time: numpy array List of system times, in TAC, associated with each pulse.
+    """
+    with open(filename, 'rb') as fid:
+        num_frames = np.fromfile(fid, 'uint32', 1, '')[0]
+        if isIQ:
+            num_samples = np.fromfile(fid, 'uint32', 1, '')[0]
+        else:
+            num_samples = np.fromfile(fid, 'uint16', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', num_frames, '')
+        sys_time = np.fromfile(fid, 'double', num_frames, '')
+        proc_pulses = num_pulses if start_pulse + num_pulses < num_frames else num_frames - start_pulse
+        pulse_range = np.arange(start_pulse, start_pulse + proc_pulses)
+        if isIQ:
+            fid.seek(fid.tell() + start_pulse * 8 * num_samples)
+            raw_data = np.zeros((num_samples, proc_pulses)).astype(np.complex128)
+            for i in range(proc_pulses):
+                tmp = np.fromfile(fid, 'complex128', num_samples, '')
+                raw_data[:, i] = tmp
+        else:
+            fid.seek(fid.tell() + start_pulse * 2 * num_samples)
+            raw_data = np.zeros((num_samples, proc_pulses)).astype(np.int16)
+            for i in range(proc_pulses):
+                raw_data[:, i] = np.fromfile(fid, 'int16', num_samples, '') * 10 ** (
+                        attenuation[start_pulse + i] / 20)
+
+        return raw_data, pulse_range, attenuation[pulse_range], sys_time[pulse_range]
+
+
+def loadDechirpRawData(filename, num_pulses, start_pulse=0):
+    with open(filename, 'rb') as fid:
+        num_frames = np.fromfile(fid, 'uint32', 1, '')[0]
+        if start_pulse + num_pulses > num_frames:
+            num_pulses = num_frames - start_pulse
+            print(f"Too many frames for file! Using {num_pulses} pulses instead")
+        num_samples = np.fromfile(fid, 'uint32', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', num_frames, '')
+        sys_time = np.fromfile(fid, 'double', num_frames, '')
+        raw_data = np.zeros((num_samples, num_pulses)).astype(np.complex64)
+        fid.seek(fid.tell() + start_pulse * 2 * num_samples)
+        for i in range(num_pulses):
+            raw_data[:, i] = (np.fromfile(fid, 'int16', num_samples, '') + 1j * np.fromfile(fid, 'int16', num_samples,
+                                                                                            '')) * 10 ** (
+                                     attenuation[i] / 20)
+    return raw_data, num_pulses, attenuation, sys_time
+
+
+def getDechirpRawDataGen(filename, numPulses, numDesiredFrames=None, start_pulse=0):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        numSamples = np.fromfile(fid, 'uint32', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', numFrames, '')
+        sys_time = np.fromfile(fid, 'double', numFrames, '')
+        ndf = numFrames if numDesiredFrames is None else numDesiredFrames
+        fid.seek(fid.tell() + start_pulse * 2 * numSamples)
+        for npulse in range(0, ndf, numPulses):
+            proc_pulses = numPulses if npulse + numPulses < ndf else ndf - npulse
+            raw_data = np.zeros((numSamples, proc_pulses)).astype(np.complex128)
+            pulseRange = np.arange(npulse, npulse + proc_pulses)
+            for i in range(proc_pulses):
+                raw_data[:, i] = (np.fromfile(fid, 'int16', numSamples, '') + 1j * np.fromfile(fid, 'int16', numSamples,
+                                                                                               '')) * 10 ** (
+                                         attenuation[pulseRange[0] + i] / 20)
+            yield raw_data, pulseRange, attenuation[pulseRange], sys_time[pulseRange]
+
+
+def loadFFTData(filename, numPulses, start_pulse=0):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        if start_pulse + numPulses > numFrames:
+            numPulses = numFrames - start_pulse
+            print(f"Too many frames for file! Using {numPulses} pulses instead")
+        numFFTSamples = np.fromfile(fid, 'uint32', 1, '')[0]
+        FFTData = np.zeros((numFFTSamples, numPulses)).astype(np.complex64)
+        fid.seek(fid.tell() + start_pulse * 8 * numFFTSamples)
+        for i in range(numPulses):
+            FFTData[:, i] = np.fromfile(fid, 'complex64', numFFTSamples, '')
+    return FFTData, numPulses
+
+
+def getFFTDataGen(filename, numPulses, numDesiredFrames=None, start_pulse=0):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        numFFTSamples = np.fromfile(fid, 'uint32', 1, '')[0]
+        ndf = numFrames if numDesiredFrames is None else numDesiredFrames
+        fid.seek(fid.tell() + start_pulse * 8 * numFFTSamples)
+        for npulse in range(0, ndf, numPulses):
+            proc_pulses = numPulses if npulse + numPulses < ndf else ndf - npulse
+            FFTdata = np.zeros((numFFTSamples, proc_pulses)).astype(np.complex64)
+            pulseRange = np.arange(npulse + start_pulse, npulse + proc_pulses + start_pulse)
+            for i in range(proc_pulses):
+                FFTdata[:, i] = np.fromfile(fid, 'complex64', numFFTSamples, '')
+            yield FFTdata, pulseRange
+
+
+def getSinglePulse(filename, pulse):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        numSamples = np.fromfile(fid, 'uint32', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', numFrames, '')
+        sys_time = np.fromfile(fid, 'double', numFrames, '')
+        fid.seek(fid.tell() + pulse * 2 * numSamples)
+        raw_data = np.fromfile(fid, 'int16', numSamples, '') * 10 ** (attenuation[pulse] / 20)
+    return raw_data, attenuation[pulse], sys_time[pulse]
+
+
+def getSingleFFTPulse(filename, pulse):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        numFFTSamples = np.fromfile(fid, 'uint32', 1, '')[0]
+        fid.seek(fid.tell() + pulse * 8 * numFFTSamples)
+        FFTData = np.fromfile(fid, 'complex64', numFFTSamples, '')
+    return FFTData
+
+
+"""
+GPS data format:
+First 32-bits: The number of INS frames (N)
+N * sizeof( double ): latitude in degrees
+N * sizeof( double ): longitude in degrees
+N * sizeof( double ): altitude in meters
+N * sizeof( double ): north velocity in meters per second
+N * sizeof( double ): east velocity in meters per second 
+N * sizeof( double ): up velocity in meters per second 
+N * sizeof( double ): roll in radians
+N * sizeof( double ): pitch in radians
+N * sizeof( double ): azimuth component in radians
+N * sizeof( double ): The number of milliseconds since the start of the GPS week, unwrapped
+"""
+
+
+def loadGPSData(filename):
+    fid = open(filename, 'rb')
+    numFrames = np.fromfile(fid, 'int32', 1, '')[0]
+    return {'frames': numFrames, 'lat': np.fromfile(fid, 'float64', numFrames, ''),
+            'lon': np.fromfile(fid, 'float64', numFrames, ''), 'alt': np.fromfile(fid, 'float64', numFrames, ''),
+            'vn': np.fromfile(fid, 'float64', numFrames, ''), 've': np.fromfile(fid, 'float64', numFrames, ''),
+            'vu': np.fromfile(fid, 'float64', numFrames, ''), 'r': np.fromfile(fid, 'float64', numFrames, ''),
+            'p': np.fromfile(fid, 'float64', numFrames, ''), 'azimuthX': np.fromfile(fid, 'float64', numFrames, ''),
+            'azimuthY': np.fromfile(fid, 'float64', numFrames, ''),
+            'gps_ms': np.fromfile(fid, 'float64', numFrames, ''), 'systime': np.fromfile(fid, 'float64', numFrames, '')}
+
+
+def loadPreCorrectionsGPSData(fnme):
+    # open the post-corrections
+    with open(fnme, 'rb') as fid:
+        # parse all of the post-correction data
+        numFrames = int(np.fromfile(fid, 'uint32', 1, '')[0])
+        lat = np.fromfile(fid, 'float64', numFrames, '')
+        lon = np.fromfile(fid, 'float64', numFrames, '')
+        alt = np.fromfile(fid, 'float64', numFrames, '')
+        vn = np.fromfile(fid, 'float64', numFrames, '')
+        ve = np.fromfile(fid, 'float64', numFrames, '')
+        vu = np.fromfile(fid, 'float64', numFrames, '')
+        r = np.fromfile(fid, 'float64', numFrames, '')
+        p = np.fromfile(fid, 'float64', numFrames, '')
+        az = np.fromfile(fid, 'float64', numFrames, '')
+        sec = np.fromfile(fid, 'float64', numFrames, '')
+    return dict(frames=numFrames, lat=lat, lon=lon, alt=alt, vn=vn, ve=ve, vu=vu, r=r, p=p, az=az, sec=sec)
+
+
+def loadPostCorrectionsGPSData(fnme):
+    # open the post-corrections
+    with open(fnme, 'rb') as fid:
+        # parse all of the post-correction data
+        numPostFrames = int(np.fromfile(fid, 'uint32', 1, '')[0])
+        latConv = np.fromfile(fid, 'float64', 1, '')[0]
+        lonConv = np.fromfile(fid, 'float64', 1, '')[0]
+        rxEastingM = np.fromfile(fid, 'float64', numPostFrames, '')
+        rxEastingM[abs(rxEastingM) < lonConv] *= lonConv
+        rxNorthingM = np.fromfile(fid, 'float64', numPostFrames, '')
+        rxNorthingM[abs(rxNorthingM) < latConv] *= \
+            latConv
+        rxAltM = np.fromfile(fid, 'float64', numPostFrames, '')
+        # fid.seek(numPostFrames * 8 * 3, 1)
+        txEastingM = np.fromfile(fid, 'float64', numPostFrames, '')
+        txEastingM[abs(txEastingM) < lonConv] *= lonConv
+        txNorthingM = np.fromfile(fid, 'float64', numPostFrames, '')
+        txNorthingM[abs(txNorthingM) < latConv] *= \
+            latConv
+        txAltM = np.fromfile(fid, 'float64', numPostFrames, '')
+        aziPostR = np.fromfile(fid, 'float64', numPostFrames, '')
+        sec = np.fromfile(fid, 'float64', numPostFrames, '')
+    return dict(frames=numPostFrames, latConv=latConv, lonConv=lonConv, rx_lon=rxEastingM / lonConv,
+                rx_lat=rxNorthingM / latConv, rx_alt=rxAltM, tx_lon=txEastingM / lonConv, tx_lat=txNorthingM / latConv,
+                tx_alt=txAltM, az=aziPostR, sec=sec)
+
+
+"""
+Gimbal data format:
+First 32-bits: The number of gimbal frames (N)
+N * sizeof( double ): pan position in radians
+N * sizeof( double ): tilt position in radians 
+N * sizeof( double ): system time in TAC, unwrapped
+"""
+
+
+def loadGimbalData(filename):
+    fid = open(filename, 'rb')
+    numFrames = np.fromfile(fid, 'int32', 1, '')[0]
+    ret_dict = {'pan': np.fromfile(fid, 'float64', numFrames, ''), 'tilt': np.fromfile(fid, 'float64', numFrames, ''),
+                'systime': np.fromfile(fid, 'float64', numFrames, '')}
+    return ret_dict
+
+
+def loadMatchedFilter(filename):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        ret = np.fromfile(fid, 'complex64', numFrames, '')
+    return ret
+
+
+def loadReferenceChirp(filename):
+    with open(filename, 'rb') as fid:
+        num_samples = np.fromfile(fid, 'uint32', 1, '')[0]
+        tmp = np.fromfile(fid, 'int16', num_samples * 2, '')
+        ret = (tmp[0::2] + 1j * tmp[1::2]) * 10 ** (31 / 20)
+    return ret
+
+
+def getFFTParams(filename):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')
+        numFFTSamples = np.fromfile(fid, 'uint32', 1, '')
+    return numFrames[0], numFFTSamples[0]
+
+
+def getRawParams(filename):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        numSamples = np.fromfile(fid, 'uint16', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', numFrames, '')
+        sys_time = np.fromfile(fid, 'double', numFrames, '')
+    return numFrames, numSamples, attenuation, sys_time
+
+
+def getRawSDRParams(filename):
+    with open(filename, 'rb') as fid:
+        numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
+        numSamples = np.fromfile(fid, 'uint32', 1, '')[0]
+        attenuation = np.fromfile(fid, 'int8', numFrames, '')
+        sys_time = np.fromfile(fid, 'double', numFrames, '')
+    return numFrames, numSamples, attenuation, sys_time
+
+
+def createIFTMatrix(m, fs):
+    D = np.ones((m, m), dtype='complex64')
+    for i in range(1, m):
+        D[:, m] = np.exp(1j * 2 * pi * i * fs / m * np.arange(m) * 1 / (fs / m))
+
+    return D
