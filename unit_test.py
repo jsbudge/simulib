@@ -52,12 +52,14 @@ print('Done.')
 
 # Generate a platform
 print('Generating platform...', end='')
-t0 = loadPostCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
-t1 = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
-rp = SDRPlatform(sdr, bg.ref, gps_data=t0)
+gps_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat'
+postCorr = loadPostCorrectionsGPSData(gps_debug)
+rawGPS = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
+preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')
+rp = SDRPlatform(sdr, bg.ref, debug_fnme=gps_debug)
 
 # Get reference data
-flight = rp.pos(rp.gpst)
+flight = rp.pos(postCorr['sec'])
 fc = sdr[0].fc
 fs = sdr[0].fs
 bwidth = sdr[0].bw
@@ -67,10 +69,10 @@ print('Done.')
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
-plat_height = 0
-nr = rp.calcPulseLength(plat_height, plp, use_tac=True)
-nsam = rp.calcNumSamples(plat_height, plp)
-ranges = rp.calcRangeBins(plat_height, upsample, plp)
+fdelay = 5.5
+nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
+nsam = rp.calcNumSamples(fdelay, plp)
+ranges = rp.calcRangeBins(fdelay, upsample, plp)
 granges = ranges * np.cos(rp.dep_ang)
 fft_len = findPowerOf2(nsam + nr)
 up_fft_len = fft_len * upsample
@@ -215,15 +217,16 @@ del gz_gpu
 dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
                                  facecolor=bg.ref_coefs)])
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
-tx_flight = rp.txpos(rp.gpst)
-rx_flight = rp.rxpos(rp.gpst)
+tx_flight = rp.txpos(postCorr['sec'])
+rx_flight = rp.rxpos(postCorr['sec'])
 dfig.add_scatter3d(x=tx_flight[0, :], y=tx_flight[1, :], z=tx_flight[2, :])
 # dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
 dfig.show()
 
-te, tn, tu = llh2enu(t0['tx_lat'], t0['tx_lon'], t0['tx_alt'], bg.ref)
-re, rn, ru = llh2enu(t0['rx_lat'], t0['rx_lon'], t0['rx_alt'], bg.ref)
-e, n, u = llh2enu(t1['lat'], t1['lon'], t1['alt'], bg.ref)
+te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], bg.ref)
+re, rn, ru = llh2enu(postCorr['rx_lat'], postCorr['rx_lon'], postCorr['rx_alt'], bg.ref)
+pe, pn, pu = llh2enu(preCorr['lat'], preCorr['lon'], preCorr['alt'], bg.ref)
+e, n, u = llh2enu(rawGPS['lat'], rawGPS['lon'], rawGPS['alt'], bg.ref)
 ee, nn, uu = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], bg.ref)
 ffig = px.scatter_3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 ffig.add_scatter3d(x=tx_flight[0, :], y=tx_flight[1, :], z=tx_flight[2, :])
@@ -241,4 +244,61 @@ bfig.show()
 plt.figure()
 plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1))
 plt.axis('tight')
+
+n_diff = flight[1, :] - pn
+e_diff = flight[0, :] - pe
+u_diff = flight[2, :] - pu
+plt.figure('diffs')
+plt.plot(n_diff)
+plt.plot(e_diff)
+plt.plot(u_diff)
+
+nn_diff = (np.interp(rawGPS['gps_ms'], sdr.gps_data.index, sdr.gps_data['lat']) - rawGPS['lat']) * postCorr['latConv']
+ee_diff = (np.interp(rawGPS['gps_ms'], sdr.gps_data.index, sdr.gps_data['lon']) - rawGPS['lon']) * postCorr['lonConv']
+uu_diff = (np.interp(rawGPS['gps_ms'], sdr.gps_data.index, sdr.gps_data['alt']) - rawGPS['alt'])
+plt.figure('rawdiffs')
+plt.plot(nn_diff)
+plt.plot(ee_diff)
+plt.plot(uu_diff)
+
+se, sn, su = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], bg.ref)
+plt.figure('show')
+plt.subplot(2, 2, 1)
+plt.title('e')
+plt.plot(sdr.gps_data.index, se)
+plt.plot(postCorr['sec'], flight[0, :])
+plt.plot(preCorr['sec'], pe)
+plt.plot(rawGPS['gps_ms'], e)
+plt.legend(['sdr', 'interp_sdr', 'pre', 'raw'])
+plt.subplot(2, 2, 2)
+plt.title('e')
+plt.plot(sdr.gps_data.index, sn)
+plt.plot(postCorr['sec'], flight[1, :])
+plt.plot(preCorr['sec'], pn)
+plt.plot(rawGPS['gps_ms'], n)
+plt.subplot(2, 2, 3)
+plt.title('e')
+plt.plot(sdr.gps_data.index, su)
+plt.plot(postCorr['sec'], flight[2, :])
+plt.plot(preCorr['sec'], pu)
+plt.plot(rawGPS['gps_ms'], u)
+plt.show()
+
+plt.figure('show')
+plt.subplot(2, 2, 1)
+plt.title('r')
+plt.plot(sdr.gps_data.index, sdr.gps_data['r'])
+plt.plot(preCorr['sec'], preCorr['r'])
+plt.plot(rawGPS['gps_ms'], rawGPS['r'])
+plt.subplot(2, 2, 2)
+plt.title('p')
+plt.plot(sdr.gps_data.index, sdr.gps_data['p'])
+plt.plot(preCorr['sec'], preCorr['p'])
+plt.plot(rawGPS['gps_ms'], rawGPS['p'])
+plt.subplot(2, 2, 3)
+plt.title('y')
+plt.plot(sdr.gps_data.index, sdr.gps_data['y'] - np.pi * 2)
+plt.plot(postCorr['sec'], postCorr['az'])
+plt.plot(preCorr['sec'], preCorr['az'])
+plt.legend(['sdr', 'interp_sdr', 'pre', 'raw'])
 plt.show()

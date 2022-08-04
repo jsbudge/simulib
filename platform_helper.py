@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from SDRParsing import SDRParse
-from simulation_functions import llh2enu, findPowerOf2
+from simulation_functions import llh2enu, findPowerOf2, loadPostCorrectionsGPSData, loadRawData, loadGimbalData, \
+    loadMatchedFilter, loadReferenceChirp
 from scipy.spatial.transform import Rotation as rot
 
 c0 = 299792458.0
@@ -23,11 +24,12 @@ class Platform(object):
         self._rxant = rx_offset
         self._gimbal = gimbal
         self._gimbal_offset = gimbal_offset
+        new_t = gps_data['sec'] if gps_data is not None else t
 
         # attitude spline
         rr = CubicSpline(t, r)
         pp = CubicSpline(t, p)
-        yy = CubicSpline(t, y)
+        yy = CubicSpline(t, y) if gps_data is None else CubicSpline(new_t, gps_data['az'] + 2 * np.pi)
         self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)])
 
         # Take into account the gimbal if necessary
@@ -75,8 +77,8 @@ class Platform(object):
             sr = np.sin(r)
             cp = np.cos(p)
             sp = np.sin(p)
-            cy = np.cos(y)
-            sy = np.sin(y)
+            cy = np.cos(y) if gps_data is None else np.cos(np.interp(t, new_t, gps_data['az']))
+            sy = np.sin(y) if gps_data is None else np.sin(np.interp(t, new_t, gps_data['az']))
             b2_itx = np.array([(cr * cy + sr * sp * sy) * a2_itx[0] + cp * a2_itx[1] + (sr * cy - cr * sp * sy) * a2_itx[2],
                             (-cr * sy + sr * sp * sy) * a2_itx[0] + cp * a2_itx[1] + (-sr * sy - cr * sp * cy) * a2_itx[2],
                             -sr * cp * a2_itx[0] + sp * a2_itx[1] + cr * cp * a2_itx[2]])
@@ -86,7 +88,6 @@ class Platform(object):
                  -sr * cp * a2_irx[0] + sp * a2_irx[1] + cr * cp * a2_irx[2]])
 
             # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
-            new_t = t
             if gps_data is not None:
                 te = gps_data['te']
                 tn = gps_data['tn']
@@ -94,10 +95,6 @@ class Platform(object):
                 re = gps_data['re']
                 rn = gps_data['rn']
                 ru = gps_data['ru']
-                e = te
-                n = tn
-                u = tu
-                new_t = gps_data['sec']
             else:
                 te = e + b2_itx[0]
                 tn = n + b2_itx[1]
@@ -119,7 +116,6 @@ class Platform(object):
             if gps_data is not None:
                 gtheta = np.interp(new_t, t, np.arcsin(-bai[2, :]))
                 gphi = np.interp(new_t, t, np.arctan2(bai[0, :], bai[1, :]))
-                t = new_t
             else:
                 gtheta = np.arcsin(-bai[2, :])
                 gphi = np.arctan2(bai[0, :], bai[1, :])
@@ -135,13 +131,13 @@ class Platform(object):
         nn = CubicSpline(t, n)
         uu = CubicSpline(t, u)
         self._pos = lambda lam_t: np.array([ee(lam_t), nn(lam_t), uu(lam_t)])
-        tte = CubicSpline(t, te)
-        ttn = CubicSpline(t, tn)
-        ttu = CubicSpline(t, tu)
+        tte = CubicSpline(new_t, te)
+        ttn = CubicSpline(new_t, tn)
+        ttu = CubicSpline(new_t, tu)
         self._txpos = lambda lam_t: np.array([tte(lam_t), ttn(lam_t), ttu(lam_t)])
-        rre = CubicSpline(t, re)
-        rrn = CubicSpline(t, rn)
-        rru = CubicSpline(t, ru)
+        rre = CubicSpline(new_t, re)
+        rrn = CubicSpline(new_t, rn)
+        rru = CubicSpline(new_t, ru)
         self._rxpos = lambda lam_t: np.array([rre(lam_t), rrn(lam_t), rru(lam_t)])
 
         # Build a velocity spline
@@ -154,8 +150,8 @@ class Platform(object):
         self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[0], self._vel(lam_t)[1])
 
         # Beampattern stuff
-        self.pan = CubicSpline(t, gphi)
-        self.tilt = CubicSpline(t, gtheta)
+        self.pan = CubicSpline(new_t, gphi)
+        self.tilt = CubicSpline(new_t, gtheta)
 
     @property
     def pos(self):
@@ -180,6 +176,10 @@ class Platform(object):
     @property
     def txpos(self):
         return self._txpos
+
+    @property
+    def vel(self):
+        return self._vel
 
 
 class RadarPlatform(Platform):
@@ -229,15 +229,18 @@ class RadarPlatform(Platform):
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, gps_data=None):
+    def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, debug_fnme=None):
         sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         fs = fs if fs is not None else sdr[channel].fs
-        origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[:, 0])
-        if gps_data is not None:
+        origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
+        if debug_fnme is not None:
+            gps_data = loadPostCorrectionsGPSData(debug_fnme)
             gps_data['te'], gps_data['tn'], gps_data['tu'] = llh2enu(gps_data['tx_lat'], gps_data['tx_lon'],
                                                                      gps_data['tx_alt'], origin)
             gps_data['re'], gps_data['rn'], gps_data['ru'] = llh2enu(gps_data['rx_lat'], gps_data['rx_lon'],
                                                                      gps_data['rx_alt'], origin)
+        else:
+            gps_data = None
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
         pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
                         sdr.gimbal['pan'].values.astype(np.float64))
@@ -262,22 +265,26 @@ class SDRPlatform(RadarPlatform):
                          el_bw=sdr.ant[tx_num].el_bw / DTR, fs=fs, gps_data=gps_data)
         self._sdr = sdr
         self.origin = origin
+        self._channel = channel
 
-    def calcRanges(self, fdelay):
-        nrange = ((self._sdr[0].receive_on_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC) * c0 / 2
+    def calcRanges(self, fdelay, partial_pulse_percent=1.):
+        nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
+                  self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
         # nrange = ((self._sdr[0].receive_on_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC -
         #           (findPowerOf2(self._sdr[0].nsam + self._sdr[0].pulse_length_N) - self._sdr[
         #               0].nsam) / self.fs) * c0 / 2
-        frange = nrange + self._sdr[0].nsam * c0 / 2 / self.fs
+        frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
+                  self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
         return nrange, frange
 
     def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
-        return self._sdr[0].pulse_length_N if use_tac else self._sdr[0].pulse_length_S
+        return self._sdr[self._channel].pulse_length_N if use_tac else self._sdr[self._channel].pulse_length_S
 
     def calcNumSamples(self, height, plp=1.):
-        return self._sdr[0].nsam
+        return self._sdr[self._channel].nsam
 
     def calcRangeBins(self, height, upsample=1, plp=1.):
         nrange, frange = self.calcRanges(height)
         MPP = c0 / self.fs / 2 / upsample
-        return nrange + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP
+        return nrange * 2 + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP
+
