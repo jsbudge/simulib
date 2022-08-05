@@ -1,6 +1,6 @@
 import numpy as np
 from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap, enu2llh, \
-    loadPostCorrectionsGPSData, loadPreCorrectionsGPSData, loadGPSData
+    loadPostCorrectionsGPSData, loadPreCorrectionsGPSData, loadGPSData, loadGimbalData
 from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
@@ -28,19 +28,19 @@ inch_to_m = .0254
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
 # bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
 upsample = 4
-cpi_len = 64
+cpi_len = 256
 plp = .5
 pts_per_tri = 1
 debug = True
 nbpj_pts = 300
 
 print('Loading SDR file...')
-sdr = SDRParse(bg_file)
+sdr = SDRParse(bg_file, do_exact_matches=False)
 
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=10000, tri_err=30)
+bg = SDREnvironment(sdr, num_vertices=30000, tri_err=30)
 
 # Grab vertices and such
 vertices = bg.vertices
@@ -53,10 +53,11 @@ print('Done.')
 # Generate a platform
 print('Generating platform...', end='')
 gps_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat'
+gimbal_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Gimbal.dat'
 postCorr = loadPostCorrectionsGPSData(gps_debug)
 rawGPS = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
 preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')
-rp = SDRPlatform(sdr, bg.ref, debug_fnme=gps_debug)
+rp = SDRPlatform(sdr, bg.ref)
 
 # Get reference data
 flight = rp.pos(postCorr['sec'])
@@ -132,9 +133,7 @@ bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 bpj_truedata = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
 # Run through loop to get data simulated
-data_t = np.interp(np.linspace(0, len(rp.gpst),
-                               int((rp.gpst[-1] - rp.gpst[0]) * rp._sdr[0].nframes / (rp.gpst[-1] - rp.gpst[0]))),
-                   np.arange(len(rp.gpst)), rp.gpst)
+data_t = sdr[0].pulse_time
 idx_t = np.arange(len(data_t))
 print('Simulating...')
 pulse_pos = 0
@@ -164,11 +163,13 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
     rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
-    if ts[0] < rp.gpst.mean() <= ts[-1]:
+
+    # Simulated data debug checks
+    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
         test = rtdata.get()
         angd = angs_debug.get()
-        locd = pts_debug.get()
+        locd = pts_debug.get()'''
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
@@ -187,14 +188,14 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     cupy.cuda.Device().synchronize()
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
-    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
+    if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
-        test = rtdata.get()'''
+        test = rtdata.get()
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu,
                                             panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                            c0 / fc, ranges[0] / c0,
+                                            c0 / fc - bwidth / 2, ranges[0] / c0,
                                             rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0)
     cupy.cuda.Device().synchronize()
     bpj_truedata += bpj_grid.get()
@@ -241,8 +242,12 @@ bfig.show()
 bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
 bfig.show()
 
-plt.figure()
+plt.figure('Doppler data')
 plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1))
+plt.axis('tight')
+
+plt.figure('IMSHOW truedata')
+plt.imshow(db(bpj_truedata), origin='lower')
 plt.axis('tight')
 
 n_diff = flight[1, :] - pn
@@ -262,7 +267,7 @@ plt.plot(ee_diff)
 plt.plot(uu_diff)
 
 se, sn, su = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], bg.ref)
-plt.figure('show')
+plt.figure('enu')
 plt.subplot(2, 2, 1)
 plt.title('e')
 plt.plot(sdr.gps_data.index, se)
@@ -271,20 +276,19 @@ plt.plot(preCorr['sec'], pe)
 plt.plot(rawGPS['gps_ms'], e)
 plt.legend(['sdr', 'interp_sdr', 'pre', 'raw'])
 plt.subplot(2, 2, 2)
-plt.title('e')
+plt.title('n')
 plt.plot(sdr.gps_data.index, sn)
 plt.plot(postCorr['sec'], flight[1, :])
 plt.plot(preCorr['sec'], pn)
 plt.plot(rawGPS['gps_ms'], n)
 plt.subplot(2, 2, 3)
-plt.title('e')
+plt.title('u')
 plt.plot(sdr.gps_data.index, su)
 plt.plot(postCorr['sec'], flight[2, :])
 plt.plot(preCorr['sec'], pu)
 plt.plot(rawGPS['gps_ms'], u)
-plt.show()
 
-plt.figure('show')
+plt.figure('rpy')
 plt.subplot(2, 2, 1)
 plt.title('r')
 plt.plot(sdr.gps_data.index, sdr.gps_data['r'])
@@ -301,4 +305,16 @@ plt.plot(sdr.gps_data.index, sdr.gps_data['y'] - np.pi * 2)
 plt.plot(postCorr['sec'], postCorr['az'])
 plt.plot(preCorr['sec'], preCorr['az'])
 plt.legend(['sdr', 'interp_sdr', 'pre', 'raw'])
+
+gimbal_data = loadGimbalData(gimbal_debug)
+times = np.interp(gimbal_data['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
+plt.figure('Gimbal')
+plt.subplot(2, 1, 1)
+plt.title('Pan')
+plt.plot(times, gimbal_data['pan'])
+plt.plot(times, sdr.gimbal['pan'])
+plt.subplot(2, 1, 2)
+plt.title('Tilt')
+plt.plot(times, gimbal_data['tilt'])
+plt.plot(times, sdr.gimbal['tilt'])
 plt.show()
