@@ -254,12 +254,22 @@ class SDRPlatform(RadarPlatform):
     def calcNumSamples(self, height, plp=1.):
         return self._sdr[self._channel].nsam
 
-    def calcRangeBins(self, height, upsample=1, plp=1.):
-        nrange, frange = self.calcRanges(height)
+    def calcRangeBins(self, height, upsample=1, plp=1., partial_pulse_percent=1.):
+        nrange, frange = self.calcRanges(height, partial_pulse_percent=partial_pulse_percent)
         MPP = c0 / self.fs / 2 / upsample
-        return nrange * 2 + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP
-    
-    
+        return nrange + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP
+
+    def calcRadVelRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        return dopplerBroadeningFactor * c0 * self._sdr[self._channel].prf / \
+                     (self._sdr[self._channel].fc * cpi_len)
+
+    def calcDopRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        return dopplerBroadeningFactor * self._sdr[self._channel].prf / cpi_len
+
+    def calcWrapVel(self):
+        return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
+
+
 def bodyToInertial(yaw, pitch, roll, x, y, z):
     cy = np.cos(yaw)
     sy = np.sin(yaw)
