@@ -9,6 +9,7 @@ c0 = 299792458.0
 TAC = 125e6
 DTR = np.pi / 180
 inch_to_m = .0254
+INS_REFRESH_HZ = 100
 
 
 class Platform(object):
@@ -24,6 +25,7 @@ class Platform(object):
         self._rxant = rx_offset
         self._gimbal = gimbal
         self._gimbal_offset = gimbal_offset
+        self._gimbal_offset_mat = None
         new_t = gps_data['sec'] if gps_data is not None else t
 
         # attitude spline
@@ -34,10 +36,12 @@ class Platform(object):
 
         # Take into account the gimbal if necessary
         if gimbal is not None:
-            gimbal_offset_mat = getRotationOffsetMatrix(*gimbal_rotations)
+            self._gimbal_offset_mat = getRotationOffsetMatrix(*gimbal_rotations)
             # Matrix to rotate from body to inertial frame for each INS point
             tx_offset = tx_offset if tx_offset is not None else np.array([0., 0., 0.])
             rx_offset = rx_offset if rx_offset is not None else np.array([0., 0., 0.])
+            self._gimbal_pan = CubicSpline(t, gimbal[:, 0])
+            self._gimbal_tilt = CubicSpline(t, gimbal[:, 1])
 
             # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
             if gps_data is not None:
@@ -48,11 +52,11 @@ class Platform(object):
                 rn = gps_data['rn']
                 ru = gps_data['ru']
             else:
-                tx_corrs = np.array([getPhaseCenterInertialCorrection(gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n],
+                tx_corrs = np.array([getPhaseCenterInertialCorrection(self._gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n],
                                                                  p[n], r[n], tx_offset, gimbal_offset)
                                 for n in range(gimbal.shape[0])])
                 rx_corrs = np.array(
-                    [getPhaseCenterInertialCorrection(gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n],
+                    [getPhaseCenterInertialCorrection(self._gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n],
                                                       p[n], r[n], rx_offset, gimbal_offset)
                      for n in range(gimbal.shape[0])])
                 te = e + tx_corrs[:, 0]
@@ -63,7 +67,7 @@ class Platform(object):
                 ru = u + rx_corrs[:, 2]
 
             # Rotate antenna into inertial frame in the same way as above
-            bai = np.array([getBoresightVector(gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
+            bai = np.array([getBoresightVector(self._gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
                             for n in range(gimbal.shape[0])])
             bai = bai.reshape((bai.shape[0], bai.shape[1])).T
 
@@ -98,9 +102,9 @@ class Platform(object):
         self._rxpos = lambda lam_t: np.array([rre(lam_t), rrn(lam_t), rru(lam_t)])
 
         # Build a velocity spline
-        ve = CubicSpline(t, np.gradient(e))
-        vn = CubicSpline(t, np.gradient(n))
-        vu = CubicSpline(t, np.gradient(u))
+        ve = CubicSpline(t, np.gradient(e) * INS_REFRESH_HZ)
+        vn = CubicSpline(t, np.gradient(n) * INS_REFRESH_HZ)
+        vu = CubicSpline(t, np.gradient(u) * INS_REFRESH_HZ)
         self._vel = lambda lam_t: np.array([ve(lam_t), vn(lam_t), vu(lam_t)])
 
         # heading check
@@ -112,8 +116,8 @@ class Platform(object):
 
     def boresight(self, t):
         # Get a boresight angle from the pan/tilt values
-        az = np.exp(1j * self.tilt(t))
-        return np.array([az.imag, az.real, -np.sin(self.pan(t))])
+        r, p, y = self._att(t)
+        return getBoresightVector(self._gimbal_offset_mat, self._gimbal_pan(t), self._gimbal_tilt(t), y, p, r)
 
     @property
     def pos(self):
@@ -214,7 +218,11 @@ class SDRPlatform(RadarPlatform):
                             sdr.gimbal['tilt'].values.astype(np.float64))
         else:
             gim = loadGimbalData(gimbal_debug)
-            times = np.interp(gim['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
+            if len(gim['systime']) == 0:
+                # This is for the weird interpolated to each channel data
+                times = sdr[channel].pulse_time[:len(gim['pan'])]
+            else:
+                times = np.interp(gim['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
             pan = np.interp(t, times, gim['pan'])
             tilt = np.interp(t, times, gim['tilt'])
         goff = np.array([sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Gimbal_X_Offset_M'],
@@ -256,8 +264,8 @@ class SDRPlatform(RadarPlatform):
 
     def calcRangeBins(self, height, upsample=1, plp=1., partial_pulse_percent=1.):
         nrange, frange = self.calcRanges(height, partial_pulse_percent=partial_pulse_percent)
-        MPP = c0 / self.fs / 2 / upsample
-        return nrange + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP
+        MPP = c0 / self.fs / upsample
+        return (nrange * 2 + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP) / 2
 
     def calcRadVelRes(self, cpi_len, dopplerBroadeningFactor=2.5):
         return dopplerBroadeningFactor * c0 * self._sdr[self._channel].prf / \

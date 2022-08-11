@@ -74,7 +74,7 @@ def undulationEGM96(lat, lon):
     return egc
 
 
-def getElevationMap(lats, lons):
+def getElevationMap(lats, lons, und=True):
     """Returns the digital elevation for a latitude and longitude"""
     dtedName = getDTEDName(lats[0], lons[0])
 
@@ -122,10 +122,12 @@ def getElevationMap(lats, lons):
 
     sol = np.einsum('ijn,jkn->ikn', poly, np.array([[np.ones_like(x2), x, y, x * y]]).swapaxes(0, 1))
 
-    return 1 / ((x2 - x1) * (y2 - y1)) * sol.flatten() + undulationEGM96(lats, lons)
+    hght = 1 / ((x2 - x1) * (y2 - y1)) * sol.flatten()
+
+    return hght + undulationEGM96(lats, lons) if und else hght
 
 
-def getElevation(pt):
+def getElevation(pt, und=True):
     lat = pt[0]
     lon = pt[1]
     """Returns the digital elevation for a latitude and longitude"""
@@ -166,7 +168,7 @@ def getElevation(pt):
                                                     [-x1 * y2, y2, x1, -1],
                                                     [x1 * y1, -y1, -x1, 1]])).dot(np.array([1, x, y, x * y]))
 
-    return elevation + undulationEGM96(lat, lon)
+    return elevation + undulationEGM96(lat, lon) if und else elevation
 
 
 def llh2enu(lat, lon, h, refllh):
@@ -736,7 +738,7 @@ N * sizeof( double ): system time in TAC, unwrapped
 
 def loadGimbalData(filename):
     fid = open(filename, 'rb')
-    numFrames = np.fromfile(fid, 'int32', 1, '')[0]
+    numFrames = np.fromfile(fid, 'uint32', 1, '')[0]
     ret_dict = {'pan': np.fromfile(fid, 'float64', numFrames, ''), 'tilt': np.fromfile(fid, 'float64', numFrames, ''),
                 'systime': np.fromfile(fid, 'float64', numFrames, '')}
     return ret_dict
