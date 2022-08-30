@@ -71,6 +71,19 @@ class AnimationManager(object):
             'label': frame_name,
             'method': 'animate'})
 
+    def addFigure(self, fig, name=None, title=None):
+        frame_name = name if name is not None else f'frame_{len(self._fig["frames"])}'
+        title = title if title is not None else frame_name
+        # self._fig['frames'].append(fig)
+        self._fig['frames'].append(go.Frame(data=fig.data, name=frame_name, traces=list(range(len(fig.data))),
+                                            layout={'title': title}))
+        self._slider['steps'].append({'args': [
+            [frame_name], {'frame': {'duration': 0, 'redraw': True}, 'mode': 'immediate',
+                           'transition': {'duration': 0}}
+        ],
+            'label': frame_name,
+            'method': 'animate'})
+
     def setRanges(self, xrngs, yrngs, zrngs):
         self._fig['layout']['scene'] = dict(
             xaxis=dict(range=xrngs, autorange=False),
