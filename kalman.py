@@ -56,12 +56,12 @@ of the transformed sigma points. This is our y_mean and Pyy.
 """
 
 import numpy as np
-from scipy.stats import chisquare
+from scipy.stats import chi2
 
 
 class UKF(object):
 
-    def __init__(self, x_o, p_func, m_func, dt=1.0, Q=None, R=None, adaptive_constant=None, batch_size=20):
+    def __init__(self, x_o, p_func, m_func, t_o, dt=1.0, Q=None, R=None, adaptive_constant=None, batch_size=20):
         L = len(x_o)
         self.L = L
         self.z_sz = len(m_func(x_o, dt))
@@ -89,10 +89,12 @@ class UKF(object):
         self.P = self.initP(x_o)
 
         # This stuff is necessary for the smoother
-        self.tracks = {'z': [], 'x': [], 'P': [], 'update_count': 0.0, 'cpi': []}
-        self.z_track = []
-        self.x_track = []
-        self.P_track = []
+        self.x_log = [x_o]
+        self.P_log = [self.P]
+        self.z_log = []
+        self.phi_k_log = []
+        self.n_updates = 0
+        self.update_time = [t_o]
         self.batch_size = batch_size
         self.batch_counter = 0
 
@@ -124,7 +126,10 @@ class UKF(object):
 
         return X, W_i
 
-    def predict(self):
+    def predict(self, ts=None):
+        # Get the time difference using the last update time
+        dt = ts - self.update_time[-1] if ts is not None else self.dt
+
         # generate sigma points
         X, W = self.genSigmas(self.x, self.P)
 
@@ -135,7 +140,7 @@ class UKF(object):
 
         # run sigmas through process model and get a mean and covariance
         for i in range(self.nm_pts):
-            Y[i, :] = self.p_func(X[i, :], self.dt)
+            Y[i, :] = self.p_func(X[i, :], dt)
             x_bar += Y[i, :] * W[i]
 
         for i in range(self.nm_pts):
@@ -149,18 +154,19 @@ class UKF(object):
         self.W = W
         return x_bar, P_bar
 
-    def update(self, z, curr_cpi):
+    def update(self, z, ts=None):
+        # Get the time difference using the last update time
+        dt = ts - self.update_time[-1] if ts is not None else self.dt
+
         # Initialize variables
         Z = np.zeros((self.nm_pts, self.z_sz))
         Pz = np.zeros((self.z_sz, self.z_sz))
         Pxz = np.zeros((self.L, self.z_sz))
         mu_z = np.zeros((self.z_sz,))
-        S_hat = np.zeros((self.z_sz, self.z_sz))
-        z_k = np.zeros((self.z_sz,))
 
         # calculate mean and covariance of measurement space sigmas
         for i in range(self.nm_pts):
-            Z[i, :] = self.m_func(self.Y[i, :], self.dt)
+            Z[i, :] = self.m_func(self.Y[i, :], dt)
             mu_z += Z[i, :] * self.W[i]
 
         for i in range(self.nm_pts):
@@ -169,7 +175,7 @@ class UKF(object):
 
         # compute residual
         y = z - mu_z
-        mu_k = np.reshape(z - self.m_func(self.x_bar, self.dt), (self.z_sz, 1))  # innovation
+        mu_k = np.reshape(z - self.m_func(self.x_bar, dt), (self.z_sz, 1))  # innovation
 
         # get Kalman gain using cross covariance of state and measurements
         for i in range(self.nm_pts):
@@ -181,56 +187,54 @@ class UKF(object):
         self.P = self.P_bar - K.dot(Pz.dot(K.T))
         self.Pz = Pz
 
+        phi_k = mu_k.T.dot(np.linalg.pinv(Pz)).dot(mu_k)
+        self.phi_k_log.append(phi_k)
+
         if self.cov_alpha is not None:
-            phi_k = mu_k.T.dot(np.linalg.pinv(Pz)).dot(mu_k)
-            chi_val = chisquare(self.cov_alpha, self.z_sz)[0]
-            if chi_val > phi_k:
+            # phi_k = mu_k.T.dot(np.linalg.pinv(Pz)).dot(mu_k)
+            chi_val = chi2.pdf(phi_k, self.z_sz)
+            if chi_val < self.cov_alpha:
+                S_hat = np.zeros((self.z_sz, self.z_sz))
+                z_k = np.zeros((self.z_sz,))
                 # use some adaptive noise covariances
-                epsilon = z - self.m_func(self.x, self.dt)  # residual
-                lam_param = max([.01, (phi_k - .01 * chi_val) / phi_k])
-                del_param = max([.01, (phi_k - .01 * chi_val) / phi_k])
+                epsilon = z - self.m_func(self.x, dt)  # residual
+                lam_param = .01 #min(1, max([.01, (phi_k - .01 * chi_val) / phi_k]))
+                del_param = .01 #min(1, max([.01, (phi_k - .01 * chi_val) / phi_k]))
 
                 # estimate S_hat
                 sig_k, W_k = self.genSigmas(self.x, self.P)
                 for i in range(self.nm_pts):
-                    z_k += self.m_func(sig_k[i, :], self.dt) * W_k[i]
+                    z_k += self.m_func(sig_k[i, :], dt) * W_k[i]
                 for i in range(self.nm_pts):
-                    S_hat += np.outer(self.m_func(sig_k[i, :], self.dt) - z_k,
-                                      self.m_func(sig_k[i, :], self.dt) - z_k) * W_k[i]
+                    S_hat += np.outer(self.m_func(sig_k[i, :], dt) - z_k,
+                                      self.m_func(sig_k[i, :], dt) - z_k) * W_k[i]
 
                 # update Q and R
                 self.Q = (1 - lam_param) * self.Q + lam_param * (K.dot(mu_k).dot(mu_k.T).dot(K.T))
                 self.R = (1 - del_param) * self.R + del_param * (np.outer(epsilon, epsilon) + S_hat)
 
                 # Do the correction step afterwards, using the new Q and R
-                self.correction(z, mu_z, S_hat)
+                self.correction(z, mu_z, S_hat, Z)
 
-        self.tracks['x'].append(self.x)
-        self.tracks['z'].append(self.getMeasurement())
-        self.tracks['P'].append(self.P)
-        self.tracks['cpi'].append(curr_cpi)
-        # self.tracks['update_count'] += 1
+        self.x_log.append(self.x)
+        self.z_log.append(self.getMeasurement())
+        self.P_log.append(self.P)
+        self.update_time.append(ts)
+        self.n_updates += 1
         self.batch_counter += 1
         if self.batch_counter % self.batch_size == 0:
             self.smoother()
             # self.batch_counter = 0
 
-    def correction(self, z, mu_z, S):
-        print('Entered correction')
+    def correction(self, z, mu_z, S, Z):
+        # print('Entered correction')
         P_bar = np.zeros_like(self.P)
-        Z = np.zeros((self.nm_pts, self.z_sz))
-        mu_z = np.zeros((self.z_sz,))
         Pxz = np.zeros((self.L, self.z_sz))
 
         for i in range(self.nm_pts):
             P_bar += np.outer(self.Y[i, :] - self.x, self.Y[i, :] - self.x) * self.W[i]
         P_bar = P_bar + (self.W[0] + 3 - self.alpha ** 2) * np.outer(self.Y[0, :] - self.x,
                                                                      self.Y[0, :] - self.x) + self.Q
-
-        # calculate mean and covariance of measurement space sigmas
-        for i in range(self.nm_pts):
-            Z[i, :] = self.m_func(self.Y[i, :], self.dt)
-            mu_z += Z[i, :] * self.W[i]
 
         Pz = S + self.R
         # get Kalman gain using cross covariance of state and measurements
@@ -251,90 +255,24 @@ class UKF(object):
 
     def initP(self, x_o):
         P = np.zeros((self.L, self.L))
-        for _ in range(1000):
+        for _ in range(100):
             x, Pt = self.predict()
             P += Pt
             self.x = x_o
-        return P / 1000
+        return P / 100
 
     def smoother(self):
-        curr_idx = len(self.tracks['x'])
+        curr_idx = len(self.x_log)
         for i in range(curr_idx - 1, 0):
             # predict
-            P = self.Pz.dot(self.tracks['P'][i]).dot(self.Pz.T) + self.Q
+            P = self.Pz.dot(self.P_log[i]).dot(self.Pz.T) + self.Q
 
             # update
-            Kk = self.tracks['P'][i].dot(self.Pz.T).dot(np.linalg.inv(P))
-            self.tracks['x'][i] = self.tracks['x'][i] + Kk.dot(
-                self.tracks['x'][i + 1] - self.Pz.dot(self.tracks['x'][i]))
-            self.tracks['P'][i] = self.tracks['P'][i] + Kk.dot(self.tracks['P'][i + 1] - P).dot(Kk.T)
+            Kk = self.P_log[i].dot(self.Pz.T).dot(np.linalg.inv(P))
+            self.x_log[i] = self.x_log[i] + Kk.dot(
+                self.x_log[i + 1] - self.Pz.dot(self.x_log[i]))
+            self.P_log[i] = self.P_log[i] + Kk.dot(self.P_log[i + 1] - P).dot(Kk.T)
 
-
-"""
-
-Josh model.
-Constant velocity model, with the acceleration falling out in the noise matrices.
-
-"""
-
-
-def process_function(state_vec, dt):
-    proc = np.zeros((len(state_vec),))
-    proc[0] = state_vec[0] + state_vec[4]
-    proc[1] = state_vec[1] + state_vec[5]
-    proc[2] = state_vec[2] + state_vec[6]
-    proc[3] = state_vec[3] + state_vec[7]
-    proc[4] = state_vec[4]
-    proc[5] = state_vec[5]
-    proc[6] = state_vec[6]
-    proc[7] = state_vec[7]
-    return proc
-
-
-def observation_function(state_vec, dt):
-    proc = np.zeros((5,))
-    proc[0] = state_vec[0]
-    proc[1] = state_vec[1]
-    proc[2] = state_vec[2]
-    proc[3] = state_vec[3]
-    proc[4] = state_vec[7]
-    return proc
-
-
-"""
-
-Angle based motion model.
-This tends to oscillate, so probably not the best model to use.
-
-"""
-
-
-# def process_function(state_vec, dt):
-#    proc = np.zeros((len(state_vec),))
-#    r1 = state_vec[2] + state_vec[5]
-#    theta1 = state_vec[0] + state_vec[3]
-#    phi1 = state_vec[1] + state_vec[4]
-#    x_t = r1 * np.cos(theta1) * np.cos(phi1)
-#    y_t = r1 * np.cos(theta1) * np.sin(phi1)
-#    z_t = r1 * np.sin(theta1)
-#    r_t = np.sqrt(x_t**2 + y_t**2 + z_t**2)
-#    proc[0] = np.arcsin(z_t / r_t)
-#    proc[1] = np.arctan2(y_t , x_t)
-#    proc[2] = r_t
-#    proc[3] = proc[0] - state_vec[0]
-#    proc[4] = proc[1] - state_vec[1]
-#    proc[5] = proc[2] - state_vec[2]
-#    return proc
-#
-# def observation_function(state_vec, dt):
-#    #this takes the observed and updated state vector and turns it into Cartesian coordinates - northing, easting, altitude
-#    proc = np.zeros((5,))
-#    proc[0] = state_vec[2] * np.cos(state_vec[0]) * np.cos(state_vec[1])
-#    proc[1] = state_vec[2] * np.cos(state_vec[0]) * np.sin(state_vec[1])
-#    proc[2] = state_vec[2] * np.sin(state_vec[0])
-#    proc[3] = state_vec[2]
-#    proc[4] = state_vec[5]
-#    return proc
 
 def oofm(x):
     return np.floor(np.log10(x)).astype(np.int)
