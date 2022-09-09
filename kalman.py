@@ -60,6 +60,8 @@ from scipy.stats import chi2
 
 
 class UKF(object):
+    K = None
+    mu_k = None
 
     def __init__(self, x_o, p_func, m_func, t_o, dt=1.0, Q=None, R=None, adaptive_constant=None, batch_size=20):
         L = len(x_o)
@@ -86,7 +88,7 @@ class UKF(object):
         self.p_func = p_func
         self.m_func = m_func
         self.nm_pts = 2 * L + 1
-        self.P = self.initP(x_o)
+        self.P = self.initP(x_o) * 1e4
 
         # This stuff is necessary for the smoother
         self.x_log = [x_o]
@@ -209,9 +211,9 @@ class UKF(object):
                     S_hat += np.outer(self.m_func(sig_k[i, :], dt) - z_k,
                                       self.m_func(sig_k[i, :], dt) - z_k) * W_k[i]
 
-                # update Q and R
-                self.Q = (1 - lam_param) * self.Q + lam_param * (K.dot(mu_k).dot(mu_k.T).dot(K.T))
-                self.R = (1 - del_param) * self.R + del_param * (np.outer(epsilon, epsilon) + S_hat)
+                # update Q and R, add some regularization
+                self.Q = (1 - lam_param) * self.Q + lam_param * (K.dot(mu_k).dot(mu_k.T).dot(K.T)) + np.eye(self.Q.shape[0]) * 1e-3
+                self.R = (1 - del_param) * self.R + del_param * (np.outer(epsilon, epsilon) + S_hat) + np.eye(self.R.shape[0]) * 1e-3
 
                 # Do the correction step afterwards, using the new Q and R
                 self.correction(z, mu_z, S_hat, Z)
@@ -222,6 +224,8 @@ class UKF(object):
         self.update_time.append(ts)
         self.n_updates += 1
         self.batch_counter += 1
+        self.K = K
+        self.mu_k = mu_k
         if self.batch_counter % self.batch_size == 0:
             self.smoother()
             # self.batch_counter = 0
