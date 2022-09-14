@@ -23,6 +23,13 @@ def cpudiff(x, y):
 
 @cuda.jit(device=True)
 def raisedCosine(x, bw, a0):
+    """
+    Raised Cosine windowing function.
+    :param x: float. Azimuth difference between point and beam center in radians.
+    :param bw: float. Signal bandwidth in Hz.
+    :param a0: float. Factor for raised cosine window generation.
+    :return: float. Window value.
+    """
     xf = x / bw + .5
     return a0 - (1 - a0) * math.cos(2 * np.pi * xf)
 
@@ -69,6 +76,18 @@ def applyRadiationPattern(s_tx, s_ty, s_tz, rngtx, s_rx, s_ry, s_rz, rngrx, az_r
 
 @cuda.jit(device=True)
 def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
+    """
+    Applies a very simple sinc radiation pattern.
+    :param el_c: float. Center of beam in elevation, radians.
+    :param az_c: float. Azimuth center of beam in radians.
+    :param az_rx: float. Azimuth value of Rx antenna in radians.
+    :param el_rx: float. Elevation value of Rx antenna in radians.
+    :param az_tx: float. Azimuth value of Tx antenna in radians.
+    :param el_tx: float. Elevation value of Tx antenna in radians.
+    :param bw_az: float. Azimuth beamwidth of antenna in radians.
+    :param bw_el: float. elevation beamwidth of antenna in radians.
+    :return: float. Value by which a point should be scaled.
+    """
     a = np.pi / bw_az 
     b = np.pi / bw_el
     eldiff = diff(el_c, el_tx)
@@ -404,7 +423,33 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
 
 @cuda.jit
 def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, eltx, pulse_data, final_grid,
-                wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly):
+                wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
+    """
+    Backprojection kernel.
+    :param source_xyz: array. XYZ values of the source, usually Tx antenna, in meters.
+    :param receive_xyz: array. XYZ values of the receiver, usually Rx antenna, in meters.
+    :param gx: array. X values, in meters, of grid.
+    :param gy: array. Y values, in meters, of grid.
+    :param gz: array. Z values, in meters, of grid.
+    :param rbins: array. Range bins, in meters.
+    :param panrx: array. Rx azimuth values, in radians.
+    :param elrx: array. Rx elevation values, in radians.
+    :param pantx: array. Tx azimuth values, in radians.
+    :param eltx: array. Tx elevation values, in radians.
+    :param pulse_data: array. Complex pulse return data.
+    :param final_grid: array. 2D matrix that accumulates all the corrected phase values. This is the backprojected image.
+    :param wavelength: float. Wavelength used for phase correction.
+    :param near_range_s: float. Near range value in seconds.
+    :param source_fs: float. Sampling frequency in Hz.
+    :param signal_bw: float. Bandwidth of signal in Hz.
+    :param bw_az: float. Azimuth beamwidth in radians.
+    :param bw_el: float. Elevation beamwidth in radians.
+    :param poly: int. Determines the order of polynomial interpolation for range bins.
+    :param calc_pts: array. Debug array for calculated ranges. Optional.
+    :param calc_angs: array. Debug array for calculated angles to points. Optional.
+    :param debug_flag: bool. If True, populates the calc_pts and calc_angs arrays.
+    :return: Nothing, technically. final_grid is the returned product.
+    """
     px, py = cuda.grid(ndim=2)
     if px < gx.shape[0] and py < gx.shape[1]:
         # Load in all the parameters that don't change
@@ -430,6 +475,12 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             rx_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
             r_el = -math.asin(rz / rx_rng)
             r_az = math.atan2(rx, ry)
+            if debug_flag and tt == 0 and py == 0:
+                calc_pts[px, 0] = rx
+                calc_pts[px, 1] = ry
+                calc_pts[px, 2] = rz
+                calc_angs[px, 0] = r_el
+                calc_angs[px, 1] = r_az
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
@@ -447,12 +498,14 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
                                         bw_az, bw_el) / two_way_rng
+            if debug_flag and tt == 0 and py == 0:
+                calc_angs[px, 2] = but
 
             # Azimuth window to reduce sidelobes
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
-            az_win = raisedCosine(el_diffrx, signal_bw, .5)
+            az_win = raisedCosine(az_diffrx, signal_bw, .5)
             # az_win = 1.
 
             if rbins[but - 1] < tx_rng < rbins[but]:

@@ -27,28 +27,27 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
 # bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
-upsample = 1
+upsample = 4
 cpi_len = 256
-plp = .5
-pts_per_tri = 1
+plp = 0
 debug = True
-nbpj_pts = 300
+nbpj_pts = 600
 
 print('Loading SDR file...')
 sdr = SDRParse(bg_file, do_exact_matches=False)
-
-# Generate the background for simulation
-print('Generating environment...', end='')
-# bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=30000, tri_err=30)
-
-# Grab vertices and such
-vertices = bg.vertices
-triangles = bg.triangles
-normals = bg.normals
-# isCircle = np.linalg.norm(vertices[:, :2], axis=1) == np.linalg.norm(vertices[:, :2], axis=1).min()
-# bg.setReflectivityCoeffs(isCircle * 10000, 10000)
-print('Done.')
+try:
+    origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
+                          getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+except TypeError:
+    heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+    hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
+    pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
+          (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
+    alt = getElevation(pt)
+    mrange = hght / np.tan(sdr.ant[0].dep_ang)
+    origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
+                    (pt[0], pt[1], alt))
+ref_llh = origin
 
 # Generate a platform
 print('Generating platform...', end='')
@@ -57,20 +56,20 @@ gimbal_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Gimbal.dat'
 postCorr = loadPostCorrectionsGPSData(gps_debug)
 rawGPS = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
 preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')
-rp = SDRPlatform(sdr, bg.ref, gps_debug=gps_debug, gimbal_debug=gimbal_debug)
+rp = SDRPlatform(sdr, ref_llh)
 
 # Get reference data
 flight = rp.pos(postCorr['sec'])
-fc = sdr[0].fc
 fs = sdr[0].fs
 bwidth = sdr[0].bw
+fc = sdr[0].fc
 print('Done.')
 
 # Generate a backprojected image
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
-fdelay = 5.5
+fdelay = 0
 nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
 nsam = rp.calcNumSamples(fdelay, plp)
 ranges = rp.calcRangeBins(fdelay, upsample, plp)
@@ -98,22 +97,15 @@ mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
 mfilt[taywin // 2 + offset_shift:-taywin // 2 + offset_shift] = 0
 chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
 mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
-
-# Generate a test strip of data
-tri_vert_indices = cupy.array(triangles, dtype=np.int32)
-vert_xyz = cupy.array(vertices, dtype=np.float64)
-vert_norms = cupy.array(normals, dtype=np.float64)
-scattering_coef_gpu = cupy.array(bg.scat_coefs, dtype=np.float64)
-ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
-shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
+shift_x, shift_y, _ = llh2enu(*origin, ref_llh)
 gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
 gx += shift_x
 gy += shift_y
-latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.ref)
-gz = (getElevationMap(latg, long) - bg.ref[2]).reshape(gx.shape)
+latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), ref_llh)
+gz = (getElevationMap(latg, long) - ref_llh[2]).reshape(gx.shape)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
@@ -130,12 +122,10 @@ test = None
 
 # GPU device calculations
 threads_per_block = getMaxThreads()
-bpg_ranges = (max(1, triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
 bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
 # rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
 
 # Data blocks for imaging
-bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 bpj_truedata = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
 # Run through loop to get data simulated
@@ -154,35 +144,6 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
-    genRangeWithoutIntersection[bpg_ranges, threads_per_block](tri_vert_indices, vert_xyz, vert_norms,
-                                                               scattering_coef_gpu, ref_coef_gpu,
-                                                               postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
-                                                               panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
-                                                               angs_debug, c0 / fc, ranges[0] / c0,
-                                                               rp.fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                                               pts_per_tri, False)
-
-    cupy.cuda.Device().synchronize()
-    rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * chirp_gpu[:, :tmp_len] * mfilt_gpu[:, :tmp_len]
-    upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
-    upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
-    upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
-    cupy.cuda.Device().synchronize()
-
-    # Simulated data debug checks
-    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp = rp.pos(ts[-1])
-        test = rtdata.get()
-        angd = angs_debug.get()
-        locd = pts_debug.get()'''
-
-    backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
-                                            elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
-                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
-    cupy.cuda.Device().synchronize()
-
-    bpj_res += bpj_grid.get()
 
     # Reset the grid for truth data
     rtdata = cupy.fft.fft(cupy.array(sdr.getPulses(tidx, 0),
@@ -192,18 +153,11 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
     rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
-    bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
-
-    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp = rp.pos(ts[-1])
-        test = rtdata.get()
-        angd = angs_debug.get()
-        locd = pts_debug.get()'''
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu,
                                             panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                            c0 / (fc - bwidth / 2), ranges[0] / c0,
+                                            c0 / (fc - bwidth / 2 - offset_hz), ranges[0] / c0,
                                             rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
     cupy.cuda.Device().synchronize()
 
@@ -229,29 +183,20 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
-                                 facecolor=bg.ref_coefs)])
-dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
-tx_flight = rp.txpos(postCorr['sec'])
+'''tx_flight = rp.txpos(postCorr['sec'])
 rx_flight = rp.rxpos(postCorr['sec'])
-dfig.add_scatter3d(x=tx_flight[0, :], y=tx_flight[1, :], z=tx_flight[2, :])
-# dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
-dfig.show()
 
-te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], bg.ref)
-re, rn, ru = llh2enu(postCorr['rx_lat'], postCorr['rx_lon'], postCorr['rx_alt'], bg.ref)
-pe, pn, pu = llh2enu(preCorr['lat'], preCorr['lon'], preCorr['alt'], bg.ref)
-e, n, u = llh2enu(rawGPS['lat'], rawGPS['lon'], rawGPS['alt'], bg.ref)
-ee, nn, uu = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], bg.ref)
+te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], ref_llh)
+re, rn, ru = llh2enu(postCorr['rx_lat'], postCorr['rx_lon'], postCorr['rx_alt'], ref_llh)
+pe, pn, pu = llh2enu(preCorr['lat'], preCorr['lon'], preCorr['alt'], ref_llh)
+e, n, u = llh2enu(rawGPS['lat'], rawGPS['lon'], rawGPS['alt'], ref_llh)
+ee, nn, uu = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], ref_llh)
 ffig = px.scatter_3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 ffig.add_scatter3d(x=tx_flight[0, :], y=tx_flight[1, :], z=tx_flight[2, :])
 ffig.add_scatter3d(x=rx_flight[0, :], y=rx_flight[1, :], z=rx_flight[2, :])
 ffig.add_scatter3d(x=te, y=tn, z=tu)
 ffig.add_scatter3d(x=re, y=rn, z=ru)
-ffig.show()
-
-bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_res).flatten())
-bfig.show()
+ffig.show()'''
 
 bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
 bfig.show()
@@ -264,7 +209,7 @@ plt.figure('IMSHOW truedata')
 plt.imshow(db(bpj_truedata), origin='lower')
 plt.axis('tight')
 
-n_diff = flight[1, :] - pn
+'''n_diff = flight[1, :] - pn
 e_diff = flight[0, :] - pe
 u_diff = flight[2, :] - pu
 plt.figure('diffs')
@@ -280,7 +225,7 @@ plt.plot(nn_diff)
 plt.plot(ee_diff)
 plt.plot(uu_diff)
 
-se, sn, su = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], bg.ref)
+se, sn, su = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], ref_llh)
 plt.figure('enu')
 plt.subplot(2, 2, 1)
 plt.title('e')
@@ -330,5 +275,5 @@ plt.plot(times, sdr.gimbal['pan'])
 plt.subplot(2, 1, 2)
 plt.title('Tilt')
 plt.plot(times, gimbal_data['tilt'])
-plt.plot(times, sdr.gimbal['tilt'])
+plt.plot(times, sdr.gimbal['tilt'])'''
 plt.show()

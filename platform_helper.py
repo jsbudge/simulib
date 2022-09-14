@@ -3,13 +3,20 @@ from scipy.interpolate import CubicSpline
 from SDRParsing import SDRParse
 from simulation_functions import llh2enu, findPowerOf2, loadPostCorrectionsGPSData, loadRawData, loadGimbalData, \
     loadMatchedFilter, loadReferenceChirp
-from scipy.spatial.transform import Rotation as rot
 
 c0 = 299792458.0
 TAC = 125e6
 DTR = np.pi / 180
 inch_to_m = .0254
 INS_REFRESH_HZ = 100
+
+
+"""
+Platform class
+
+Base class used to hold information on radar platform, such as velocity, position, attitude, and gimbal corrections.
+This is expected to provide positional information for only one pair of Tx and Rx antennas.
+"""
 
 
 class Platform(object):
@@ -20,6 +27,22 @@ class Platform(object):
 
     def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, gimbal=None, gimbal_offset=None,
                  gimbal_rotations=None, tx_offset=None, rx_offset=None, gps_data=None):
+        """
+        Init function.
+        :param e: array. Eastings in meters used to generate position function.
+        :param n: array. Northings in meters used to generate position function.
+        :param u: array. Altitude in meters used to generate position function.
+        :param r: array. Roll values in degrees.
+        :param p: array. Pitch values in degrees.
+        :param y: array. Yaw values in degrees.
+        :param t: array. GPS times, in seconds, that correspond to the above position/attitude arrays.
+        :param gimbal: N x 2 array. Pan and Tilt values from the gimbal.
+        :param gimbal_offset: 3-tuple. Gimbal offset from body in meters, XYZ.
+        :param gimbal_rotations: 3-tuple. Initial gimbal rotation from the inertial frame in degrees.
+        :param tx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Tx antenna.
+        :param rx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Rx antenna.
+        :param gps_data: DataFrame. This is a dataframe of GPS data, taken from the GPS debug data in APS. Optional.
+        """
         self._gpst = t
         self._txant = tx_offset
         self._rxant = rx_offset
@@ -121,32 +144,46 @@ class Platform(object):
 
     @property
     def pos(self):
+        # Return the position lambda
         return self._pos
 
     @property
     def heading(self):
+        # Return the heading lambda
         return self._heading
 
     @property
     def att(self):
+        # Return the attitude lambda
         return self._att
 
     @property
     def gpst(self):
+        # Return the array of GPS times used to create lambdas
         return self._gpst
 
     @property
     def rxpos(self):
+        # Return Rx position lambda
         return self._rxpos
 
     @property
     def txpos(self):
+        # Return Tx position lambda
         return self._txpos
 
     @property
     def vel(self):
+        # Return velocity lambda
         return self._vel
 
+
+"""
+RadarPlatform
+Inherits from base Platform class. This is more specialized for radar, and includes some radar parameters such as
+beamwidths, sampling frequencies, and angles. Intended for use in simulation work, where there isn't a SAR file to
+provide these things.
+"""
 
 
 class RadarPlatform(Platform):
@@ -154,6 +191,27 @@ class RadarPlatform(Platform):
     def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, tx_offset=None, rx_offset=None,
                  gimbal=None, gimbal_offset=None, gimbal_rotations=None, dep_angle=45.,
                  squint_angle=0., az_bw=10., el_bw=10., fs=2e9, gps_data=None):
+        """
+        Init function.
+        :param e: array. Eastings in meters used to generate position function.
+        :param n: array. Northings in meters used to generate position function.
+        :param u: array. Altitude in meters used to generate position function.
+        :param r: array. Roll values in degrees.
+        :param p: array. Pitch values in degrees.
+        :param y: array. Yaw values in degrees.
+        :param t: array. GPS times, in seconds, that correspond to the above position/attitude arrays.
+        :param tx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Tx antenna.
+        :param rx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Rx antenna.
+        :param gimbal: N x 2 array. Pan and Tilt values from the gimbal.
+        :param gimbal_offset: 3-tuple. Gimbal offset from body in meters, XYZ.
+        :param gimbal_rotations: 3-tuple. Initial gimbal rotation from the inertial frame in degrees.
+        :param dep_angle: float. Depression angle of antenna in degrees.
+        :param squint_angle: float. Squint angle of antenna in degrees.
+        :param az_bw: float. Beamwidth of antenna in azimuth.
+        :param el_bw: float. Beamwidth of antenna in elevation.
+        :param fs: float. Sampling frequency in Hz.
+        :param gps_data: DataFrame. This is a dataframe of GPS data, taken from the GPS debug data in APS. Optional.
+        """
         super().__init__(e, n, u, r, p, y, t, gimbal, gimbal_offset, gimbal_rotations, tx_offset, rx_offset, gps_data)
         self.dep_ang = dep_angle * DTR
         self.squint_ang = squint_angle * DTR
@@ -164,21 +222,46 @@ class RadarPlatform(Platform):
         self.far_range_angle = self.dep_ang - self.el_half_bw
 
     def calcRanges(self, height):
+        """
+        Calculates out the expected near and far slant ranges of the antenna.
+        :param height: float. Height of antenna off the ground in meters.
+        :return: tuple of near and far slant ranges in meters.
+        """
         nrange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw)
         frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang + self.el_half_bw)
         return nrange, frange
 
     def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
+        """
+        Calculates the pulse length given a height off the ground and a pulse percent.
+        :param height: float. Height of antenna off the ground in meters.
+        :param pulse_length_percent: float, <1. Percentage of maximum pulse length to use in radar.
+        :param use_tac: bool. If True, returns the pulse length in TAC. If False, returns in seconds.
+        :return: Expected pulse length in either TAC or seconds.
+        """
         nrange, _ = self.calcRanges(height)
         plength_s = (nrange * 2 / c0 - 1 / TAC) * pulse_length_percent
         return int(plength_s * self.fs) if use_tac else plength_s
 
     def calcNumSamples(self, height, plp=1.):
+        """
+        Calculate the number of samples in a pulse.
+        :param height: float. Height of antenna off the ground in meters.
+        :param plp: float, <1. Percentage of maximum pulse length to use in radar.
+        :return: Number of samples in a returned pulse.
+        """
         nrange, frange = self.calcRanges(height)
         pl_s = self.calcPulseLength(height, plp)
         return int((np.ceil((2 * frange / c0 + pl_s) * TAC) - np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
 
     def calcRangeBins(self, height, upsample=1, plp=1.):
+        """
+        Calculates the range bins for a given pulse.
+        :param height: float. Height of antenna off the ground in meters.
+        :param upsample: int. Upsample factor.
+        :param plp: float, <1. Percentage of maximum pulse length to use in radar.
+        :return: array of range bins.
+        """
         nrange, frange = self.calcRanges(height)
         pl_s = self.calcPulseLength(height, plp)
         nsam = int((np.ceil((2 * frange / c0 + pl_s) * TAC) -
@@ -186,24 +269,37 @@ class RadarPlatform(Platform):
         MPP = c0 / self.fs / upsample / 2
         return nrange + np.arange(nsam * upsample) * MPP + c0 / self.fs
 
-    def intoBodyFrame(self, pt, t):
-        return rot.from_euler('zxy', self._att(t)).apply(pt)
 
-    def fromBodyFrame(self, pt, t):
-        return rot.from_euler('zxy', self._att(t)).inv().apply(pt)
+"""
+SDRPlatform
+More specialized version of RadarPlatform that gets all of the values it needs from a SAR file or instance of
+SDRParse.
+"""
 
 
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, debug_fnme=None,
+    def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, gps_debug=None,
                  gimbal_debug=None):
+        """
+        Init function.
+        :param sdr_file: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
+            or the SDRParse object of an already parsed file.
+        :param origin: 3-tuple. Point used as the origin for ENU reference frame, in (lat, lon, alt).
+        :param tx_offset: 3-tuple. Offset of Tx antenna from body frame in meters.
+        :param rx_offset: 3-tuple. Offset of Rx antenna from body frame in meters.
+        :param fs: float. Sampling frequency in Hz.
+        :param channel: int. Channel of data for this object to represent in the SAR file.
+        :param gps_debug: str. Path to a file of GPS debug data from APS for this collect. Optional.
+        :param gimbal_debug: str. Path to a file of Gimbal debug data from APS for this collect. Optional.
+        """
         sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         t = sdr.gps_data.index.values
         fs = fs if fs is not None else sdr[channel].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
-        if debug_fnme is not None:
-            gps_data = loadPostCorrectionsGPSData(debug_fnme)
+        if gps_debug is not None:
+            gps_data = loadPostCorrectionsGPSData(gps_debug)
             gps_data['te'], gps_data['tn'], gps_data['tu'] = llh2enu(gps_data['tx_lat'], gps_data['tx_lon'],
                                                                      gps_data['tx_alt'], origin)
             gps_data['re'], gps_data['rn'], gps_data['ru'] = llh2enu(gps_data['rx_lat'], gps_data['rx_lon'],
@@ -225,12 +321,8 @@ class SDRPlatform(RadarPlatform):
                 times = np.interp(gim['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
             pan = np.interp(t, times, gim['pan'])
             tilt = np.interp(t, times, gim['tilt'])
-        goff = np.array([sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Gimbal_X_Offset_M'],
-                         sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Gimbal_Y_Offset_M'],
-                         sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Gimbal_Z_Offset_M']])
-        grot = np.array([sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Roll_D'] * DTR,
-                         sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Pitch_D'] * DTR,
-                         sdr.xml['Common_Channel_Settings']['Gimbal_Settings']['Yaw_D'] * DTR])
+        goff = np.array([sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset])
+        grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
         channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2 * DTR
         tx_num = sdr[channel].trans_num
         tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
@@ -247,34 +339,73 @@ class SDRPlatform(RadarPlatform):
         self._channel = channel
 
     def calcRanges(self, fdelay, partial_pulse_percent=1.):
+        """
+        Calculate near and far ranges for this collect using the SAR file.
+        :param fdelay: float. FDelay desired in TAC.
+        :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
+        :return: tuple of near and far ranges in meters.
+        """
         nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
                   self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        # nrange = ((self._sdr[0].receive_on_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC -
-        #           (findPowerOf2(self._sdr[0].nsam + self._sdr[0].pulse_length_N) - self._sdr[
-        #               0].nsam) / self.fs) * c0 / 2
         frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
                   self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
         return nrange, frange
 
-    def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
+    def calcPulseLength(self, height=0, pulse_length_percent=1., use_tac=False):
+        """
+        Calculate the pulse length for this collect.
+        :param height: Not used. Here for compatibility with parent classes.
+        :param pulse_length_percent: Not used. Here for compatibility with parent classes.
+        :param use_tac: bool. If True, returns pulse length in TAC, otherwise in seconds.
+        :return: Pulse length in TAC, otherwise in seconds.
+        """
         return self._sdr[self._channel].pulse_length_N if use_tac else self._sdr[self._channel].pulse_length_S
 
-    def calcNumSamples(self, height, plp=1.):
+    def calcNumSamples(self, height=0, plp=1.):
+        """
+        Get number of samples in a pulse.
+        :param height: Not used. Here for compatibility with parent classes.
+        :param plp: Not used. Here for compatibility with parent classes.
+        :return: Number of samples in a pulse.
+        """
         return self._sdr[self._channel].nsam
 
-    def calcRangeBins(self, height, upsample=1, plp=1., partial_pulse_percent=1.):
-        nrange, frange = self.calcRanges(height, partial_pulse_percent=partial_pulse_percent)
+    def calcRangeBins(self, fdelay, upsample=1, partial_pulse_percent=1.):
+        """
+        Calculate range bins for a pulse/collect.
+        :param fdelay: float. FDelay desired for this pulse in TAC.
+        :param upsample: int. Upsample factor.
+        :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
+        :return: array of range bins in meters.
+        """
+        nrange, frange = self.calcRanges(fdelay, partial_pulse_percent=partial_pulse_percent)
         MPP = c0 / self.fs / upsample
-        return (nrange * 2 + np.arange(self.calcNumSamples(height, plp) * upsample) * MPP) / 2
+        return (nrange * 2 + np.arange(self.calcNumSamples() * upsample) * MPP) / 2
 
     def calcRadVelRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        """
+        Calculate the radial velocity resolution for this collect.
+        :param cpi_len: int. Length of CPI in number of pulses.
+        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal value.
+        :return: Radial velocity resolution in meters per second.
+        """
         return dopplerBroadeningFactor * c0 * self._sdr[self._channel].prf / \
                      (self._sdr[self._channel].fc * cpi_len)
 
     def calcDopRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        """
+        Calculate the Doppler resolution for this collect.
+        :param cpi_len: int. Length of CPI in number of pulses.
+        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal value.
+        :return: Doppler resolution in Hz.
+        """
         return dopplerBroadeningFactor * self._sdr[self._channel].prf / cpi_len
 
     def calcWrapVel(self):
+        """
+        Calculate the wrap velocity for this collect.
+        :return: Wrap velocity in meters per second.
+        """
         return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
 
 

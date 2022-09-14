@@ -1,3 +1,4 @@
+import contextlib
 import numpy as np
 from simulation_functions import getElevationMap, llh2enu, \
     enu2llh, getElevation, db, resampleGrid
@@ -16,6 +17,10 @@ inch_to_m = .0254
 m_to_ft = 3.2808
 
 
+'''
+Environment
+This is a class to represent the environment of a radar. 
+'''
 class Environment(object):
     _mesh = None
     _pcd = None
@@ -26,58 +31,54 @@ class Environment(object):
 
     def __init__(self, pts=None, scattering=None, reflectivity=None, triangles=None):
 
-        if pts is not None:
-            # Create the point cloud for the mesh basis
-            scats = scattering if scattering is not None else np.ones((triangles.shape[0],))
-            refs = reflectivity if reflectivity is not None else np.ones((triangles.shape[0],))
-            col_scale = (refs - refs.min()) / refs.max()
-            col_scale /= col_scale.max()
-            colors = np.zeros((len(reflectivity), 3))
-            colors[:, 0] = col_scale
-            colors[:, 1] = col_scale
-            colors[:, 2] = col_scale
+        if pts is None:
+            return
+        # Create the point cloud for the mesh basis
+        scats = scattering if scattering is not None else np.ones((triangles.shape[0],))
+        refs = reflectivity if reflectivity is not None else np.ones((triangles.shape[0],))
+        col_scale = (refs - refs.min()) / refs.max()
+        col_scale /= col_scale.max()
+        colors = np.zeros((len(reflectivity), 3))
+        colors[:, 0] = col_scale
+        colors[:, 1] = col_scale
+        colors[:, 2] = col_scale
 
-            self._ref = refs
-            self._scat = scats
+        self._ref = refs
+        self._scat = scats
 
-            # Downsample if possible to reduce number of triangles
-            if triangles is None:
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(pts)
-                pcd.colors = o3d.utility.Vector3dVector(colors)
-                pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
+        # Downsample if possible to reduce number of triangles
+        if triangles is None:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
 
-                avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
-                radius = 3 * avg_dist
-                radii = [radius, radius * 2]
-                pcd.estimate_normals()
-                try:
-                    pcd.orient_normals_consistent_tangent_plane(100)
-                except RuntimeError:
-                    pass
+            avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
+            radius = 3 * avg_dist
+            radii = [radius, radius * 2]
+            pcd.estimate_normals()
+            with contextlib.suppress(RuntimeError):
+                pcd.orient_normals_consistent_tangent_plane(100)
+            # Generate mesh
+            rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                pcd, o3d.utility.DoubleVector(radii))
 
-                # Generate mesh
-                rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                    pcd, o3d.utility.DoubleVector(radii))
-
-                rec_mesh.remove_duplicated_vertices()
-                rec_mesh.remove_duplicated_triangles()
-                rec_mesh.remove_degenerate_triangles()
-                rec_mesh.remove_unreferenced_vertices()
-            else:
-                rec_mesh = o3d.geometry.TriangleMesh()
-                rec_mesh.vertices = o3d.utility.Vector3dVector(pts)
-                rec_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
-                rec_mesh.triangles = o3d.utility.Vector3iVector(triangles)
-                rec_mesh.compute_vertex_normals()
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = rec_mesh.vertices
-                pcd.colors = rec_mesh.vertex_colors
-                pcd.normals = rec_mesh.vertex_normals
-            self._mesh = rec_mesh
-            self._pcd = pcd
+            rec_mesh.remove_duplicated_vertices()
+            rec_mesh.remove_duplicated_triangles()
+            rec_mesh.remove_degenerate_triangles()
+            rec_mesh.remove_unreferenced_vertices()
         else:
-            pass
+            rec_mesh = o3d.geometry.TriangleMesh()
+            rec_mesh.vertices = o3d.utility.Vector3dVector(pts)
+            rec_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+            rec_mesh.triangles = o3d.utility.Vector3iVector(triangles)
+            rec_mesh.compute_vertex_normals()
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = rec_mesh.vertices
+            pcd.colors = rec_mesh.vertex_colors
+            pcd.normals = rec_mesh.vertex_normals
+        self._mesh = rec_mesh
+        self._pcd = pcd
 
     def setScatteringCoeffs(self, coef):
         if coef.shape[0] != self.triangles.shape[0]:
