@@ -29,7 +29,7 @@ bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
 # bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
 upsample = 1
 cpi_len = 256
-plp = .5
+plp = 0
 pts_per_tri = 1
 debug = True
 nbpj_pts = 300
@@ -70,7 +70,7 @@ print('Done.')
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
-fdelay = 5.5
+fdelay = 0
 nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
 nsam = rp.calcNumSamples(fdelay, plp)
 ranges = rp.calcRangeBins(fdelay, upsample, plp)
@@ -203,7 +203,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu,
                                             panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                            c0 / (fc - bwidth / 2), ranges[0] / c0,
+                                            c0 / (fc - bwidth / 2 - offset_hz), ranges[0] / c0,
                                             rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
     cupy.cuda.Device().synchronize()
 

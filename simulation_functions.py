@@ -790,3 +790,244 @@ def createIFTMatrix(m, fs):
         D[:, m] = np.exp(1j * 2 * pi * i * fs / m * np.arange(m) * 1 / (fs / m))
 
     return D
+
+
+def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20):
+    # Things the PS will need to know from the configuration
+    numSamples = chan.nsam
+    samplingFreqHz = chan.fs
+    basebandedChirpRateHzPerS = chan.chirp_rate
+    # If the NCO was positive it means we will have sampled the reverse spectrum
+    #   and the chirp will be flipped
+    if chan.NCO_freq_Hz > 0:
+        basebandedChirpRateHzPerS *= -1
+    halfBandwidthHz = chan.bw / 2.0
+    # Get the basebanded center, start and stop frequency of the chirp
+    basebandedCenterFreqHz = chan.baseband_fc
+    basebandedStartFreqHz = chan.baseband_fc - halfBandwidthHz
+    basebandedStopFreqHz = chan.baseband_fc + halfBandwidthHz
+    if basebandedChirpRateHzPerS < 0:
+        basebandedStartFreqHz = chan.baseband_fc + halfBandwidthHz
+        basebandedStopFreqHz = chan.baseband_fc - halfBandwidthHz
+
+    # Get the reference waveform and mix it down by the NCO frequency and
+    #   downsample to the sampling rate of the receive data if necessary
+    # The waveform input into the DAC has already had the Hilbert transform
+    #   and downsample operation performed on it by SDRParsing, so it is
+    #   complex sampled data at this point at the SlimSDR base complex sampling
+    #   rate.
+    # Compute the decimation rate if the data has been low-pass filtered and
+    #   downsampled
+    decimationRate = 1
+    if chan.is_lpf:
+        decimationRate = int(np.floor(chan.BASE_COMPLEX_SRATE_HZ / samplingFreqHz))
+
+    # Grab the waveform
+    waveformData = chan.ref_chirp
+
+    # Create the plot for the FFT of the waveform
+    waveformLen = len(waveformData)
+
+    # Compute the mixdown signal
+    mixDown = np.exp(1j * (2 * np.pi * chan.NCO_freq_Hz * np.arange(waveformLen) / chan.BASE_COMPLEX_SRATE_HZ))
+    basebandWaveform = mixDown * waveformData
+
+    # Decimate the waveform if applicable
+    if decimationRate > 1:
+        basebandWaveform = basebandWaveform[:: decimationRate]
+    # Calculate the updated baseband waveform length
+    basebandWaveformLen = len(basebandWaveform)
+    # Grab the calibration data
+    calData = chan.cal_chirp + 0.0
+    # Grab the pulses
+    if sar:
+        calData = sar.getPulse(pulseNum, channel=0).T + 0.0
+
+    # Calculate the convolution length
+    convolutionLength = numSamples + basebandWaveformLen - 1
+    FFTLength = findPowerOf2(convolutionLength)
+
+    # Calculate the inverse transfer function
+    FFTCalData = np.fft.fft(calData, FFTLength)
+    FFTBasebandWaveformData = np.fft.fft(basebandWaveform, FFTLength)
+    inverseTransferFunction = FFTBasebandWaveformData / FFTCalData
+    # NOTE! Outside of the bandwidth of the signal, the inverse transfer function
+    #   is invalid and should not be viewed. Values will be enormous.
+
+    # Generate the Taylor window
+    TAYLOR_NBAR = 5
+    TAYLOR_NBAR = nbar
+    TAYLOR_SLL_DB = -35
+    TAYLOR_SLL_DB = SLL
+    windowSize = \
+        int(np.floor(halfBandwidthHz * 2.0 / samplingFreqHz * FFTLength))
+    taylorWindow = window_taylor(windowSize, nbar=TAYLOR_NBAR, sll=TAYLOR_SLL_DB) if SLL != 0 else np.ones(windowSize)
+
+    # Create the matched filter and polish up the inverse transfer function
+    matchedFilter = np.fft.fft(basebandWaveform, FFTLength)
+    # IQ baseband vs offset video
+    if np.sign(basebandedStartFreqHz) != np.sign(basebandedStopFreqHz):
+        # Apply the inverse transfer function
+        aboveZeroLength = int(np.ceil((basebandedCenterFreqHz + halfBandwidthHz) / samplingFreqHz * FFTLength))
+        belowZeroLength = int(windowSize - aboveZeroLength)
+        taylorWindowExtended = np.zeros(FFTLength)
+        taylorWindowExtended[int(FFTLength / 2) - aboveZeroLength:int(FFTLength / 2) - aboveZeroLength + windowSize] = \
+            taylorWindow
+        # Zero out the invalid part of the inverse transfer function
+        inverseTransferFunction[aboveZeroLength: -belowZeroLength] = 0
+        taylorWindowExtended = np.fft.fftshift(taylorWindowExtended)
+    else:
+        # Apply the inverse transfer function
+        bandStartInd = \
+            int(np.floor((basebandedCenterFreqHz - halfBandwidthHz) / samplingFreqHz * FFTLength))
+        taylorWindowExtended = np.zeros(FFTLength)
+        taylorWindowExtended[bandStartInd: bandStartInd + windowSize] = taylorWindow
+        inverseTransferFunction[: bandStartInd] = 0
+        inverseTransferFunction[bandStartInd + windowSize:] = 0
+    matchedFilter = matchedFilter.conj() * inverseTransferFunction * taylorWindowExtended
+    return matchedFilter
+
+
+def window_taylor(N, nbar=4, sll=-30):
+    """Taylor tapering window
+    Taylor windows allows you to make tradeoffs between the
+    mainlobe width and sidelobe level (sll).
+    Implemented as described by Carrara, Goodman, and Majewski
+    in 'Spotlight Synthetic Aperture Radar: Signal Processing Algorithms'
+    Pages 512-513
+    :param N: window length
+    :param float nbar:
+    :param float sll:
+    The default values gives equal height
+    sidelobes (nbar) and maximum sidelobe level (sll).
+    .. warning:: not implemented
+    .. seealso:: :func:`create_window`, :class:`Window`
+    """
+    if sll > 0:
+        sll *= -1
+    B = 10 ** (-sll / 20)
+    A = np.log(B + np.sqrt(B ** 2 - 1)) / np.pi
+    s2 = nbar ** 2 / (A ** 2 + (nbar - 0.5) ** 2)
+    ma = np.arange(1, nbar)
+
+    def calc_Fm(m):
+        numer = (-1) ** (m + 1) \
+                * np.prod(1 - m ** 2 / s2 / (A ** 2 + (ma - 0.5) ** 2))
+        denom = 2 * np.prod([1 - m ** 2 / j ** 2 for j in ma if j != m])
+        return numer / denom
+
+    Fm = np.array([calc_Fm(m) for m in ma])
+
+    def W(n):
+        return 2 * np.sum(
+            Fm * np.cos(2 * np.pi * ma * (n - N / 2 + 1 / 2) / N)) + 1
+
+    w = np.array([W(n) for n in range(N)])
+    # normalize (Note that this is not described in the original text)
+    scale = W((N - 1) / 2)
+    w /= scale
+    return w
+
+
+def getDopplerLine(effAzI, rangeBins, antVel, antPos, nearRangeGrazeR, azBeamwidthHalf, PRF, wavelength, origin):
+    """Compute the expected Doppler vs range for the given platform geometry"""
+
+    # compute the grazing angle for the near range to start
+    (nearRangeGrazeR, Rvec, surfaceHeight, numIter) = computeGrazingAngle(
+        effAzI, nearRangeGrazeR, antPos, rangeBins[0], origin)
+
+    # now I need to get the grazing angles across all of the range bins
+    grazeOverRanges = np.arcsin((antPos[2] + origin[2] - surfaceHeight) / rangeBins)
+
+    # this is a special version of Rvec (it is not 3x1, it is 3xNrv)
+    Rvec = np.array([
+        np.cos(grazeOverRanges) * np.sin(effAzI),
+        np.cos(grazeOverRanges) * np.cos(effAzI),
+        -np.sin(grazeOverRanges)])
+    # perform the dot product and calculate the Doppler
+    DopplerCen = ((2.0 / wavelength) * Rvec.T.dot(antVel).flatten()) % PRF
+    # account for wrapping of the Doppler spectrum
+    ind = np.nonzero(DopplerCen > PRF / 2)
+    DopplerCen[ind] -= PRF
+    ind = np.nonzero(DopplerCen < -PRF / 2)
+    DopplerCen[ind] += PRF
+
+    # generate the radial vector for the forward beamwidth edge
+    # (NOTE!!!: this is dependent
+    # on the antenna pointing vector attitude with respect to the aircraft heading.
+    # if on the left side, negative azimuth will be lower Doppler, and positive
+    # azimuth will be higher, but on the right side, it will be the opposite, one
+    # could use the sign of the cross-product to determine which it is.)
+    # if (xmlData.gimbalSettings.lookSide.lower() == 'left'):
+    eff_boresight = np.mean(np.array([
+        np.cos(grazeOverRanges) * np.sin(effAzI),
+        np.cos(grazeOverRanges) * np.cos(effAzI),
+        -np.sin(grazeOverRanges)]), axis=1)
+    ant_dir = np.cross(eff_boresight, antVel)
+    azBeamwidthHalf *= np.sign(ant_dir[2])
+
+    newAzI = effAzI - azBeamwidthHalf
+    Rvec = np.array([
+        np.cos(grazeOverRanges) * np.sin(newAzI),
+        np.cos(grazeOverRanges) * np.cos(newAzI),
+        -np.sin(grazeOverRanges)])
+    # perform the dot product and calculate the Upper Doppler
+    DopplerUp = ((2.0 / wavelength) * Rvec.T.dot(antVel).flatten()) % PRF
+    # account for wrapping of the Doppler spectrum
+    ind = np.nonzero(DopplerUp > PRF / 2)
+    DopplerUp[ind] -= PRF
+    ind = np.nonzero(DopplerUp < -PRF / 2)
+    DopplerUp[ind] += PRF
+
+    # generate the radial vector for the forward beamwidth edge
+    newAzI = effAzI + azBeamwidthHalf
+    Rvec = np.array([
+        np.cos(grazeOverRanges) * np.sin(newAzI),
+        np.cos(grazeOverRanges) * np.cos(newAzI),
+        -np.sin(grazeOverRanges)])
+    # perform the dot product and calculate the Upper Doppler
+    DopplerDown = \
+        ((2.0 / wavelength) * Rvec.T.dot(antVel).flatten()) % PRF
+    # account for wrapping of the Doppler spectrum
+    ind = np.nonzero(DopplerDown > PRF / 2)
+    DopplerDown[ind] -= PRF
+    ind = np.nonzero(DopplerDown < -PRF / 2)
+    DopplerDown[ind] += PRF
+    return DopplerCen, DopplerUp, DopplerDown, grazeOverRanges
+
+
+def computeGrazingAngle(effAzIR, grazeIR, antPos, theRange, origin):
+    # initialize the pointing vector to first range bin
+    Rvec = np.array([np.cos(grazeIR) * np.sin(effAzIR),
+                  np.cos(grazeIR) * np.cos(effAzIR),
+                  -np.sin(grazeIR)])
+
+    groundPoint = antPos + Rvec * theRange
+    nlat, nlon, alt = enu2llh(*groundPoint, origin)
+    # look up the height of the surface below the aircraft
+    surfaceHeight = getElevation((nlat, nlon), False)
+    # check the error in the elevation compared to what was calculated
+    elevDiff = surfaceHeight - alt
+
+    iterationThresh = 2
+    heightDiffThresh = 1.0
+    numIterations = 0
+    newGrazeR = grazeIR + 0.0
+    # iterate if the difference is greater than 1.0 m
+    while abs(elevDiff) > heightDiffThresh and numIterations < iterationThresh:
+        hAgl = antPos[2] + origin[2] - surfaceHeight
+        newGrazeR = np.arcsin(hAgl / theRange)
+        if np.isnan(newGrazeR) or np.isinf(newGrazeR):
+            print('NaN or inf found.')
+        Rvec = np.array([np.cos(newGrazeR) * np.sin(effAzIR),
+                      np.cos(newGrazeR) * np.cos(effAzIR),
+                      -np.sin(newGrazeR)])
+        groundPoint = antPos + Rvec * theRange
+        nlat, nlon, alt = enu2llh(*groundPoint, origin)
+        surfaceHeight = getElevation((nlat, nlon), False)
+        # check the error in the elevation compared to what was calculated
+        elevDiff = surfaceHeight - alt
+        numIterations += 1
+
+    return newGrazeR, Rvec, surfaceHeight, numIterations
+

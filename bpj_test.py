@@ -25,47 +25,51 @@ TAC = 125e6
 DTR = np.pi / 180
 inch_to_m = .0254
 
-bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135854.sar'
-# bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
+# This is the file used to backproject data
+bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
+# bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
 upsample = 4
-cpi_len = 256
+cpi_len = 64
 plp = 0
 debug = True
 nbpj_pts = 600
 
 print('Loading SDR file...')
-sdr = SDRParse(bg_file, do_exact_matches=False)
+sdr = SDRParse(bg_file, do_exact_matches=False, use_idx=False)
 try:
     origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
                           getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
 except TypeError:
-    heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+    '''heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
     hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
     pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
           (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
     alt = getElevation(pt)
     mrange = hght / np.tan(sdr.ant[0].dep_ang)
     origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
-                    (pt[0], pt[1], alt))
+                    (pt[0], pt[1], alt))'''
+    origin = (40.032203, -111.811561, 1525)
 ref_llh = origin
 
 # Generate a platform
 print('Generating platform...', end='')
-gps_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat'
+
+# Bunch of debug files used for testing. These are not necessary for backprojection.
+'''gps_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat'
 gimbal_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Gimbal.dat'
 postCorr = loadPostCorrectionsGPSData(gps_debug)
 rawGPS = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
-preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')
+preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')'''
 rp = SDRPlatform(sdr, ref_llh)
 
 # Get reference data
-flight = rp.pos(postCorr['sec'])
+# flight = rp.pos(postCorr['sec'])
 fs = sdr[0].fs
 bwidth = sdr[0].bw
 fc = sdr[0].fc
 print('Done.')
 
-# Generate a backprojected image
+# Generate values needed for backprojection
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
