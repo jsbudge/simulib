@@ -180,7 +180,7 @@ class SDREnvironment(Environment):
 
         self.origin = origin
         self.ref = ref_llh
-        shift_x, shift_y, _ = llh2enu(*origin, ref_llh)
+        shift_x, shift_y, shift_z = llh2enu(*origin, ref_llh)
 
         # Set grid to be one meter resolution
         rowup = int(1 / self.rps) if self.rps < 1 else 1
@@ -205,8 +205,8 @@ class SDREnvironment(Environment):
         pty *= self.cps
         rotated = rot.from_euler('z', self.heading).apply(
             np.array([ptx, pty, np.zeros_like(ptx)]).T)
-        lat, lon, alt = enu2llh(rotated[:, 0] + shift_x, rotated[:, 1] + shift_y, np.zeros_like(ptx), ref_llh)
-        e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), ref_llh)
+        lat, lon, alt = enu2llh(rotated[:, 0] + shift_x, rotated[:, 1] + shift_y, np.zeros_like(ptx) + shift_z, self.ref)
+        e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), self.ref)
         self._grid = grid
         self._grid_info = []
 
