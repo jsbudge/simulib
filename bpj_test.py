@@ -26,10 +26,11 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 # This is the file used to backproject data
-bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
+# bg_file = '/data5/SAR_DATA/2021/12072021/SAR_12072021_165650.sar'
 # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
+bg_file = '/data5/SAR_DATA/2021/09242021/SAR_09242021_114237.sar'
 upsample = 4
-cpi_len = 64
+cpi_len = 128
 plp = 0
 debug = True
 nbpj_pts = 600
@@ -40,15 +41,15 @@ try:
     origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
                           getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
 except TypeError:
-    '''heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+    heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
     hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
     pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
           (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
     alt = getElevation(pt)
     mrange = hght / np.tan(sdr.ant[0].dep_ang)
     origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
-                    (pt[0], pt[1], alt))'''
-    origin = (40.032203, -111.811561, 1525)
+                    (pt[0], pt[1], alt))
+origin = (40.087739, -111.697618, 1398)
 ref_llh = origin
 
 # Generate a platform
@@ -84,8 +85,10 @@ up_fft_len = fft_len * upsample
 # Chirp and matched filter calculations
 if sdr[0].xml['Offset_Video_Enabled'] == 'True':
     offset_hz = sdr[0].xml['DC_Offset_MHz'] * 1e6
+    bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
 else:
     offset_hz = 0
+    bpj_wavelength = c0 / fc
 offset_shift = int(offset_hz / (1 / fft_len * fs))
 taywin = int(sdr[0].bw / fs * fft_len)
 taywin = taywin + 1 if taywin % 2 != 0 else taywin
@@ -161,8 +164,9 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu,
                                             panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                            c0 / (fc - bwidth / 2 - offset_hz), ranges[0] / c0,
-                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
+                                            bpj_wavelength, ranges[0] / c0,
+                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
+                                            angs_debug, debug)
     cupy.cuda.Device().synchronize()
 
     if ts[0] < rp.gpst.mean() <= ts[-1]:

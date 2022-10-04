@@ -4,11 +4,17 @@ from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, 
 from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
+from keras.models import load_model
+from keras.utils import custom_object_scope
+from tensorflow.keras.optimizers import Adam, Adadelta
+from wave_train import genTargetPSD, genModel, opt_loss
 import open3d as o3d
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, interpn
+from scipy.signal import medfilt2d
 import cupy as cupy
 import cupyx.scipy.signal
 from numba import cuda, njit
+from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
 import plotly.express as px
@@ -19,6 +25,52 @@ from SDRParsing import SDRParse
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
+
+
+def compileWaveformData(sdr_f, fft_sz, l_sz, bandwidth, fc, slant_min, slant_max, fs, bin_bw):
+    target_data = np.zeros((l_sz, fft_sz, 1))
+    for n in range(l_sz):
+        tpsd = db(genTargetPSD(bandwidth, fc, slant_min, slant_max,
+                               fft_sz, fs)).reshape((fft_sz, 1))
+        tpsd = tpsd / np.linalg.norm(tpsd)
+        target_data[n, :, :] = tpsd
+
+    td_mu = np.mean(target_data)
+    td_std = np.std(target_data)
+    target_data = (np.fft.fftshift(target_data, axes=1)[:, fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2,
+                   :] - td_mu) / td_std
+
+    # Generate the Clutter PSDs from the SDR file
+    clutter_data = sdr_f.getPulses(np.arange(0, l_sz), 0)
+    cd_fftdata = np.fft.fft(clutter_data, fft_sz, axis=0)
+    clutter_data = db(cd_fftdata)
+    clutter_data = clutter_data / np.linalg.norm(clutter_data, axis=0)
+    clutter_phase_data = np.angle(cd_fftdata)
+
+    cd_mu = np.mean(clutter_data)
+    cd_std = np.std(clutter_data)
+    cdp_mu = np.mean(clutter_phase_data)
+    cdp_std = np.std(clutter_phase_data)
+    clutter_data = (clutter_data - cd_mu) / cd_std
+    clutter_phase_data = (clutter_phase_data - cdp_mu) / cdp_std
+
+    clutter_data = np.fft.fftshift(clutter_data, axes=0)[fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2,
+                   :].reshape(target_data.shape)
+    clutter_phase_data = np.fft.fftshift(clutter_phase_data, axes=0)[
+                         fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2, :].reshape(target_data.shape)
+    return target_data, clutter_data, clutter_phase_data, cd_mu, cd_std
+
+
+def getWaveFromData(mdl, target_data, clutter_data, clutter_phase_data, cd_mu, cd_std, l_sz, n_ants, fft_sz, bin_bw):
+    wave_output = (mdl.predict((clutter_data, target_data, clutter_phase_data)) * cd_mu) + cd_std
+
+    waveforms = np.zeros((l_sz, n_ants, fft_sz))
+    waveforms[:, :, fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2] = db(
+        wave_output[:, :, :bin_bw] + 1j * wave_output[:, :, -bin_bw:])
+    waveforms = waveforms / np.linalg.norm(waveforms, axis=2)[:, :, None]
+    waveforms = waveforms[:, :, fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2]
+    return waveforms
+
 
 c0 = 299792458.0
 TAC = 125e6
@@ -32,7 +84,8 @@ cpi_len = 64
 plp = 0
 pts_per_tri = 1
 debug = True
-nbpj_pts = 600
+nbpj_pts = 1000
+do_truth_backproject = False
 
 print('Loading SDR file...')
 sdr = SDRParse(bg_file, do_exact_matches=False)
@@ -40,14 +93,7 @@ sdr = SDRParse(bg_file, do_exact_matches=False)
 # Generate the background for simulation
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
-bg = SDREnvironment(sdr, num_vertices=30000, tri_err=30)
-
-# Grab vertices and such
-vertices = bg.vertices
-triangles = bg.triangles
-normals = bg.normals
-# isCircle = np.linalg.norm(vertices[:, :2], axis=1) == np.linalg.norm(vertices[:, :2], axis=1).min()
-# bg.setReflectivityCoeffs(isCircle * 10000, 10000)
+bg = SDREnvironment(sdr)
 print('Done.')
 
 # Generate a platform
@@ -78,6 +124,24 @@ granges = ranges * np.cos(rp.dep_ang)
 fft_len = findPowerOf2(nsam + nr)
 up_fft_len = fft_len * upsample
 
+# Model for waveform simulation
+mdl_fft = 2048
+n_conv_filters = 4
+kernel_sz = 128
+mdl_bin_bw = int(1500e6 // (fs / mdl_fft))
+# cust_obj = {'loss': opt_loss}
+# with custom_object_scope(cust_obj):
+#     mdl = load_model('/home/jeff/repo/apache_mla/model/model')
+mdl = genModel(mdl_bin_bw, n_conv_filters, kernel_sz, mdl_fft)
+# mdl.compile(optimizer=Adam(learning_rate=1e-5))
+mdl.load_weights('/home/jeff/repo/apache_mla/model/weights.h5')
+
+# Generate model data for waveform
+wfd = compileWaveformData(sdr, mdl_fft, cpi_len, bwidth, fc, ranges[0], ranges[-1], fs, mdl_bin_bw)
+
+# Get waveforms
+wf_data = getWaveFromData(mdl, *wfd, cpi_len, 2, mdl_fft, mdl_bin_bw)
+
 # Chirp and matched filter calculations
 if sdr[0].xml['Offset_Video_Enabled'] == 'True':
     offset_hz = sdr[0].xml['DC_Offset_MHz'] * 1e6
@@ -91,7 +155,9 @@ tayd = np.fft.fftshift(taylor(cpi_len))
 taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
 # chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
 #                             bwidth) * 1e4, up_fft_len)
-chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
+
+# chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
+chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)
 mfilt = chirp.conj()
 mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
 mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
@@ -102,6 +168,16 @@ mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 # Calculate out points on the ground
 shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
 gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
+newgrid = interpn((np.arange(bg._grid.shape[0]) - bg._grid.shape[0] / 2,
+                   np.arange(bg._grid.shape[1]) - bg._grid.shape[1] / 2),
+                  bg._grid, np.array([gx.flatten(), gy.flatten()]).T).reshape((nbpj_pts, nbpj_pts))
+# Reduce grid to int8
+newgrid = medfilt2d(newgrid, 5)
+mu = newgrid[newgrid > -200].mean()
+std = newgrid[newgrid > -200].std()
+newgrid = np.digitize(newgrid, np.linspace(mu - std * 3, mu + std * 3, 256))
+bg._grid = newgrid
+bg.genMesh(150000, tri_err=35)
 gx += shift_x
 gy += shift_y
 latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.ref)
@@ -111,9 +187,9 @@ gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
 
 # Generate a test strip of data
-tri_vert_indices = cupy.array(triangles, dtype=np.int32)
-vert_xyz = cupy.array(vertices, dtype=np.float64)
-vert_norms = cupy.array(normals, dtype=np.float64)
+tri_vert_indices = cupy.array(bg.triangles, dtype=np.int32)
+vert_xyz = cupy.array(bg.vertices, dtype=np.float64)
+vert_norms = cupy.array(bg.normals, dtype=np.float64)
 scattering_coef_gpu = cupy.array(bg.scat_coefs, dtype=np.float64)
 ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
@@ -130,7 +206,7 @@ test = None
 
 # GPU device calculations
 threads_per_block = getMaxThreads()
-bpg_ranges = (max(1, triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
+bpg_ranges = (max(1, bg.triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
 bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
 # rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
 
@@ -170,11 +246,11 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     cupy.cuda.Device().synchronize()
 
     # Simulated data debug checks
-    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
+    if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
         test = rtdata.get()
         angd = angs_debug.get()
-        locd = pts_debug.get()'''
+        locd = pts_debug.get()
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
@@ -184,34 +260,35 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     bpj_res += bpj_grid.get()
 
     # Reset the grid for truth data
-    trtdata = cupy.fft.fft(cupy.array(sdr.getPulses(tidx, 0),
-                                     dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
-    tupsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
-    tupsample_data[:fft_len // 2, :] = trtdata[:fft_len // 2, :]
-    tupsample_data[-fft_len // 2:, :] = trtdata[-fft_len // 2:, :]
-    trtdata = cupy.fft.ifft(tupsample_data, axis=0)[:nsam * upsample, :]
-    cupy.cuda.Device().synchronize()
-    bpj_grid2 = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
+    if do_truth_backproject:
+        trtdata = cupy.fft.fft(cupy.array(sdr.getPulses(tidx, 0),
+                                         dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
+        tupsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
+        tupsample_data[:fft_len // 2, :] = trtdata[:fft_len // 2, :]
+        tupsample_data[-fft_len // 2:, :] = trtdata[-fft_len // 2:, :]
+        trtdata = cupy.fft.ifft(tupsample_data, axis=0)[:nsam * upsample, :]
+        cupy.cuda.Device().synchronize()
+        bpj_grid2 = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
-    '''if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp = rp.pos(ts[-1])
-        test = rtdata.get()
-        angd = angs_debug.get()
-        locd = pts_debug.get()'''
+        if ts[0] < rp.gpst.mean() <= ts[-1]:
+            locp = rp.pos(ts[-1])
+            test = rtdata.get()
+            angd = angs_debug.get()
+            locd = pts_debug.get()
 
-    '''backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
-                                            elrx_gpu,
-                                            panrx_gpu, elrx_gpu, trtdata, bpj_grid2,
-                                            c0 / (fc - bwidth / 2 - offset_hz), ranges[0] / c0,
-                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
-    cupy.cuda.Device().synchronize()'''
+        backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
+                                                elrx_gpu,
+                                                panrx_gpu, elrx_gpu, trtdata, bpj_grid2,
+                                                c0 / (fc - bwidth / 2 - offset_hz), ranges[0] / c0,
+                                                rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
+        cupy.cuda.Device().synchronize()
 
-    if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp = rp.pos(ts[-1])
-        test = trtdata.get()
-        angd = angs_debug.get()
-        locd = pts_debug.get()
-    bpj_truedata += bpj_grid2.get()
+        if ts[0] < rp.gpst.mean() <= ts[-1]:
+            locp = rp.pos(ts[-1])
+            test = trtdata.get()
+            angd = angs_debug.get()
+            locd = pts_debug.get()
+        bpj_truedata += bpj_grid2.get()
 
 del panrx_gpu
 del postx_gpu
@@ -221,18 +298,20 @@ del data_r
 del data_i
 del rtdata
 del upsample_data
-del trtdata
-del tupsample_data
 del bpj_grid
-del bpj_grid2
+
+if do_truth_backproject:
+    del trtdata
+    del tupsample_data
+    del bpj_grid2
 
 del rbins_gpu
 del gx_gpu
 del gy_gpu
 del gz_gpu
 
-dfig = go.Figure(data=[go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
-                                 facecolor=bg.ref_coefs)])
+dfig = go.Figure(data=[go.Mesh3d(x=bg.vertices[:, 0], y=bg.vertices[:, 1], z=bg.vertices[:, 2],
+                                 facecolor=bg.ref_coefs, facecolorsrc='teal')])
 flight = rp.pos(rp.gpst)
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
 dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
@@ -253,15 +332,20 @@ ffig.show()'''
 bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_res).flatten())
 bfig.show()
 
-bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
-bfig.show()
-
 plt.figure('Doppler data')
 plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1))
 plt.axis('tight')
 
-plt.figure('IMSHOW truedata')
-plt.imshow(db(bpj_truedata), origin='lower')
+if do_truth_backproject:
+    bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
+    bfig.show()
+
+    plt.figure('IMSHOW truedata')
+    plt.imshow(db(bpj_truedata), origin='lower')
+    plt.axis('tight')
+
+plt.figure('BPJ Grid')
+plt.imshow(bg._grid)
 plt.axis('tight')
 
 '''n_diff = flight[1, :] - pn

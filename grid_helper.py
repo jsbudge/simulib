@@ -16,11 +16,12 @@ DTR = np.pi / 180
 inch_to_m = .0254
 m_to_ft = 3.2808
 
-
 '''
 Environment
 This is a class to represent the environment of a radar. 
 '''
+
+
 class Environment(object):
     _mesh = None
     _pcd = None
@@ -29,16 +30,20 @@ class Environment(object):
     _refscale = 1
     _scatscale = 1
 
-    def __init__(self, pts=None, scattering=None, reflectivity=None, triangles=None):
+    def __init__(self, pts=None, scattering=None, reflectivity=None):
+        self.pts = pts
+        self.scattering = scattering
+        self.reflectivity = reflectivity
 
-        if pts is None:
+    def createGrid(self, triangles):
+        if self.pts is None:
             return
         # Create the point cloud for the mesh basis
-        scats = scattering if scattering is not None else np.ones((triangles.shape[0],))
-        refs = reflectivity if reflectivity is not None else np.ones((triangles.shape[0],))
+        scats = self.scattering if self.scattering is not None else np.ones((triangles.shape[0],))
+        refs = self.reflectivity if self.reflectivity is not None else np.ones((triangles.shape[0],))
         col_scale = (refs - refs.min()) / refs.max()
         col_scale /= col_scale.max()
-        colors = np.zeros((len(reflectivity), 3))
+        colors = np.zeros((len(refs), 3))
         colors[:, 0] = col_scale
         colors[:, 1] = col_scale
         colors[:, 2] = col_scale
@@ -49,7 +54,7 @@ class Environment(object):
         # Downsample if possible to reduce number of triangles
         if triangles is None:
             pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(pts)
+            pcd.points = o3d.utility.Vector3dVector(self.pts)
             pcd.colors = o3d.utility.Vector3dVector(colors)
             pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()))
 
@@ -69,7 +74,7 @@ class Environment(object):
             rec_mesh.remove_unreferenced_vertices()
         else:
             rec_mesh = o3d.geometry.TriangleMesh()
-            rec_mesh.vertices = o3d.utility.Vector3dVector(pts)
+            rec_mesh.vertices = o3d.utility.Vector3dVector(self.pts)
             rec_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
             rec_mesh.triangles = o3d.utility.Vector3iVector(triangles)
             rec_mesh.compute_vertex_normals()
@@ -135,6 +140,7 @@ class MapEnvironment(Environment):
             e, n, u = llh2enu(nlat, nlon, nh + origin[2], origin)
         self.origin = origin
         super().__init__(np.array([e, n, u]).T)
+        self.createGrid()
 
 
 class SDREnvironment(Environment):
@@ -142,7 +148,7 @@ class SDREnvironment(Environment):
     cps = 1
     heading = 0.
 
-    def __init__(self, sdr_file, num_vertices=100000, tri_err=35):
+    def __init__(self, sdr_file, local_grid=None, origin=None):
         # Load in the SDR file
         sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         grid = None
@@ -167,11 +173,16 @@ class SDREnvironment(Environment):
                   (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
             alt = getElevation(pt)
             mrange = hght / np.tan(sdr.ant[0].dep_ang)
-            ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
-                                       (pt[0], pt[1], alt))
+            if origin is None:
+                ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
+                                           (pt[0], pt[1], alt))
+            else:
+                ref_llh = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
+                                           (pt[0], pt[1], alt))
         else:
-            origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
-                      getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+            if origin is None:
+                origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
+                          getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
             ref_llh = (sdr.ash['geo']['refLat'], sdr.ash['geo']['refLon'],
                        sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']
@@ -180,42 +191,53 @@ class SDREnvironment(Environment):
 
         self.origin = origin
         self.ref = ref_llh
-        shift_x, shift_y, shift_z = llh2enu(*origin, ref_llh)
 
-        # Set grid to be one meter resolution
-        rowup = int(1 / self.rps) if self.rps < 1 else 1
-        colup = int(1 / self.cps) if self.cps < 1 else 1
-        grid = grid[::rowup, ::colup]
-        self.rps *= rowup
-        self.cps *= colup
+        if local_grid is not None:
+            grid = local_grid
+        else:
+            # Set grid to be one meter resolution
+            rowup = int(1 / self.rps) if self.rps < 1 else 1
+            colup = int(1 / self.cps) if self.cps < 1 else 1
+            grid = grid[::rowup, ::colup]
+            self.rps *= rowup
+            self.cps *= colup
 
-        # Reduce grid to int8
-        grid = medfilt2d(grid, 5)
-        mu = grid[grid > -200].mean()
-        std = grid[grid > -200].std()
-        grid = np.digitize(grid, np.linspace(mu - std * 3, mu + std * 3, 1000))
+            # Reduce grid to int8
+            grid = medfilt2d(grid, 5)
+            mu = grid[grid > -200].mean()
+            std = grid[grid > -200].std()
+            grid = np.digitize(grid, np.linspace(mu - std * 3, mu + std * 3, 1000))
+        self._grid = grid
+        self._grid_info = []
 
+        super().__init__()
+
+    def genMesh(self, num_vertices, tri_err=35):
+        shift_x, shift_y, shift_z = llh2enu(*self.origin, self.ref)
         # Generate 2d triangle mesh
-        ptx, pty, reflectivity, simplices = mesh(grid, tri_err, num_vertices)
+        if num_vertices is None:
+            num_vertices = (self._grid.shape[0] * self._grid.shape[1]) // 2
+        ptx, pty, reflectivity, simplices = mesh(self._grid, tri_err, num_vertices)
 
         # Rotate everything into lat/lon/alt for 3d mesh
-        ptx = ptx - grid.shape[0] / 2
-        pty = pty - grid.shape[1] / 2
+        ptx = ptx - self._grid.shape[0] / 2
+        pty = pty - self._grid.shape[1] / 2
         ptx *= self.rps
         pty *= self.cps
         rotated = rot.from_euler('z', self.heading).apply(
             np.array([ptx, pty, np.zeros_like(ptx)]).T)
-        lat, lon, alt = enu2llh(rotated[:, 0] + shift_x, rotated[:, 1] + shift_y, np.zeros_like(ptx) + shift_z, self.ref)
+        lat, lon, alt = enu2llh(rotated[:, 0] + shift_x, rotated[:, 1] + shift_y,
+                                np.zeros_like(ptx) + shift_z, self.ref)
         e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), self.ref)
-        self._grid = grid
-        self._grid_info = []
-
-        super().__init__(np.array([e, n, u]).T, scattering=np.ones_like(e), reflectivity=reflectivity,
-                         triangles=simplices)
+        self.pts = np.array([e, n, u]).T
+        self.scattering = np.ones_like(e)
+        self.reflectivity = reflectivity
+        self.createGrid(simplices)
 
 
 def mesh(grid, tri_err, num_vertices):
     # Generate a mesh using SVS metrics to make triangles in the right spots
+    # Generate grid using indices instead of whatever unit it's in
     ptx, pty = np.meshgrid(np.arange(grid.shape[0] - 1), np.arange(grid.shape[1] - 1))
     ptx = ptx.flatten()
     pty = pty.flatten()
@@ -225,6 +247,8 @@ def mesh(grid, tri_err, num_vertices):
     pty = pty[nonzeros]
     im = im[nonzeros]
     pts = np.array([ptx, pty]).T
+
+    # Initial points are the four corners of the grid
     init_pts = np.array([[0, 0],
                          [0, grid.shape[1] - 1],
                          [grid.shape[0] - 1, 0],
