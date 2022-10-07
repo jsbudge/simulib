@@ -281,7 +281,7 @@ class SDRPlatform(RadarPlatform):
     _sdr = None
 
     def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, gps_debug=None,
-                 gimbal_debug=None):
+                 gimbal_debug=None, gimbal_offset=None):
         """
         Init function.
         :param sdr_file: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
@@ -321,11 +321,17 @@ class SDRPlatform(RadarPlatform):
                 times = np.interp(gim['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
             pan = np.interp(t, times, gim['pan'])
             tilt = np.interp(t, times, gim['tilt'])
-        goff = np.array([sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset])
+        goff = np.array([sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
         grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
-        channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2 * DTR
-        tx_num = sdr[channel].trans_num
-        tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
+        try:
+            channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2 * DTR
+        except KeyError:
+            channel_dep = sdr.ant[0].dep_ang
+        if sdr[channel].is_recieve_only:
+            tx_num = 1
+        else:
+            tx_num = sdr[channel].trans_num
+            tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
         rx_num = sdr[channel].rec_num
         rx_offset = np.array([sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]) if rx_offset is None else rx_offset
         super().__init__(e=e, n=n, u=u, r=sdr.gps_data['r'].values, p=sdr.gps_data['p'].values,
@@ -423,6 +429,22 @@ def bodyToInertial(yaw, pitch, roll, x, y, z):
         [cp * sy, cp * cy, sp],
         [sr * cy - cr * sp * sy, -sr * sy - cr * sp * cy, cr * cp]])
     return rotItoB.T.dot(np.array([x, y, z]))
+
+
+def inertialToBody(yaw, pitch, roll, x, y, z):
+    cy = np.cos(yaw)
+    sy = np.sin(yaw)
+    cp = np.cos(pitch)
+    sp = np.sin(pitch)
+    cr = np.cos(roll)
+    sr = np.sin(roll)
+
+    # compute the inertial to body rotation matrix
+    rotItoB = np.array([
+        [cr * cy + sr * sp * sy, -cr * sy + sr * sp * cy, -sr * cp],
+        [cp * sy, cp * cy, sp],
+        [sr * cy - cr * sp * sy, -sr * sy - cr * sp * cy, cr * cp]])
+    return np.linalg.pinv(rotItoB).T.dot(np.array([x, y, z]))
 
 
 def gimbalToBody(rotBtoMG, pan, tilt, x, y, z):

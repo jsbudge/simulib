@@ -14,7 +14,7 @@ from scipy.signal import medfilt2d
 import cupy as cupy
 import cupyx.scipy.signal
 from numba import cuda, njit
-from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
+from numba.cuda.random import create_xoroshiro128p_states, init_xoroshiro128p_states
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
 import plotly.express as px
@@ -79,12 +79,14 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
-upsample = 4
+upsample = 1
 cpi_len = 64
 plp = 0
-pts_per_tri = 1
+max_pts_per_tri = 1500
 debug = True
-nbpj_pts = 1000
+nbpj_pts = 600
+grid_width = 150
+grid_height = 150
 do_truth_backproject = False
 
 print('Loading SDR file...')
@@ -156,8 +158,8 @@ taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1))
 # chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
 #                             bwidth) * 1e4, up_fft_len)
 
-# chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
-chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)
+chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
+# chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)
 mfilt = chirp.conj()
 mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
 mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
@@ -167,7 +169,8 @@ mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
 # Calculate out points on the ground
 shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
-gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
+gx, gy = np.meshgrid(np.linspace(-grid_width / 2, grid_width / 2, nbpj_pts),
+                     np.linspace(-grid_height / 2, grid_height / 2, nbpj_pts))
 newgrid = interpn((np.arange(bg._grid.shape[0]) - bg._grid.shape[0] / 2,
                    np.arange(bg._grid.shape[1]) - bg._grid.shape[1] / 2),
                   bg._grid, np.array([gx.flatten(), gy.flatten()]).T).reshape((nbpj_pts, nbpj_pts))
@@ -176,7 +179,7 @@ newgrid = medfilt2d(newgrid, 5)
 mu = newgrid[newgrid > -200].mean()
 std = newgrid[newgrid > -200].std()
 newgrid = np.digitize(newgrid, np.linspace(mu - std * 3, mu + std * 3, 256))
-bg._grid = newgrid
+bg.setGrid(newgrid, grid_width / nbpj_pts, grid_height / nbpj_pts)
 bg.genMesh(150000, tri_err=35)
 gx += shift_x
 gy += shift_y
@@ -195,10 +198,10 @@ ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 if debug:
-    # pts_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
-    # angs_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
-    pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
-    angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
+    pts_debug = cupy.zeros((bg.triangles.shape[0], 3), dtype=np.float64)
+    angs_debug = cupy.zeros((bg.triangles.shape[0], 3), dtype=np.float64)
+    # pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
+    # angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
 else:
     pts_debug = cupy.zeros((1, 1), dtype=np.float64)
     angs_debug = cupy.zeros((1, 1), dtype=np.float64)
@@ -208,7 +211,9 @@ test = None
 threads_per_block = getMaxThreads()
 bpg_ranges = (max(1, bg.triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
 bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
-# rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
+rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
+                                         seed=10)
+# init_xoroshiro128p_states(rng_states, seed=10)
 
 # Data blocks for imaging
 bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
@@ -235,9 +240,10 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
                                                                panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
                                                                angs_debug, c0 / fc, ranges[0] / c0,
                                                                rp.fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                                               pts_per_tri, False)
+                                                               max_pts_per_tri, rng_states, True)
 
     cupy.cuda.Device().synchronize()
+
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * chirp_gpu[:, :tmp_len] * mfilt_gpu[:, :tmp_len]
     upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
@@ -254,9 +260,8 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
-                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, debug)
+                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, False)
     cupy.cuda.Device().synchronize()
-
     bpj_res += bpj_grid.get()
 
     # Reset the grid for truth data
@@ -313,8 +318,9 @@ del gz_gpu
 dfig = go.Figure(data=[go.Mesh3d(x=bg.vertices[:, 0], y=bg.vertices[:, 1], z=bg.vertices[:, 2],
                                  facecolor=bg.ref_coefs, facecolorsrc='teal')])
 flight = rp.pos(rp.gpst)
-dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :])
-dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+# dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
+# dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten(), mode='markers')
+# dfig.add_scatter3d(x=locd[:, 0] + locp[0], y=locd[:, 1] + locp[1], z=locd[:, 2] + locp[2], mode='markers')
 dfig.show()
 
 '''te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], bg.ref)
@@ -345,7 +351,7 @@ if do_truth_backproject:
     plt.axis('tight')
 
 plt.figure('BPJ Grid')
-plt.imshow(bg._grid)
+plt.imshow(bg._grid, origin='lower')
 plt.axis('tight')
 
 '''n_diff = flight[1, :] - pn
@@ -416,3 +422,14 @@ plt.title('Tilt')
 plt.plot(times, gimbal_data['tilt'])
 plt.plot(times, sdr.gimbal['tilt'])'''
 plt.show()
+
+
+tri_area = []
+for tri in range(bg.triangles.shape[0]):
+    tv = bg.triangles[tri, :]
+    v = bg.vertices[tv, :]
+    s1 = np.linalg.norm(v[0, :] - v[1, :])
+    s2 = np.linalg.norm(v[1, :] - v[2, :])
+    s3 = np.linalg.norm(v[0, :] - v[2, :])
+    se = s1 + s2 + s3
+    tri_area.append(np.sqrt(se * (se - s1) * (se - s2) * (se - s3)))

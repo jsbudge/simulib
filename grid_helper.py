@@ -212,6 +212,11 @@ class SDREnvironment(Environment):
 
         super().__init__()
 
+    def setGrid(self, newgrid, newrps, newcps):
+        self._grid = newgrid
+        self.rps = newrps
+        self.cps = newcps
+
     def genMesh(self, num_vertices, tri_err=35):
         shift_x, shift_y, shift_z = llh2enu(*self.origin, self.ref)
         # Generate 2d triangle mesh

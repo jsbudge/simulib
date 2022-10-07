@@ -350,12 +350,13 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
             
             
-@cuda.jit
+@cuda.jit(fastmath=True)
 def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_scattering, vert_reflectivity,
                                 source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, calc_pts, calc_angs,
-                                wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
+                                wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, rng_states, debug_flag):
     # sourcery no-metrics
     tri, tt = cuda.grid(ndim=2)
+    tri_sz, tt_sz = cuda.gridsize(2)
     if tri < tri_vert_indices.shape[0] and tt < source_xyz.shape[1]:
         # Load in all the parameters that don't change
         n_samples = pd_r.shape[0]
@@ -365,10 +366,31 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
         tv2 = tri_vert_indices[tri, 1]
         tv3 = tri_vert_indices[tri, 2]
 
-        for _ in range(pts_per_tri):
-            u = .33
-            v = .33
-            w = 1 - (u + v)
+        # Calculate out semiperimeter
+        s1 = math.sqrt((vert_xyz[tv1, 0] - vert_xyz[tv2, 0]) * (vert_xyz[tv1, 0] - vert_xyz[tv2, 0]) +
+                                  (vert_xyz[tv1, 1] - vert_xyz[tv2, 1]) * (vert_xyz[tv1, 1] - vert_xyz[tv2, 1]) +
+                                  (vert_xyz[tv1, 2] - vert_xyz[tv2, 2]) * (vert_xyz[tv1, 2] - vert_xyz[tv2, 2]))
+        s2 = math.sqrt((vert_xyz[tv2, 0] - vert_xyz[tv3, 0]) * (vert_xyz[tv2, 0] - vert_xyz[tv3, 0]) +
+                                  (vert_xyz[tv2, 1] - vert_xyz[tv3, 1]) * (vert_xyz[tv2, 1] - vert_xyz[tv3, 1]) +
+                                  (vert_xyz[tv2, 2] - vert_xyz[tv3, 2]) * (vert_xyz[tv2, 2] - vert_xyz[tv3, 2]))
+        s3 = math.sqrt((vert_xyz[tv1, 0] - vert_xyz[tv3, 0]) * (vert_xyz[tv1, 0] - vert_xyz[tv3, 0]) +
+                                  (vert_xyz[tv1, 1] - vert_xyz[tv3, 1]) * (vert_xyz[tv1, 1] - vert_xyz[tv3, 1]) +
+                                  (vert_xyz[tv1, 2] - vert_xyz[tv3, 2]) * (vert_xyz[tv1, 2] - vert_xyz[tv3, 2]))
+        semiperimeter = s1 + s2 + s3
+
+        # Get area using Heron's formula
+        tri_area = math.sqrt(semiperimeter * (semiperimeter - s1) * (semiperimeter - s2) * (semiperimeter - s3))
+
+        ppt = min(pts_per_tri, max(1, int(tri_area * 100)))
+
+        for _ in range(ppt):
+            u = xoroshiro128p_uniform_float64(rng_states, tri)
+            v = xoroshiro128p_uniform_float64(rng_states, tri)
+            if (u + v) > 1:
+                u = 1. - v
+            w = 1. - (u + v)
+            # if debug_flag and tt == 0:
+            #     print(w)
             # Get barycentric coordinates for bounce points
             bar_x = vert_xyz[tv1, 0] * u + vert_xyz[tv2, 0] * v + vert_xyz[tv3, 0] * w
             bar_y = vert_xyz[tv1, 1] * u + vert_xyz[tv2, 1] * v + vert_xyz[tv3, 1] * w
@@ -383,12 +405,6 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             ty = bar_y - source_xyz[1, tt]
             tz = bar_z - source_xyz[2, tt]
             rng = math.sqrt(tx * tx + ty * ty + tz * tz)
-            if debug_flag and tt == 0:
-                calc_pts[tri, 0] = tx
-                calc_pts[tri, 1] = ty
-                calc_pts[tri, 2] = tz
-                calc_angs[tri, 0] = -math.asin(tz / rng)
-                calc_angs[tri, 1] = math.atan2(tx, ty)
 
             # Calculate out the bounce angles
             rnorm = norm_x * tx / rng + norm_y * ty / rng + norm_z * tz / rng
@@ -405,23 +421,29 @@ def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_sca
             rz = bar_z - receive_xyz[2, tt]
             r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
             r_el = -math.asin(rz / r_rng)
-            r_az = math.atan2(rx, ry)
+            r_az = math.atan2(-ry, rx) + np.pi / 2
+            if debug_flag and tt == 0:
+                calc_pts[tri, 0] = rx
+                calc_pts[tri, 1] = ry
+                calc_pts[tri, 2] = rz
+                calc_angs[tri, 0] = r_el
+                calc_angs[tri, 1] = r_az
             two_way_rng = rng + r_rng
             rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
             but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+            calc_angs[tri, 2] = but
             if n_samples > but > 0:
                 a = abs(b_x * rx / r_rng + b_y * ry / r_rng + \
                     b_z * rz / r_rng)
                 reflectivity = 1 #math.pow((scat_sig / -a + scat_sig) / 20, 10)
-                att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
-                    1 / two_way_rng * reflectivity
-                calc_angs[tri, 2] = att
-                acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_ref
+                att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el)
+                # calc_angs[tri, 2] = att
+                acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_ref / two_way_rng * reflectivity
                 cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
                 cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
 
 
-@cuda.jit
+@cuda.jit(fastmath=True)
 def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, eltx, pulse_data, final_grid,
                 wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
     """
@@ -474,7 +496,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             rz = gz[px, py] - receive_xyz[2, tt]
             rx_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
             r_el = -math.asin(rz / rx_rng)
-            r_az = math.atan2(rx, ry)
+            r_az = math.atan2(-ry, rx) + np.pi / 2
             if debug_flag and tt == 0 and py == 0:
                 calc_pts[px, 0] = rx
                 calc_pts[px, 1] = ry

@@ -28,7 +28,7 @@ inch_to_m = .0254
 # This is the file used to backproject data
 # bg_file = '/data5/SAR_DATA/2021/12072021/SAR_12072021_165650.sar'
 # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
-bg_file = '/data5/SAR_DATA/2021/09242021/SAR_09242021_114237.sar'
+bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 upsample = 4
 cpi_len = 128
 plp = 0
@@ -49,7 +49,7 @@ except TypeError:
     mrange = hght / np.tan(sdr.ant[0].dep_ang)
     origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
                     (pt[0], pt[1], alt))
-origin = (40.087739, -111.697618, 1398)
+# origin = (40.087739, -111.697618, 1398)
 ref_llh = origin
 
 # Generate a platform
