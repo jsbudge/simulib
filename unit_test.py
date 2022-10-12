@@ -72,6 +72,27 @@ def getWaveFromData(mdl, target_data, clutter_data, clutter_phase_data, cd_mu, c
     return waveforms
 
 
+def get_autocorr(wave, bw, fs, fft_len, offset_shift, upsample, sec_wave=None):
+    taywin = int(bw / fs * fft_len)
+    taywin = taywin + 1 if taywin % 2 != 0 else taywin
+    taytay = taylor(taywin)
+    chirp = np.fft.fft(wave, fft_len)
+    if sec_wave is None:
+        mfilt = chirp.conj()
+    else:
+        mfilt = np.fft.fft(sec_wave, fft_len)
+    mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
+    mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
+    mfilt[taywin // 2 + offset_shift:-taywin // 2 + offset_shift] = 0
+
+    mfilt_chirp = mfilt * chirp
+    upsampled_shift = np.zeros((fft_len * upsample,), dtype=np.complex128)
+
+    upsampled_shift[:fft_len // 2] = mfilt_chirp[:fft_len // 2]
+    upsampled_shift[-fft_len // 2:] = mfilt_chirp[-fft_len // 2:]
+    return db(np.fft.ifft(upsampled_shift))
+
+
 c0 = 299792458.0
 TAC = 125e6
 DTR = np.pi / 180
@@ -82,12 +103,13 @@ bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 upsample = 1
 cpi_len = 64
 plp = 0
-max_pts_per_tri = 1500
+max_pts_per_tri = 10
 debug = True
 nbpj_pts = 600
 grid_width = 150
 grid_height = 150
 do_truth_backproject = False
+custom_waveform = False
 
 print('Loading SDR file...')
 sdr = SDRParse(bg_file, do_exact_matches=False)
@@ -127,22 +149,22 @@ fft_len = findPowerOf2(nsam + nr)
 up_fft_len = fft_len * upsample
 
 # Model for waveform simulation
-mdl_fft = 2048
-n_conv_filters = 4
-kernel_sz = 128
-mdl_bin_bw = int(1500e6 // (fs / mdl_fft))
-# cust_obj = {'loss': opt_loss}
-# with custom_object_scope(cust_obj):
-#     mdl = load_model('/home/jeff/repo/apache_mla/model/model')
-mdl = genModel(mdl_bin_bw, n_conv_filters, kernel_sz, mdl_fft)
-# mdl.compile(optimizer=Adam(learning_rate=1e-5))
-mdl.load_weights('/home/jeff/repo/apache_mla/model/weights.h5')
+if custom_waveform:
+    mdl_fft = 2048
+    n_conv_filters = 4
+    kernel_sz = 128
+    mdl_bin_bw = int(1500e6 // (fs / mdl_fft))
+    mdl = genModel(mdl_bin_bw, n_conv_filters, kernel_sz, mdl_fft)
+    mdl.load_weights('/home/jeff/repo/apache_mla/model/weights.h5')
 
-# Generate model data for waveform
-wfd = compileWaveformData(sdr, mdl_fft, cpi_len, bwidth, fc, ranges[0], ranges[-1], fs, mdl_bin_bw)
+    # Generate model data for waveform
+    wfd = compileWaveformData(sdr, mdl_fft, cpi_len, bwidth, fc, ranges[0], ranges[-1], fs, mdl_bin_bw)
 
-# Get waveforms
-wf_data = getWaveFromData(mdl, *wfd, cpi_len, 2, mdl_fft, mdl_bin_bw)
+    # Get waveforms
+    wf_data = getWaveFromData(mdl, *wfd, cpi_len, 2, mdl_fft, mdl_bin_bw)
+    chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)
+else:
+    chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
 
 # Chirp and matched filter calculations
 if sdr[0].xml['Offset_Video_Enabled'] == 'True':
@@ -155,11 +177,6 @@ taywin = taywin + 1 if taywin % 2 != 0 else taywin
 taytay = taylor(taywin)
 tayd = np.fft.fftshift(taylor(cpi_len))
 taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
-# chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
-#                             bwidth) * 1e4, up_fft_len)
-
-chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
-# chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)
 mfilt = chirp.conj()
 mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
 mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
@@ -171,35 +188,27 @@ mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
 gx, gy = np.meshgrid(np.linspace(-grid_width / 2, grid_width / 2, nbpj_pts),
                      np.linspace(-grid_height / 2, grid_height / 2, nbpj_pts))
-newgrid = interpn((np.arange(bg._grid.shape[0]) - bg._grid.shape[0] / 2,
-                   np.arange(bg._grid.shape[1]) - bg._grid.shape[1] / 2),
-                  bg._grid, np.array([gx.flatten(), gy.flatten()]).T).reshape((nbpj_pts, nbpj_pts))
-# Reduce grid to int8
-newgrid = medfilt2d(newgrid, 5)
-mu = newgrid[newgrid > -200].mean()
-std = newgrid[newgrid > -200].std()
-newgrid = np.digitize(newgrid, np.linspace(mu - std * 3, mu + std * 3, 256))
-bg.setGrid(newgrid, grid_width / nbpj_pts, grid_height / nbpj_pts)
-bg.genMesh(150000, tri_err=35)
+newgrid = interpn((np.arange(bg._refgrid.shape[0]) - bg._refgrid.shape[0] / 2,
+                   np.arange(bg._refgrid.shape[1]) - bg._refgrid.shape[1] / 2),
+                  bg._refgrid, np.array([gx.flatten(), gy.flatten()]).T).reshape((nbpj_pts, nbpj_pts))
 gx += shift_x
 gy += shift_y
 latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.ref)
 gz = (getElevationMap(latg, long) - bg.ref[2]).reshape(gx.shape)
+bg.setGrid(newgrid, np.array([gx, gy, gz]).T, grid_width / nbpj_pts, grid_height / nbpj_pts)
+
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
 
 # Generate a test strip of data
-tri_vert_indices = cupy.array(bg.triangles, dtype=np.int32)
-vert_xyz = cupy.array(bg.vertices, dtype=np.float64)
-vert_norms = cupy.array(bg.normals, dtype=np.float64)
-scattering_coef_gpu = cupy.array(bg.scat_coefs, dtype=np.float64)
-ref_coef_gpu = cupy.array(bg.ref_coefs, dtype=np.float64)
+grid_gpu = cupy.array(bg.grid, dtype=np.float64)
+ref_coef_gpu = cupy.array(bg.refgrid, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 if debug:
-    pts_debug = cupy.zeros((bg.triangles.shape[0], 3), dtype=np.float64)
-    angs_debug = cupy.zeros((bg.triangles.shape[0], 3), dtype=np.float64)
+    pts_debug = cupy.zeros((bg.refgrid.shape[0], 3), dtype=np.float64)
+    angs_debug = cupy.zeros((bg.refgrid.shape[0], 3), dtype=np.float64)
     # pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
     # angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
 else:
@@ -209,15 +218,16 @@ test = None
 
 # GPU device calculations
 threads_per_block = getMaxThreads()
-bpg_ranges = (max(1, bg.triangles.shape[0] // threads_per_block[0] + 1), cpi_len // threads_per_block[1] + 1)
+bpg_ranges = (max(1, bg.refgrid.shape[0] // threads_per_block[0] + 1),
+              bg.refgrid.shape[1] // threads_per_block[1] + 1)
 bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
-rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
-                                         seed=10)
-# init_xoroshiro128p_states(rng_states, seed=10)
 
 # Data blocks for imaging
 bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 bpj_truedata = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
+
+rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
+                                         seed=10)
 
 # Run through loop to get data simulated
 data_t = sdr[0].pulse_time
@@ -234,8 +244,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
-    genRangeWithoutIntersection[bpg_ranges, threads_per_block](tri_vert_indices, vert_xyz, vert_norms,
-                                                               scattering_coef_gpu, ref_coef_gpu,
+    genRangeWithoutIntersection[bpg_ranges, threads_per_block](grid_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
                                                                angs_debug, c0 / fc, ranges[0] / c0,
@@ -260,7 +269,8 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid, c0 / fc, ranges[0] / c0,
-                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug, angs_debug, False)
+                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
+                                            angs_debug, False)
     cupy.cuda.Device().synchronize()
     bpj_res += bpj_grid.get()
 
@@ -315,8 +325,8 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-dfig = go.Figure(data=[go.Mesh3d(x=bg.vertices[:, 0], y=bg.vertices[:, 1], z=bg.vertices[:, 2],
-                                 facecolor=bg.ref_coefs, facecolorsrc='teal')])
+dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
+                                 facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
 flight = rp.pos(rp.gpst)
 # dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
 # dfig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten(), mode='markers')
@@ -335,7 +345,7 @@ ffig.add_scatter3d(x=te, y=tn, z=tu)
 ffig.add_scatter3d(x=re, y=rn, z=ru)
 ffig.show()'''
 
-bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_res).flatten())
+bfig = px.scatter(x=bg.grid[:, :, 0].flatten(), y=bg.grid[:, :, 1].flatten(), color=db(bpj_res).flatten())
 bfig.show()
 
 plt.figure('Doppler data')
@@ -343,7 +353,7 @@ plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1))
 plt.axis('tight')
 
 if do_truth_backproject:
-    bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
+    bfig = px.scatter(x=bg.grid[:, :, 0].flatten(), y=bg.grid[:, :, 1].flatten(), color=db(bpj_truedata).flatten())
     bfig.show()
 
     plt.figure('IMSHOW truedata')
@@ -351,7 +361,7 @@ if do_truth_backproject:
     plt.axis('tight')
 
 plt.figure('BPJ Grid')
-plt.imshow(bg._grid, origin='lower')
+plt.imshow(bg.refgrid, origin='lower')
 plt.axis('tight')
 
 '''n_diff = flight[1, :] - pn
@@ -421,15 +431,39 @@ plt.subplot(2, 1, 2)
 plt.title('Tilt')
 plt.plot(times, gimbal_data['tilt'])
 plt.plot(times, sdr.gimbal['tilt'])'''
+
+'''plt.figure('Autocorrelation')
+lags = np.arange(-400, 400)
+tx1 = np.fft.fftshift(
+    get_autocorr(np.fft.ifft(wf_data[0, 0, :]), bwidth, sdr[0].fs,
+                 fft_len, offset_shift, 8))
+tx2 = np.fft.fftshift(
+    get_autocorr(np.fft.ifft(wf_data[0, 1, :]), bwidth, sdr[0].fs,
+                 fft_len, offset_shift, 8))
+lin = np.fft.fftshift(
+    get_autocorr(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, sdr[0].fs, 0, bwidth), bwidth, sdr[0].fs,
+                 fft_len, offset_shift, 8))
+plt.plot(lags, tx1[fft_len * 4 - 400:fft_len * 4 + 400] - tx1.max())
+plt.plot(lags, tx2[fft_len * 4 - 400:fft_len * 4 + 400] - tx2.max())
+plt.plot(lags, lin[fft_len * 4 - 400:fft_len * 4 + 400] - lin.max(), linestyle='--')
+plt.legend(['Tx1', 'Tx2', 'Linear'])
+plt.ylabel('dB')
+plt.xlabel('Lag')
+
+plt.figure('Covariances')
+plt.imshow(np.cov(wf_data[0, :, :]), cmap='gray')
+plt.axis('off')
+plt.colorbar()
+plt.show()'''
+
+plt.figure()
+plt.plot(np.fft.fftshift(np.fft.fftfreq(fft_len, 1 / fs)), np.fft.fftshift(db(genTargetPSD(bwidth, fc, ranges[0], ranges[-1],
+                               fft_len, fs))))
+plt.ylabel('dB')
+plt.xlabel('Freq (Hz)')
+
+plt.figure()
+plt.plot(np.fft.fftshift(np.fft.fftfreq(fft_len, 1 / fs)), np.fft.fftshift(db(np.fft.fft(sdr.getPulse(0, 0), fft_len))))
+plt.ylabel('dB')
+plt.xlabel('Freq (Hz)')
 plt.show()
-
-
-tri_area = []
-for tri in range(bg.triangles.shape[0]):
-    tv = bg.triangles[tri, :]
-    v = bg.vertices[tv, :]
-    s1 = np.linalg.norm(v[0, :] - v[1, :])
-    s2 = np.linalg.norm(v[1, :] - v[2, :])
-    s3 = np.linalg.norm(v[0, :] - v[2, :])
-    se = s1 + s2 + s3
-    tri_area.append(np.sqrt(se * (se - s1) * (se - s2) * (se - s3)))

@@ -341,7 +341,7 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             # Run scattering coefficient through scaling to simulate real-world scattering
             P = return_pow[pt_idx, tt]
             sigma = .04 * P
-            reflectivity = math.exp(-math.pow((a * a / (2 * sigma)), P))
+            reflectivity = 1 #math.exp(-math.pow((a * a / (2 * sigma)), P))
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
                   1 / (two_way_rng * two_way_rng) * reflectivity
             debug_att[pt_idx, tt] = att
@@ -351,96 +351,84 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             
             
 @cuda.jit(fastmath=True)
-def genRangeWithoutIntersection(tri_vert_indices, vert_xyz, vert_norms, vert_scattering, vert_reflectivity,
+def genRangeWithoutIntersection(vert_grid, vert_reflectivity,
                                 source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, calc_pts, calc_angs,
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, rng_states, debug_flag):
     # sourcery no-metrics
-    tri, tt = cuda.grid(ndim=2)
-    tri_sz, tt_sz = cuda.gridsize(2)
-    if tri < tri_vert_indices.shape[0] and tt < source_xyz.shape[1]:
+    px, py = cuda.grid(ndim=2)
+    if px < vert_grid.shape[0] and py < vert_grid.shape[1]:
         # Load in all the parameters that don't change
         n_samples = pd_r.shape[0]
         wavenumber = 2 * np.pi / wavelength
 
-        tv1 = tri_vert_indices[tri, 0]
-        tv2 = tri_vert_indices[tri, 1]
-        tv3 = tri_vert_indices[tri, 2]
+        # Get a grid of elevation values for interpolation
+        e1 = vert_grid[px - 1, py, 0] if px > 0 else vert_grid[px, py, 0]
+        e2 = vert_grid[px, py - 1, 0] if py > 0 else vert_grid[px, py, 0]
+        n1 = vert_grid[px - 1, py, 1] if px > 0 else vert_grid[px, py, 1]
+        n2 = vert_grid[px, py - 1, 1] if py > 0 else vert_grid[px, py, 1]
+        u11 = vert_grid[px - 1, py, 2] if px > 0 else vert_grid[px, py, 2]
+        u21 = vert_grid[px, py - 1, 2] if py > 0 else vert_grid[px, py, 2]
+        u12 = vert_grid[px, py + 1, 2] if py < vert_grid.shape[1] - 1 else vert_grid[px, py, 2]
+        u22 = vert_grid[px + 1, py, 2] if px < vert_grid.shape[0] - 1 else vert_grid[px, py, 2]
+        r11 = vert_reflectivity[px - 1, py] if px > 0 else vert_reflectivity[px, py]
+        r21 = vert_reflectivity[px, py - 1] if py > 0 else vert_reflectivity[px, py]
+        r12 = vert_reflectivity[px, py + 1] if py < vert_grid.shape[1] - 1 else vert_reflectivity[px, py]
+        r22 = vert_reflectivity[px + 1, py] if px < vert_grid.shape[0] - 1 else vert_reflectivity[px, py]
+        gpr = vert_reflectivity[px, py]
+        scale = 1 / ((e2 - e1) * (n2 - n1))
 
-        # Calculate out semiperimeter
-        s1 = math.sqrt((vert_xyz[tv1, 0] - vert_xyz[tv2, 0]) * (vert_xyz[tv1, 0] - vert_xyz[tv2, 0]) +
-                                  (vert_xyz[tv1, 1] - vert_xyz[tv2, 1]) * (vert_xyz[tv1, 1] - vert_xyz[tv2, 1]) +
-                                  (vert_xyz[tv1, 2] - vert_xyz[tv2, 2]) * (vert_xyz[tv1, 2] - vert_xyz[tv2, 2]))
-        s2 = math.sqrt((vert_xyz[tv2, 0] - vert_xyz[tv3, 0]) * (vert_xyz[tv2, 0] - vert_xyz[tv3, 0]) +
-                                  (vert_xyz[tv2, 1] - vert_xyz[tv3, 1]) * (vert_xyz[tv2, 1] - vert_xyz[tv3, 1]) +
-                                  (vert_xyz[tv2, 2] - vert_xyz[tv3, 2]) * (vert_xyz[tv2, 2] - vert_xyz[tv3, 2]))
-        s3 = math.sqrt((vert_xyz[tv1, 0] - vert_xyz[tv3, 0]) * (vert_xyz[tv1, 0] - vert_xyz[tv3, 0]) +
-                                  (vert_xyz[tv1, 1] - vert_xyz[tv3, 1]) * (vert_xyz[tv1, 1] - vert_xyz[tv3, 1]) +
-                                  (vert_xyz[tv1, 2] - vert_xyz[tv3, 2]) * (vert_xyz[tv1, 2] - vert_xyz[tv3, 2]))
-        semiperimeter = s1 + s2 + s3
+        for tt in range(source_xyz.shape[1]):
+            for _ in range(pts_per_tri):
+                bar_x = vert_grid[px, py, 0] + .5 - \
+                        xoroshiro128p_uniform_float64(rng_states, py)
+                bar_y = vert_grid[px, py, 1] + .5 - \
+                        xoroshiro128p_uniform_float64(rng_states, py)
+                bar_z = scale * (u11 * (e2 - bar_x) * (n2 - bar_y) + u21 * (bar_x - e1) * (n2 - bar_y) +
+                                 u12 * (e2 - bar_x) * (bar_y - n1) + u22 * (bar_x - e1) * (bar_y - n1))
 
-        # Get area using Heron's formula
-        tri_area = math.sqrt(semiperimeter * (semiperimeter - s1) * (semiperimeter - s2) * (semiperimeter - s3))
+                # gpr = scale * (r11 * (e2 - bar_x) * (n2 - bar_y) + r21 * (bar_x - e1) * (n2 - bar_y) +
+                #                  r12 * (e2 - bar_x) * (bar_y - n1) + r22 * (bar_x - e1) * (bar_y - n1))
 
-        ppt = min(pts_per_tri, max(1, int(tri_area * 100)))
+                '''norm_x = vert_norms[tv1, 0] * u + vert_norms[tv2, 0] * v + vert_norms[tv3, 0] * w
+                norm_y = vert_norms[tv1, 1] * u + vert_norms[tv2, 1] * v + vert_norms[tv3, 1] * w
+                norm_z = vert_norms[tv1, 2] * u + vert_norms[tv2, 2] * v + vert_norms[tv3, 2] * w'''
 
-        for _ in range(ppt):
-            u = xoroshiro128p_uniform_float64(rng_states, tri)
-            v = xoroshiro128p_uniform_float64(rng_states, tri)
-            if (u + v) > 1:
-                u = 1. - v
-            w = 1. - (u + v)
-            # if debug_flag and tt == 0:
-            #     print(w)
-            # Get barycentric coordinates for bounce points
-            bar_x = vert_xyz[tv1, 0] * u + vert_xyz[tv2, 0] * v + vert_xyz[tv3, 0] * w
-            bar_y = vert_xyz[tv1, 1] * u + vert_xyz[tv2, 1] * v + vert_xyz[tv3, 1] * w
-            bar_z = vert_xyz[tv1, 2] * u + vert_xyz[tv2, 2] * v + vert_xyz[tv3, 2] * w
+                # Calculate out the angles in azimuth and elevation for the bounce
+                tx = bar_x - source_xyz[0, tt]
+                ty = bar_y - source_xyz[1, tt]
+                tz = bar_z - source_xyz[2, tt]
+                rng = math.sqrt(tx * tx + ty * ty + tz * tz)
 
-            norm_x = vert_norms[tv1, 0] * u + vert_norms[tv2, 0] * v + vert_norms[tv3, 0] * w
-            norm_y = vert_norms[tv1, 1] * u + vert_norms[tv2, 1] * v + vert_norms[tv3, 1] * w
-            norm_z = vert_norms[tv1, 2] * u + vert_norms[tv2, 2] * v + vert_norms[tv3, 2] * w
+                # Calculate out the bounce angles
+                '''rnorm = norm_x * tx / rng + norm_y * ty / rng + norm_z * tz / rng
+                b_y = -(2 * rnorm * norm_x - tx / rng)
+                b_x = -(2 * rnorm * norm_y - ty / rng)
+                b_z = -(2 * rnorm * norm_z - tz / rng)'''
 
-            # Calculate out the angles in azimuth and elevation for the bounce
-            tx = bar_x - source_xyz[0, tt]
-            ty = bar_y - source_xyz[1, tt]
-            tz = bar_z - source_xyz[2, tt]
-            rng = math.sqrt(tx * tx + ty * ty + tz * tz)
-
-            # Calculate out the bounce angles
-            rnorm = norm_x * tx / rng + norm_y * ty / rng + norm_z * tz / rng
-            b_y = -(2 * rnorm * norm_x - tx / rng)
-            b_x = -(2 * rnorm * norm_y - ty / rng)
-            b_z = -(2 * rnorm * norm_z - tz / rng)
-
-            # Calc power multiplier based on range, reflectivity
-            scat_ref = vert_reflectivity[tri]
-            scat_sig = vert_scattering[tri]
-
-            rx = bar_x - receive_xyz[0, tt]
-            ry = bar_y - receive_xyz[1, tt]
-            rz = bar_z - receive_xyz[2, tt]
-            r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
-            r_el = -math.asin(rz / r_rng)
-            r_az = math.atan2(-ry, rx) + np.pi / 2
-            if debug_flag and tt == 0:
-                calc_pts[tri, 0] = rx
-                calc_pts[tri, 1] = ry
-                calc_pts[tri, 2] = rz
-                calc_angs[tri, 0] = r_el
-                calc_angs[tri, 1] = r_az
-            two_way_rng = rng + r_rng
-            rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
-            but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
-            calc_angs[tri, 2] = but
-            if n_samples > but > 0:
-                a = abs(b_x * rx / r_rng + b_y * ry / r_rng + \
-                    b_z * rz / r_rng)
-                reflectivity = 1 #math.pow((scat_sig / -a + scat_sig) / 20, 10)
-                att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el)
-                # calc_angs[tri, 2] = att
-                acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * scat_ref / two_way_rng * reflectivity
-                cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
-                cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
+                rx = bar_x - receive_xyz[0, tt]
+                ry = bar_y - receive_xyz[1, tt]
+                rz = bar_z - receive_xyz[2, tt]
+                r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
+                r_el = -math.asin(rz / r_rng)
+                r_az = math.atan2(-ry, rx) + np.pi / 2
+                if debug_flag and tt == 0:
+                    calc_pts[px, 0] = rx
+                    calc_pts[px, 1] = ry
+                    calc_pts[px, 2] = rz
+                    calc_angs[px, 0] = r_el
+                    calc_angs[px, 1] = r_az
+                two_way_rng = rng + r_rng
+                rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+                but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+                calc_angs[px, 2] = but
+                if n_samples > but > 0:
+                    # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
+                    reflectivity = 1 #math.pow((1. / -a + 1.) / 20, 10)
+                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el)
+                    # calc_angs[tri, 2] = att
+                    acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr / two_way_rng * reflectivity
+                    cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
+                    cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
 
 
 @cuda.jit(fastmath=True)
