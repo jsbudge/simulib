@@ -118,13 +118,13 @@ sdr = SDRParse(bg_file, do_exact_matches=False)
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
 bg = SDREnvironment(sdr)
-ng = np.zeros_like(bg.refgrid)
+'''ng = np.zeros_like(bg.refgrid)
 ng[ng.shape[0] // 2, ng.shape[1] // 2] = 100
 ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 + 15] = 100
 ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 - 15] = 100
 ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 - 15] = 100
 ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 + 15] = 100
-bg._refgrid = ng
+bg._refgrid = ng'''
 print('Done.')
 
 # Generate a platform
@@ -192,21 +192,15 @@ chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
 mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
 # Calculate out points on the ground
-shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
-gx, gy = np.meshgrid(np.linspace(-grid_width / 2, grid_width / 2, nbpj_pts),
-                     np.linspace(-grid_height / 2, grid_height / 2, nbpj_pts))
+local_grid = bg.createGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
 newgrid = interpn((np.arange(bg.refgrid.shape[0]) - bg.refgrid.shape[0] / 2,
                    np.arange(bg.refgrid.shape[1]) - bg.refgrid.shape[1] / 2),
-                  bg.refgrid, np.array([gx.flatten(), gy.flatten()]).T).reshape((nbpj_pts, nbpj_pts))
-gx += shift_x
-gy += shift_y
-latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.ref)
-gz = (getElevationMap(latg, long) - bg.ref[2]).reshape(gx.shape)
-bg.setGrid(newgrid, np.array([gx, gy, gz]), grid_width / nbpj_pts, grid_height / nbpj_pts)
+                  bg.refgrid, np.array([local_grid[0, :, :].flatten(), localgrid[1, :, :].flatten()]).T).reshape((nbpj_pts, nbpj_pts))
+bg.setGrid(newgrid, local_grid, grid_width / nbpj_pts, grid_height / nbpj_pts)
 
-gx_gpu = cupy.array(gx, dtype=np.float64)
-gy_gpu = cupy.array(gy, dtype=np.float64)
-gz_gpu = cupy.array(gz, dtype=np.float64)
+gx_gpu = cupy.array(local_grid[0, :, :], dtype=np.float64)
+gy_gpu = cupy.array(local_grid[1, :, :], dtype=np.float64)
+gz_gpu = cupy.array(local_grid[2, :, :], dtype=np.float64)
 
 # Generate a test strip of data
 grid_gpu = cupy.array(bg.grid, dtype=np.float64)
@@ -345,7 +339,7 @@ del gz_gpu
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
 # flight = rp.pos(rp.gpst)
 # dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
-dfig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+dfig = px.scatter_3d(x=local_grid[0, :, :].flatten(), y=local_grid[1, :, :].flatten(), z=local_grid[2, :, :].flatten())
 dfig.add_scatter3d(x=locd[:, 0] + locp[0], y=locd[:, 1] + locp[1], z=locd[:, 2] + locp[2], mode='markers')
 dfig.show()
 

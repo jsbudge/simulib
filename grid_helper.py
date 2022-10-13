@@ -33,6 +33,21 @@ class Environment(object):
     def getDistance(self, pos):
         return np.linalg.norm(self._grid - pos[None, :], axis=1)
 
+    def createGrid(self, pos, width, height, npts, az=0):
+        shift_x, shift_y, _ = llh2enu(*pos, self.ref)
+        gx, gy = np.meshgrid(np.linspace(-width / 2, width / 2, npts[0]),
+                             np.linspace(-height / 2, height / 2, npts[1]))
+        gx = gx.flatten()
+        gy = gy.flatten()
+
+        rotated = rot.from_euler('z', az).apply(
+            np.array([gx, gy, np.zeros_like(gx)]).T)
+        gx = rotated[:, 0] + shift_x
+        gy = rotated[:, 1] + shift_y
+        latg, long, altg = enu2llh(gx, gy, np.zeros_like(gx), self.ref)
+        gz = (getElevationMap(latg, long) - self.ref[2]).reshape(npts)
+        return np.array([gx.reshape(npts), gy.reshape(npts), gz])
+
     def save(self, fnme):
         with open(fnme, 'wb') as f:
             pickle.dump(self, f)
@@ -121,21 +136,8 @@ class SDREnvironment(Environment):
             self.rps *= rowup
             self.cps *= colup
 
-        shift_x, shift_y, shift_z = llh2enu(*self.origin, self.ref)
-        ptx, pty = np.meshgrid(np.arange(grid.shape[0]), np.arange(grid.shape[1]))
-        ptx = ptx.flatten()
-        pty = pty.flatten()
-        ptx = ptx - grid.shape[0] / 2
-        pty = pty - grid.shape[1] / 2
-        ptx *= self.rps
-        pty *= self.cps
-        rotated = rot.from_euler('z', self.heading).apply(
-            np.array([ptx, pty, np.zeros_like(ptx)]).T)
-        lat, lon, alt = enu2llh(rotated[:, 0] + shift_x, rotated[:, 1] + shift_y,
-                                np.zeros_like(ptx) + shift_z, self.ref)
-        e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), self.ref)
-
-        super().__init__(grid=np.array([e.reshape(grid.shape), n.reshape(grid.shape), u.reshape(grid.shape)]),
+        super().__init__(grid=self.createGrid(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps,
+                                              grid.shape, self.heading),
                          reflectivity=grid)
 
     def setGrid(self, newgrid, new_elgrid, newrps, newcps):
