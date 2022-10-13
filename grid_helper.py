@@ -23,20 +23,22 @@ This is a class to represent the environment of a radar.
 
 
 class Environment(object):
-    _mesh = None
-    _pcd = None
-    _barygrid = None
+    _grid = None
+    _refgrid = None
 
     def __init__(self, grid=None, reflectivity=None):
         self._grid = grid
         self._refgrid = reflectivity
 
     def getDistance(self, pos):
-        return np.linalg.norm(self.vertices - pos[None, :], axis=1)
+        return np.linalg.norm(self._grid - pos[None, :], axis=1)
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
             pickle.dump(self, f)
+
+    def getPos(self, px, py):
+        return self._grid[:, px, py]
 
     @property
     def refgrid(self):
@@ -49,19 +51,15 @@ class Environment(object):
 
 class MapEnvironment(Environment):
 
-    def __init__(self, origin, extent, npts_background=500, resample=False):
+    def __init__(self, origin, extent, npts_background=500):
         lats = np.linspace(origin[0] - extent[0] / 2 / 111111, origin[0] + extent[0] / 2 / 111111, npts_background)
         lons = np.linspace(origin[1] - extent[1] / 2 / 111111, origin[1] + extent[1] / 2 / 111111, npts_background)
         lt, ln = np.meshgrid(lats, lons)
         ltp = lt.flatten()
         lnp = ln.flatten()
         e, n, u = llh2enu(ltp, lnp, getElevationMap(ltp, lnp), origin)
-        if resample:
-            nlat, nlon, nh = resampleGrid(u.reshape(lt.shape), lats, lons, int(len(u) * .8))
-            e, n, u = llh2enu(nlat, nlon, nh + origin[2], origin)
         self.origin = origin
-        super().__init__(np.array([e, n, u]).T)
-        self.createGrid()
+        super().__init__(grid=np.array([e.reshape(grid.shape), n.reshape(grid.shape), u.reshape(grid.shape)]).T)
 
 
 class SDREnvironment(Environment):
@@ -137,7 +135,7 @@ class SDREnvironment(Environment):
                                 np.zeros_like(ptx) + shift_z, self.ref)
         e, n, u = llh2enu(lat, lon, getElevationMap(lat, lon), self.ref)
 
-        super().__init__(grid=np.array([e.reshape(grid.shape), n.reshape(grid.shape), u.reshape(grid.shape)]).T,
+        super().__init__(grid=np.array([e.reshape(grid.shape), n.reshape(grid.shape), u.reshape(grid.shape)]),
                          reflectivity=grid)
 
     def setGrid(self, newgrid, new_elgrid, newrps, newcps):
@@ -149,9 +147,9 @@ class SDREnvironment(Environment):
 
 def mesh(grid, tri_err, num_vertices):
     # Generate a mesh using SVS metrics to make triangles in the right spots
-    ptx = grid[:, :, 0].flatten()
-    pty = grid[:, :, 1].flatten()
-    im = grid[:, :, 2].flatten()
+    ptx = grid[0, :, :].flatten()
+    pty = grid[1, :, :].flatten()
+    im = grid[2, :, :].flatten()
     pts = np.array([ptx, pty]).T
 
     # Initial points are the four corners of the grid
@@ -194,5 +192,5 @@ def mesh(grid, tri_err, num_vertices):
         its += 1
     ptx = tri.points[:, 0]
     pty = tri.points[:, 1]
-    reflectivity = tri.find_simplex(pts).reshape((grid.shape[0], grid.shape[1]))
+    reflectivity = tri.find_simplex(pts).reshape((grid.shape[1], grid.shape[2]))
     return ptx, pty, reflectivity, tri.simplices

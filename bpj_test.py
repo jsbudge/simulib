@@ -28,25 +28,27 @@ inch_to_m = .0254
 # This is the file used to backproject data
 # bg_file = '/data5/SAR_DATA/2021/12072021/SAR_12072021_165650.sar'
 # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
-bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
+bg_file = '/data5/SAR_DATA/2022/Redstone/SAR_08122022_170753.sar'
 upsample = 4
 cpi_len = 128
 plp = 0
 debug = True
 nbpj_pts = 600
+grid_width = 100
+grid_height = 100
+channel = 1
 
 print('Loading SDR file...')
-sdr = SDRParse(bg_file, do_exact_matches=False, use_idx=False)
+sdr = SDRParse(bg_file, do_exact_matches=False, use_idx=True)
 try:
     origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
                           getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
 except TypeError:
-    heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
-    hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
-    pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
-          (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
+    heading = sdr.gps_data['y'].mean()
+    hght = 2
+    pt = (sdr.gps_data['lat'].values[0], sdr.gps_data['lon'].values[0])
     alt = getElevation(pt)
-    mrange = hght / np.tan(sdr.ant[0].dep_ang)
+    mrange = 20
     origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
                     (pt[0], pt[1], alt))
 # origin = (40.087739, -111.697618, 1398)
@@ -61,13 +63,13 @@ gimbal_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Gimbal.dat'
 postCorr = loadPostCorrectionsGPSData(gps_debug)
 rawGPS = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
 preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')'''
-rp = SDRPlatform(sdr, ref_llh)
+rp = SDRPlatform(sdr, ref_llh, channel=channel)
 
 # Get reference data
 # flight = rp.pos(postCorr['sec'])
-fs = sdr[0].fs
-bwidth = sdr[0].bw
-fc = sdr[0].fc
+fs = sdr[channel].fs
+bwidth = sdr[channel].bw
+fc = sdr[channel].fc
 print('Done.')
 
 # Generate values needed for backprojection
@@ -83,21 +85,21 @@ fft_len = findPowerOf2(nsam + nr)
 up_fft_len = fft_len * upsample
 
 # Chirp and matched filter calculations
-if sdr[0].xml['Offset_Video_Enabled'] == 'True':
-    offset_hz = sdr[0].xml['DC_Offset_MHz'] * 1e6
+if sdr[channel].xml['Offset_Video_Enabled'] == 'True':
+    offset_hz = sdr[channel].xml['DC_Offset_MHz'] * 1e6
     bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
 else:
     offset_hz = 0
     bpj_wavelength = c0 / fc
 offset_shift = int(offset_hz / (1 / fft_len * fs))
-taywin = int(sdr[0].bw / fs * fft_len)
+taywin = int(sdr[channel].bw / fs * fft_len)
 taywin = taywin + 1 if taywin % 2 != 0 else taywin
 taytay = taylor(taywin)
 tayd = np.fft.fftshift(taylor(cpi_len))
 taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
 # chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, rp.fs, fc,
 #                             bwidth) * 1e4, up_fft_len)
-chirp = np.fft.fft(np.mean(sdr.getPulses(np.arange(200), 0, is_cal=True), axis=1), fft_len)
+chirp = np.fft.fft(np.mean(sdr.getPulses(sdr[channel].cal_num, 0, is_cal=True), axis=1), fft_len)
 mfilt = chirp.conj()
 mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
 mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
@@ -108,7 +110,8 @@ rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
 shift_x, shift_y, _ = llh2enu(*origin, ref_llh)
-gx, gy = np.meshgrid(np.linspace(-150, 150, nbpj_pts), np.linspace(-150, 150, nbpj_pts))
+gx, gy = np.meshgrid(np.linspace(-grid_width / 2, grid_width / 2, nbpj_pts),
+                     np.linspace(-grid_height / 2, grid_height / 2, nbpj_pts))
 gx += shift_x
 gy += shift_y
 latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), ref_llh)
@@ -136,12 +139,12 @@ bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per
 bpj_truedata = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
 # Run through loop to get data simulated
-data_t = sdr[0].pulse_time
-idx_t = np.arange(len(data_t))
-print('Simulating...')
+data_t = sdr[channel].pulse_time
+idx_t = sdr[channel].frame_num
+print('Backprojecting...')
 pulse_pos = 0
-for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)]):
-    ts = data_t[tidx]
+for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len))):
+    ts = data_t[tidx * cpi_len + np.arange(len(frames))]
     tmp_len = len(ts)
     # att = rp.att(ts)
     panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
@@ -153,7 +156,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
     # Reset the grid for truth data
-    rtdata = cupy.fft.fft(cupy.array(sdr.getPulses(tidx, 0),
+    rtdata = cupy.fft.fft(cupy.array(sdr.getPulses(frames, channel),
                                      dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
     upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
@@ -210,7 +213,7 @@ bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten
 bfig.show()
 
 plt.figure('Doppler data')
-plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1))
+plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1), extent=[0, cpi_len, ranges[0], ranges[-1]])
 plt.axis('tight')
 
 plt.figure('IMSHOW truedata')

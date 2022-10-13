@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
-from SDRParsing import SDRParse
+from SDRParsing import SDRParse, AntennaPort
 from simulation_functions import llh2enu, findPowerOf2, loadPostCorrectionsGPSData, loadRawData, loadGimbalData, \
     loadMatchedFilter, loadReferenceChirp
 
@@ -308,10 +308,14 @@ class SDRPlatform(RadarPlatform):
             gps_data = None
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
         if gimbal_debug is None:
-            pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
-                            sdr.gimbal['pan'].values.astype(np.float64))
-            tilt = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
-                            sdr.gimbal['tilt'].values.astype(np.float64))
+            try:
+                pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
+                                sdr.gimbal['pan'].values.astype(np.float64))
+                tilt = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
+                                sdr.gimbal['tilt'].values.astype(np.float64))
+            except TypeError:
+                pan = np.zeros_like(sdr.gps_data['systime'].values)
+                tilt = np.zeros_like(sdr.gps_data['systime'].values)
         else:
             gim = loadGimbalData(gimbal_debug)
             if len(gim['systime']) == 0:
@@ -328,7 +332,7 @@ class SDRPlatform(RadarPlatform):
         except KeyError:
             channel_dep = sdr.ant[0].dep_ang
         if sdr[channel].is_recieve_only:
-            tx_num = 1
+            tx_num = np.where([isinstance(n, AntennaPort) for n in sdr.port])[0][0]
         else:
             tx_num = sdr[channel].trans_num
             tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
@@ -338,8 +342,9 @@ class SDRPlatform(RadarPlatform):
                          y=sdr.gps_data['y'].values,
                          t=t, tx_offset=tx_offset, rx_offset=rx_offset, gimbal=np.array([pan, tilt]).T,
                          gimbal_offset=goff, gimbal_rotations=grot, dep_angle=channel_dep,
-                         squint_angle=sdr.ant[tx_num].squint / DTR, az_bw=sdr.ant[tx_num].az_bw / DTR,
-                         el_bw=sdr.ant[tx_num].el_bw / DTR, fs=fs, gps_data=gps_data)
+                         squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
+                         az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
+                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_data=gps_data)
         self._sdr = sdr
         self.origin = origin
         self._channel = channel
