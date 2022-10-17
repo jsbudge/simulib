@@ -7,6 +7,7 @@ from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
 from scipy.spatial import Delaunay
 from scipy.signal import medfilt2d
+from scipy.interpolate import CubicSpline, interpn, NearestNDInterpolator, LinearNDInterpolator
 import pickle
 
 fs = 2e9
@@ -26,9 +27,11 @@ class Environment(object):
     _grid = None
     _refgrid = None
 
-    def __init__(self, grid=None, reflectivity=None):
-        self._grid = grid
+    def __init__(self, gx=None, gy=None, gz=None, reflectivity=None):
+        self._grid = (gx, gy, gz)
         self._refgrid = reflectivity
+        self._grid_function = NearestNDInterpolator(
+            np.array([self._grid[0].ravel(), self._grid[1].ravel()]).T, self._refgrid.ravel())
 
     def getDistance(self, pos):
         return np.linalg.norm(self._grid - pos[None, :], axis=1)
@@ -39,14 +42,12 @@ class Environment(object):
                              np.linspace(-height / 2, height / 2, npts[1]))
         gx = gx.flatten()
         gy = gy.flatten()
-
-        rotated = rot.from_euler('z', az).apply(
-            np.array([gx, gy, np.zeros_like(gx)]).T)
-        gx = rotated[:, 0] + shift_x
-        gy = rotated[:, 1] + shift_y
-        latg, long, altg = enu2llh(gx, gy, np.zeros_like(gx), self.ref)
-        gz = (getElevationMap(latg, long) - self.ref[2]).reshape(npts)
-        return np.array([gx.reshape(npts), gy.reshape(npts), gz])
+        rmat = np.array([[np.cos(az), -np.sin(az)],
+                         [np.sin(az), np.cos(az)]])
+        pos_r = np.einsum('ij,jk', np.array([gx, gy]).T, rmat) + np.array([shift_x, shift_y])
+        latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
+        gz = (getElevationMap(latg, long) - self.ref[2])
+        return gx.reshape(npts) + shift_x, (gy + shift_y).reshape(npts), gz.reshape(npts)
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
@@ -136,13 +137,14 @@ class SDREnvironment(Environment):
             self.rps *= rowup
             self.cps *= colup
 
-        super().__init__(grid=self.createGrid(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps,
-                                              grid.shape, self.heading),
-                         reflectivity=grid)
+        gx, gy, gz = self.createGrid(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps,
+                                              grid.shape)
 
-    def setGrid(self, newgrid, new_elgrid, newrps, newcps):
+        super().__init__(gx=gx, gy=gy, gz=gz, reflectivity=grid)
+
+    def setGrid(self, newgrid, gx, gy, gz, newrps, newcps):
         self._refgrid = newgrid
-        self._grid = new_elgrid
+        self._grid = (gx, gy, gz)
         self.rps = newrps
         self.cps = newcps
 

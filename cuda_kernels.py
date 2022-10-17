@@ -351,29 +351,29 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             
             
 @cuda.jit()
-def genRangeWithoutIntersection(vert_grid, vert_reflectivity,
+def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
                                 source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, calc_pts, calc_angs,
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, rng_states, debug_flag):
     # sourcery no-metrics
     px, py = cuda.grid(ndim=2)
-    if px < vert_grid.shape[1] and py < vert_grid.shape[2]:
+    if px < vgx.shape[0] and py < vgx.shape[1]:
         # Load in all the parameters that don't change
         n_samples = pd_r.shape[0]
         wavenumber = 2 * np.pi / wavelength
 
         # Get a grid of elevation values for interpolation
-        e1 = vert_grid[0, px - 1, py] if px >= 0 else vert_grid[0, px, py]
-        e2 = vert_grid[0, px, py - 1] if py >= 0 else vert_grid[0, px, py]
-        n1 = vert_grid[1, px - 1, py] if px >= 0 else vert_grid[1, px, py]
-        n2 = vert_grid[1, px, py - 1] if py >= 0 else vert_grid[1, px, py]
-        u11 = vert_grid[2, px - 1, py] if px >= 0 else vert_grid[2, px, py]
-        u21 = vert_grid[2, px, py - 1] if py >= 0 else vert_grid[2, px, py]
-        u12 = vert_grid[2, px, py + 1] if py <= vert_grid.shape[2] - 1 else vert_grid[2, px, py]
-        u22 = vert_grid[2, px + 1, py] if px <= vert_grid.shape[1] - 1 else vert_grid[2, px, py]
+        e1 = vgx[px - 1, py] if px >= 0 else vgx[px, py]
+        e2 = vgx[px, py - 1] if py >= 0 else vgx[px, py]
+        n1 = vgy[px - 1, py] if px >= 0 else vgy[px, py]
+        n2 = vgy[px, py - 1] if py >= 0 else vgy[px, py]
+        u11 = vgz[px - 1, py] if px >= 0 else vgz[px, py]
+        u21 = vgz[px, py - 1] if py >= 0 else vgz[px, py]
+        u12 = vgz[px, py + 1] if py <= vgx.shape[1] - 1 else vgz[px, py]
+        u22 = vgz[px + 1, py] if px <= vgx.shape[0] - 1 else vgz[px, py]
         r11 = vert_reflectivity[px - 1, py] if px >= 0 else vert_reflectivity[px, py]
         r21 = vert_reflectivity[px, py - 1] if py >= 0 else vert_reflectivity[px, py]
-        r12 = vert_reflectivity[px, py + 1] if py <= vert_grid.shape[1] - 1 else vert_reflectivity[px, py]
-        r22 = vert_reflectivity[px + 1, py] if px <= vert_grid.shape[0] - 1 else vert_reflectivity[px, py]
+        r12 = vert_reflectivity[px, py + 1] if py <= vgx.shape[1] - 1 else vert_reflectivity[px, py]
+        r22 = vert_reflectivity[px + 1, py] if px <= vgx.shape[0] - 1 else vert_reflectivity[px, py]
         gpr = vert_reflectivity[px, py]
         scale = 1 / ((e2 - e1) * (n2 - n1))
 
@@ -384,9 +384,9 @@ def genRangeWithoutIntersection(vert_grid, vert_reflectivity,
             xoroshiro128p_uniform_float64(rng_states, py * vert_grid.shape[0] + px)
             bar_z = scale * (u11 * (e2 - bar_x) * (n2 - bar_y) + u21 * (bar_x - e1) * (n2 - bar_y) +
                              u12 * (e2 - bar_x) * (bar_y - n1) + u22 * (bar_x - e1) * (bar_y - n1))'''
-            bar_x = vert_grid[0, px, py]
-            bar_y = vert_grid[1, px, py]
-            bar_z = vert_grid[2, px, py]
+            bar_x = vgx[px, py]
+            bar_y = vgy[px, py]
+            bar_z = vgz[px, py]
 
             # gpr = scale * (r11 * (e2 - bar_x) * (n2 - bar_y) + r21 * (bar_x - e1) * (n2 - bar_y) +
             #                  r12 * (e2 - bar_x) * (bar_y - n1) + r22 * (bar_x - e1) * (bar_y - n1))
@@ -414,7 +414,7 @@ def genRangeWithoutIntersection(vert_grid, vert_reflectivity,
                 r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
                 r_el = -math.asin(rz / r_rng)
                 r_az = math.atan2(-ry, rx) + np.pi / 2
-                if debug_flag and tt == 0 and py == 0:
+                if debug_flag and tt == 0 and py == 2:
                     calc_pts[px, 0] = rx
                     calc_pts[px, 1] = ry
                     calc_pts[px, 2] = rz
@@ -424,7 +424,7 @@ def genRangeWithoutIntersection(vert_grid, vert_reflectivity,
                 two_way_rng = rng + r_rng
                 rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
                 but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
-                if debug_flag and tt == 0 and py == 0:
+                if debug_flag and tt == 0 and py == 2:
                     calc_angs[px, 2] = but
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
@@ -513,7 +513,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
                                         bw_az, bw_el) / two_way_rng
             if debug_flag and tt == 0 and py == 0:
-                calc_angs[px, 2] = but
+                calc_angs[px, 2] = two_way_rng
 
             # Azimuth window to reduce sidelobes
             # Gaussian window

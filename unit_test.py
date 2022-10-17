@@ -105,9 +105,9 @@ cpi_len = 64
 plp = 0
 max_pts_per_tri = 1
 debug = True
-nbpj_pts = 600
-grid_width = 100
-grid_height = 100
+nbpj_pts = 400
+grid_width = 400
+grid_height = 400
 do_truth_backproject = False
 custom_waveform = False
 
@@ -118,13 +118,13 @@ sdr = SDRParse(bg_file, do_exact_matches=False)
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
 bg = SDREnvironment(sdr)
-'''ng = np.zeros_like(bg.refgrid)
+ng = np.zeros_like(bg.refgrid)
 ng[ng.shape[0] // 2, ng.shape[1] // 2] = 100
-ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 + 15] = 100
-ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 - 15] = 100
-ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 - 15] = 100
-ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 + 15] = 100
-bg._refgrid = ng'''
+# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 + 15] = 100
+# ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 - 15] = 100
+# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 - 15] = 100
+# ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 + 15] = 100
+# bg._refgrid = ng
 print('Done.')
 
 # Generate a platform
@@ -192,18 +192,18 @@ chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
 mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
 # Calculate out points on the ground
-local_grid = bg.createGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
-newgrid = interpn((np.arange(bg.refgrid.shape[0]) - bg.refgrid.shape[0] / 2,
-                   np.arange(bg.refgrid.shape[1]) - bg.refgrid.shape[1] / 2),
-                  bg.refgrid, np.array([local_grid[0, :, :].flatten(), localgrid[1, :, :].flatten()]).T).reshape((nbpj_pts, nbpj_pts))
-bg.setGrid(newgrid, local_grid, grid_width / nbpj_pts, grid_height / nbpj_pts)
+gx, gy, gz = bg.createGrid(bg.origin,
+                           grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
+# bg.setGrid(bg.refgrid[700:800, 500:600], bg.grid[:, 700:800, 500:600], grid_width / nbpj_pts, grid_height / nbpj_pts)
 
-gx_gpu = cupy.array(local_grid[0, :, :], dtype=np.float64)
-gy_gpu = cupy.array(local_grid[1, :, :], dtype=np.float64)
-gz_gpu = cupy.array(local_grid[2, :, :], dtype=np.float64)
+gx_gpu = cupy.array(gx, dtype=np.float64)
+gy_gpu = cupy.array(gy, dtype=np.float64)
+gz_gpu = cupy.array(gz, dtype=np.float64)
+bgx_gpu = cupy.array(bg.grid[0], dtype=np.float64)
+bgy_gpu = cupy.array(bg.grid[1], dtype=np.float64)
+bgz_gpu = cupy.array(bg.grid[2], dtype=np.float64)
 
 # Generate a test strip of data
-grid_gpu = cupy.array(bg.grid, dtype=np.float64)
 ref_coef_gpu = cupy.array(bg.refgrid, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
@@ -220,8 +220,7 @@ test = None
 # GPU device calculations
 threads_per_block = getMaxThreads()
 bpg_ranges = (bg.refgrid.shape[0] // threads_per_block[0] + 1,
-              bg.refgrid.shape[1] // threads_per_block[1] + 1
-              )
+              bg.refgrid.shape[1] // threads_per_block[1] + 1)
 bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per_block[1] + 1)
 
 # Data blocks for imaging
@@ -252,7 +251,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
-    genRangeWithoutIntersection[bpg_bpj, threads_per_block](grid_gpu, ref_coef_gpu,
+    genRangeWithoutIntersection[bpg_ranges, threads_per_block](bgx_gpu, bgy_gpu, bgz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
                                                                angs_debug,
@@ -266,25 +265,25 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    rtdata = cupy.array(np.random.rand(nsam * upsample, tmp_len), dtype=np.complex128) + \
-             cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
+    # rtdata = cupy.array(np.random.rand(nsam * upsample, tmp_len) / 10000, dtype=np.complex128) + \
+    rcdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
 
     # Simulated data debug checks
     if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp = rp.pos(ts[-1])
-        test = rtdata.get()
+        test = rcdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
-                                            elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid,
+                                            elrx_gpu, panrx_gpu, elrx_gpu, rcdata, bpj_grid,
                                             c0 / fc, ranges[0] / c0,
                                             rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
                                             angs_debug, debug_flag)
     if ts[0] < rp.gpst.mean() <= ts[-1]:
         locp_bj = rp.pos(ts[-1])
-        test_bj = rtdata.get()
+        test_bj = rcdata.get()
         angd_bj = angs_debug.get()
         locd_bj = pts_debug.get()
     cupy.cuda.Device().synchronize()
@@ -322,6 +321,7 @@ del elrx_gpu
 del data_r
 del data_i
 del rtdata
+del rcdata
 del upsample_data
 del bpj_grid
 
@@ -334,13 +334,20 @@ del rbins_gpu
 del gx_gpu
 del gy_gpu
 del gz_gpu
+del bgx_gpu
+del bgy_gpu
+del bgz_gpu
 
 # dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
-# flight = rp.pos(rp.gpst)
+flight = rp.pos(rp.gpst)
 # dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
-dfig = px.scatter_3d(x=local_grid[0, :, :].flatten(), y=local_grid[1, :, :].flatten(), z=local_grid[2, :, :].flatten())
+dfig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
 dfig.add_scatter3d(x=locd[:, 0] + locp[0], y=locd[:, 1] + locp[1], z=locd[:, 2] + locp[2], mode='markers')
+dfig.add_scatter3d(x=locd_bj[:200, 0] + locp[0], y=locd_bj[:200, 1] + locp[1], z=locd_bj[:200, 2] + locp[2], mode='markers')
+orig = llh2enu(*bg.origin, bg.ref)
+dfig.add_scatter3d(x=[orig[0]], y=[orig[1]], z=[orig[2]], marker={'size': [100, 100]}, mode='markers')
 dfig.show()
 
 '''te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], bg.ref)
