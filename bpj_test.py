@@ -28,7 +28,8 @@ inch_to_m = .0254
 # This is the file used to backproject data
 # bg_file = '/data5/SAR_DATA/2021/12072021/SAR_12072021_165650.sar'
 # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
-bg_file = '/data5/SAR_DATA/2022/Redstone/SAR_08122022_170753.sar'
+# bg_file = '/data5/SAR_DATA/2022/Redstone/SAR_08122022_170753.sar'
+bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 upsample = 4
 cpi_len = 128
 plp = 0

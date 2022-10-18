@@ -40,14 +40,20 @@ class Environment(object):
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
         gx, gy = np.meshgrid(np.linspace(-width / 2, width / 2, npts[0]),
                              np.linspace(-height / 2, height / 2, npts[1]))
-        gx = gx.flatten()
-        gy = gy.flatten()
+        pts = np.column_stack((gx.flatten(), gy.flatten()))
         rmat = np.array([[np.cos(az), -np.sin(az)],
                          [np.sin(az), np.cos(az)]])
-        pos_r = np.einsum('ij,jk', np.array([gx, gy]).T, rmat) + np.array([shift_x, shift_y])
+        pos_r = np.squeeze(np.einsum('ji, mni -> jmn', rmat, [pts])).T + np.array([shift_x, shift_y])
         latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
         gz = (getElevationMap(latg, long) - self.ref[2])
-        return gx.reshape(npts) + shift_x, (gy + shift_y).reshape(npts), gz.reshape(npts)
+
+        return pos_r[:, 0].reshape(npts), pos_r[:, 1].reshape(npts), gz.reshape(npts)
+
+    def setGrid(self, newgrid, gx, gy, gz):
+        self._refgrid = newgrid
+        self._grid = (gx, gy, gz)
+        self._grid_function = NearestNDInterpolator(
+            np.array([self._grid[0].ravel(), self._grid[1].ravel()]).T, self._refgrid.ravel())
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
@@ -138,15 +144,9 @@ class SDREnvironment(Environment):
             self.cps *= colup
 
         gx, gy, gz = self.createGrid(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps,
-                                              grid.shape)
+                                              grid.shape, self.heading)
 
-        super().__init__(gx=gx, gy=gy, gz=gz, reflectivity=grid)
-
-    def setGrid(self, newgrid, gx, gy, gz, newrps, newcps):
-        self._refgrid = newgrid
-        self._grid = (gx, gy, gz)
-        self.rps = newrps
-        self.cps = newcps
+        super().__init__(gx=gx, gy=gy, gz=gz, reflectivity=grid.T.flatten().reshape(gx.shape))
 
 
 def mesh(grid, tri_err, num_vertices):

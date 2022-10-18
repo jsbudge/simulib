@@ -362,7 +362,7 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
         wavenumber = 2 * np.pi / wavelength
 
         # Get a grid of elevation values for interpolation
-        e1 = vgx[px - 1, py] if px >= 0 else vgx[px, py]
+        '''e1 = vgx[px - 1, py] if px >= 0 else vgx[px, py]
         e2 = vgx[px, py - 1] if py >= 0 else vgx[px, py]
         n1 = vgy[px - 1, py] if px >= 0 else vgy[px, py]
         n2 = vgy[px, py - 1] if py >= 0 else vgy[px, py]
@@ -373,9 +373,13 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
         r11 = vert_reflectivity[px - 1, py] if px >= 0 else vert_reflectivity[px, py]
         r21 = vert_reflectivity[px, py - 1] if py >= 0 else vert_reflectivity[px, py]
         r12 = vert_reflectivity[px, py + 1] if py <= vgx.shape[1] - 1 else vert_reflectivity[px, py]
-        r22 = vert_reflectivity[px + 1, py] if px <= vgx.shape[0] - 1 else vert_reflectivity[px, py]
+        r22 = vert_reflectivity[px + 1, py] if px <= vgx.shape[0] - 1 else vert_reflectivity[px, py]'''
+
         gpr = vert_reflectivity[px, py]
-        scale = 1 / ((e2 - e1) * (n2 - n1))
+
+        # scale = 1 / ((e2 - e1) * (n2 - n1))
+        # if px == 4:
+        #     print(vgx.shape[0])
 
         for _ in range(pts_per_tri):
             '''bar_x = vert_grid[px, py, 0] + .5 - \
@@ -426,6 +430,7 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
                 but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
                 if debug_flag and tt == 0 and py == 2:
                     calc_angs[px, 2] = but
+
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
                     reflectivity = 1 #math.pow((1. / -a + 1.) / 20, 10)

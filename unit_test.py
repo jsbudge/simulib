@@ -77,10 +77,7 @@ def get_autocorr(wave, bw, fs, fft_len, offset_shift, upsample, sec_wave=None):
     taywin = taywin + 1 if taywin % 2 != 0 else taywin
     taytay = taylor(taywin)
     chirp = np.fft.fft(wave, fft_len)
-    if sec_wave is None:
-        mfilt = chirp.conj()
-    else:
-        mfilt = np.fft.fft(sec_wave, fft_len)
+    mfilt = chirp.conj() if sec_wave is None else np.fft.fft(sec_wave, fft_len)
     mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
     mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
     mfilt[taywin // 2 + offset_shift:-taywin // 2 + offset_shift] = 0
@@ -105,7 +102,7 @@ cpi_len = 64
 plp = 0
 max_pts_per_tri = 1
 debug = True
-nbpj_pts = 400
+nbpj_pts = 100
 grid_width = 400
 grid_height = 400
 do_truth_backproject = False
@@ -118,13 +115,7 @@ sdr = SDRParse(bg_file, do_exact_matches=False)
 print('Generating environment...', end='')
 # bg = MapEnvironment((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'], sdr.ash['geo']['hRef']), extent=(120, 120))
 bg = SDREnvironment(sdr)
-ng = np.zeros_like(bg.refgrid)
-ng[ng.shape[0] // 2, ng.shape[1] // 2] = 100
-# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 + 15] = 100
-# ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 - 15] = 100
-# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 - 15] = 100
-# ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 + 15] = 100
-# bg._refgrid = ng
+
 print('Done.')
 
 # Generate a platform
@@ -193,23 +184,32 @@ mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
 # Calculate out points on the ground
 gx, gy, gz = bg.createGrid(bg.origin,
-                           grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
-# bg.setGrid(bg.refgrid[700:800, 500:600], bg.grid[:, 700:800, 500:600], grid_width / nbpj_pts, grid_height / nbpj_pts)
+                           grid_width, grid_height, (nbpj_pts, nbpj_pts), 0)
+ng = np.zeros_like(bg.refgrid)
+ng[ng.shape[0] // 2, ng.shape[1] // 2] = 100
+# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 + 15] = 100
+# ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 - 15] = 100
+# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 - 15] = 100
+# ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 + 15] = 100
+# bg._refgrid = ng
+# bg.setGrid(bg.refgrid, bg.grid[0], bg.grid[1],
+#            bg.grid[2])
+
 
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
-bgx_gpu = cupy.array(bg.grid[0], dtype=np.float64)
-bgy_gpu = cupy.array(bg.grid[1], dtype=np.float64)
-bgz_gpu = cupy.array(bg.grid[2], dtype=np.float64)
+bgx_gpu = cupy.array(gx, dtype=np.float64)
+bgy_gpu = cupy.array(gy, dtype=np.float64)
+bgz_gpu = cupy.array(gz, dtype=np.float64)
 
 # Generate a test strip of data
-ref_coef_gpu = cupy.array(bg.refgrid, dtype=np.float64)
+ref_coef_gpu = cupy.array(bg._grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape), dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 if debug:
-    pts_debug = cupy.zeros((bg.refgrid.shape[0], 3), dtype=np.float64)
-    angs_debug = cupy.zeros((bg.refgrid.shape[0], 3), dtype=np.float64)
+    pts_debug = cupy.zeros((gx.shape[0], 3), dtype=np.float64)
+    angs_debug = cupy.zeros((gx.shape[0], 3), dtype=np.float64)
     # pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
     # angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
 else:
@@ -344,10 +344,11 @@ flight = rp.pos(rp.gpst)
 # dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
 dfig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
-dfig.add_scatter3d(x=locd[:, 0] + locp[0], y=locd[:, 1] + locp[1], z=locd[:, 2] + locp[2], mode='markers')
-dfig.add_scatter3d(x=locd_bj[:200, 0] + locp[0], y=locd_bj[:200, 1] + locp[1], z=locd_bj[:200, 2] + locp[2], mode='markers')
+# dfig.add_scatter3d(x=locd[:, 0] + locp[0], y=locd[:, 1] + locp[1], z=locd[:, 2] + locp[2], mode='markers')
+# dfig.add_scatter3d(x=locd_bj[:200, 0] + locp[0], y=locd_bj[:200, 1] + locp[1], z=locd_bj[:200, 2] + locp[2], mode='markers')
 orig = llh2enu(*bg.origin, bg.ref)
-dfig.add_scatter3d(x=[orig[0]], y=[orig[1]], z=[orig[2]], marker={'size': [100, 100]}, mode='markers')
+dfig.add_scatter3d(x=[orig[0]], y=[orig[1]], z=[orig[2]], marker={'size': [10]}, mode='markers')
+dfig.add_scatter3d(x=bg.grid[0].flatten(), y=bg.grid[1].flatten(), z=bg.grid[2].flatten(), mode='markers')
 dfig.show()
 
 '''te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], bg.ref)
@@ -380,6 +381,10 @@ plt.axis('tight')
 
 plt.figure('BPJ Grid')
 plt.imshow(db(bpj_res), origin='lower')
+plt.axis('tight')
+
+plt.figure('Elevation')
+plt.imshow(gz, origin='lower')
 plt.axis('tight')
 
 '''n_diff = flight[1, :] - pn
