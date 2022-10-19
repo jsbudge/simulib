@@ -353,7 +353,7 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
 @cuda.jit()
 def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
                                 source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, calc_pts, calc_angs,
-                                wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, rng_states, debug_flag):
+                                wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
     px, py = cuda.grid(ndim=2)
     if px < vgx.shape[0] and py < vgx.shape[1]:
@@ -382,10 +382,10 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
         #     print(vgx.shape[0])
 
         for _ in range(pts_per_tri):
-            '''bar_x = vert_grid[px, py, 0] + .5 - \
-            xoroshiro128p_uniform_float64(rng_states, py * vert_grid.shape[0] + px)
-            bar_y = vert_grid[px, py, 1] + .5 - \
-            xoroshiro128p_uniform_float64(rng_states, py * vert_grid.shape[0] + px)
+            '''bar_x = vgx[px, py] + .5 - \
+            xoroshiro128p_uniform_float64(rng_states, py * vgx.shape[0] + px)
+            bar_y = vgy[px, py] + .5 - \
+            xoroshiro128p_uniform_float64(rng_states, py * vgx.shape[0] + px)
             bar_z = scale * (u11 * (e2 - bar_x) * (n2 - bar_y) + u21 * (bar_x - e1) * (n2 - bar_y) +
                              u12 * (e2 - bar_x) * (bar_y - n1) + u22 * (bar_x - e1) * (bar_y - n1))'''
             bar_x = vgx[px, py]
@@ -396,21 +396,11 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
             #                  r12 * (e2 - bar_x) * (bar_y - n1) + r22 * (bar_x - e1) * (bar_y - n1))
             for tt in range(source_xyz.shape[1]):
 
-                '''norm_x = vert_norms[tv1, 0] * u + vert_norms[tv2, 0] * v + vert_norms[tv3, 0] * w
-                norm_y = vert_norms[tv1, 1] * u + vert_norms[tv2, 1] * v + vert_norms[tv3, 1] * w
-                norm_z = vert_norms[tv1, 2] * u + vert_norms[tv2, 2] * v + vert_norms[tv3, 2] * w'''
-
                 # Calculate out the angles in azimuth and elevation for the bounce
                 tx = bar_x - source_xyz[0, tt]
                 ty = bar_y - source_xyz[1, tt]
                 tz = bar_z - source_xyz[2, tt]
                 rng = math.sqrt(tx * tx + ty * ty + tz * tz)
-
-                # Calculate out the bounce angles
-                '''rnorm = norm_x * tx / rng + norm_y * ty / rng + norm_z * tz / rng
-                b_y = -(2 * rnorm * norm_x - tx / rng)
-                b_x = -(2 * rnorm * norm_y - ty / rng)
-                b_z = -(2 * rnorm * norm_z - tz / rng)'''
 
                 rx = bar_x - receive_xyz[0, tt]
                 ry = bar_y - receive_xyz[1, tt]
@@ -433,7 +423,7 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
-                    reflectivity = 1 #math.pow((1. / -a + 1.) / 20, 10)
+                    reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
                     att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el)
                     acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
                     cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)

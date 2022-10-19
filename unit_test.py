@@ -10,6 +10,7 @@ from tensorflow.keras.optimizers import Adam, Adadelta
 from wave_train import genTargetPSD, genModel, opt_loss
 import open3d as o3d
 from scipy.interpolate import CubicSpline, interpn
+from PIL import Image
 from scipy.signal import medfilt2d
 import cupy as cupy
 import cupyx.scipy.signal
@@ -96,13 +97,13 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
-# bg_file = '/data5/SAR_DATA/2022/06152022/SAR_06152022_145909.sar'
+# bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
 upsample = 1
-cpi_len = 64
+cpi_len = 128
 plp = 0
 max_pts_per_tri = 1
-debug = True
-nbpj_pts = 100
+debug = False
+nbpj_pts = 400
 grid_width = 400
 grid_height = 400
 do_truth_backproject = False
@@ -148,7 +149,7 @@ up_fft_len = fft_len * upsample
 
 # Model for waveform simulation
 if custom_waveform:
-    mdl_fft = 2048
+    '''mdl_fft = 2048
     n_conv_filters = 4
     kernel_sz = 128
     mdl_bin_bw = int(1500e6 // (fs / mdl_fft))
@@ -160,51 +161,61 @@ if custom_waveform:
 
     # Get waveforms
     wf_data = getWaveFromData(mdl, *wfd, cpi_len, 2, mdl_fft, mdl_bin_bw)
-    chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)
+    chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)'''
+    chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10), nr, fs, sdr[0].baseband_fc, bwidth), fft_len)
 else:
-    chirp = np.fft.fft(np.mean(sdr.getPulses(sdr[0].cal_num, 0, is_cal=True), axis=1), fft_len)
+    mchirp = np.mean(sdr.getPulses(sdr[0].cal_num, 0, is_cal=True), axis=1)
+    chirp = np.fft.fft(mchirp / abs(mchirp).std(), fft_len)
 
 # Chirp and matched filter calculations
-if sdr[0].xml['Offset_Video_Enabled'] == 'True':
-    offset_hz = sdr[0].xml['DC_Offset_MHz'] * 1e6
-else:
-    offset_hz = 0
+offset_hz = sdr[0].baseband_fc
 offset_shift = int(offset_hz / (1 / fft_len * fs))
 taywin = int(sdr[0].bw / fs * fft_len)
 taywin = taywin + 1 if taywin % 2 != 0 else taywin
 taytay = taylor(taywin)
-tayd = np.fft.fftshift(taylor(cpi_len))
-taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
+# tayd = np.fft.fftshift(taylor(cpi_len))
+# taydopp = np.fft.fftshift(np.ones((nsam * upsample, 1)).dot(tayd.reshape(1, -1)), axes=1)
 mfilt = chirp.conj()
-mfilt[:taywin // 2 + offset_shift] *= taytay[taywin // 2 - offset_shift:]
-mfilt[-taywin // 2 + offset_shift:] *= taytay[:taywin // 2 - offset_shift]
-mfilt[taywin // 2 + offset_shift:-taywin // 2 + offset_shift] = 0
+# Get the taylor window in the right spots
+tay_drop = np.zeros(fft_len)
+if offset_shift - taywin // 2 < 0:
+    overlap = taywin // 2 - offset_shift
+    tay_drop[:taywin - overlap] = taytay[overlap:]
+    tay_drop[-overlap:] = taytay[:overlap]
+elif taywin // 2 + offset_shift > fft_len:
+    overlap = (taywin // 2 + offset_shift) - fft_len
+    tay_drop[offset_shift:fft_len] = taytay[taywin // 2:taywin - overlap]
+    tay_drop[:overlap] = taytay[-overlap:]
+else:
+    tay_drop[offset_shift - taywin // 2:offset_shift] = taytay[:taywin // 2]
+    tay_drop[offset_shift:offset_shift + taywin // 2] = taytay[-taywin // 2:]
+mfilt *= tay_drop
 chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
 mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
 # Calculate out points on the ground
 gx, gy, gz = bg.createGrid(bg.origin,
-                           grid_width, grid_height, (nbpj_pts, nbpj_pts), 0)
-ng = np.zeros_like(bg.refgrid)
-ng[ng.shape[0] // 2, ng.shape[1] // 2] = 100
-# ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 + 15] = 100
+                           grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
+ng = np.ones_like(gx)
+# ng = bg.grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape)
+# pts_dist = np.linalg.norm(np.array([n for n in bg.grid]) - np.array(llh2enu(*bg.origin, bg.ref))[:, None, None], axis=0)
+# ng[np.where(pts_dist == pts_dist.min())] = 100
+# ng[ng.shape[0] // 2, ng.shape[1] // 2] = 100
 # ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 - 15] = 100
 # ng[ng.shape[0] // 2 + 15, ng.shape[1] // 2 - 15] = 100
 # ng[ng.shape[0] // 2 - 15, ng.shape[1] // 2 + 15] = 100
-# bg._refgrid = ng
-# bg.setGrid(bg.refgrid, bg.grid[0], bg.grid[1],
-#            bg.grid[2])
 
+# ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize((nbpj_pts, nbpj_pts), Image.ANTIALIAS)
+# ng = np.linalg.norm(np.array(ng), axis=2)
+# bg._refgrid = ng
+bg.setGrid(ng, gx, gy, gz)
 
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
-bgx_gpu = cupy.array(gx, dtype=np.float64)
-bgy_gpu = cupy.array(gy, dtype=np.float64)
-bgz_gpu = cupy.array(gz, dtype=np.float64)
 
 # Generate a test strip of data
-ref_coef_gpu = cupy.array(bg._grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape), dtype=np.float64)
+ref_coef_gpu = cupy.array(bg.refgrid, dtype=np.float64)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 if debug:
@@ -227,8 +238,8 @@ bpg_bpj = (max(1, nbpj_pts // threads_per_block[0] + 1), nbpj_pts // threads_per
 bpj_res = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 bpj_truedata = np.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
-rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
-                                         seed=10)
+# rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
+#                                          seed=10)
 
 # Run through loop to get data simulated
 data_t = np.unique(sdr[0].pulse_time)
@@ -237,7 +248,7 @@ idx_t = np.arange(len(data_t))
 print('Simulating...')
 pulse_pos = 0
 for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)]):
-    init_xoroshiro128p_states(rng_states, seed=10)
+    # init_xoroshiro128p_states(rng_states, seed=10)
     ts = data_t[tidx]
     tmp_len = len(ts)
     if ts[0] < rp.gpst.mean() <= ts[-1]:
@@ -251,22 +262,22 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
-    genRangeWithoutIntersection[bpg_ranges, threads_per_block](bgx_gpu, bgy_gpu, bgz_gpu, ref_coef_gpu,
+    genRangeWithoutIntersection[bpg_ranges, threads_per_block](gx_gpu, gy_gpu, gz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, pts_debug,
                                                                angs_debug,
-                                                               c0 / fc, ranges[0] / c0,
+                                                               c0 / (fc - offset_hz), ranges[0] / c0,
                                                                rp.fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                                               max_pts_per_tri, rng_states, debug_flag)
+                                                               max_pts_per_tri, debug_flag)
 
     cupy.cuda.Device().synchronize()
 
     rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * chirp_gpu[:, :tmp_len] * mfilt_gpu[:, :tmp_len]
     upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
-    upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
-    upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    # rtdata = cupy.array(np.random.rand(nsam * upsample, tmp_len) / 10000, dtype=np.complex128) + \
-    rcdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * upsample, :]
+    # upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
+    # upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
+    # rcdata = # cupy.array(np.random.rand(nsam * upsample, tmp_len) / 10000, dtype=np.complex128) + \
+    rcdata =     cupy.fft.ifft(rtdata, axis=0)[:nsam * upsample, :]
     cupy.cuda.Device().synchronize()
 
     # Simulated data debug checks
@@ -278,7 +289,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rcdata, bpj_grid,
-                                            c0 / fc, ranges[0] / c0,
+                                            c0 / (fc - offset_hz), ranges[0] / c0,
                                             rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
                                             angs_debug, debug_flag)
     if ts[0] < rp.gpst.mean() <= ts[-1]:
@@ -334,9 +345,6 @@ del rbins_gpu
 del gx_gpu
 del gy_gpu
 del gz_gpu
-del bgx_gpu
-del bgy_gpu
-del bgz_gpu
 
 # dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
@@ -346,9 +354,9 @@ dfig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
 dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
 # dfig.add_scatter3d(x=locd[:, 0] + locp[0], y=locd[:, 1] + locp[1], z=locd[:, 2] + locp[2], mode='markers')
 # dfig.add_scatter3d(x=locd_bj[:200, 0] + locp[0], y=locd_bj[:200, 1] + locp[1], z=locd_bj[:200, 2] + locp[2], mode='markers')
-orig = llh2enu(*bg.origin, bg.ref)
-dfig.add_scatter3d(x=[orig[0]], y=[orig[1]], z=[orig[2]], marker={'size': [10]}, mode='markers')
-dfig.add_scatter3d(x=bg.grid[0].flatten(), y=bg.grid[1].flatten(), z=bg.grid[2].flatten(), mode='markers')
+# orig = llh2enu(*bg.origin, bg.ref)
+# dfig.add_scatter3d(x=[orig[0]], y=[orig[1]], z=[orig[2]], marker={'size': [10]}, mode='markers')
+# dfig.add_scatter3d(x=bg.grid[0].flatten(), y=bg.grid[1].flatten(), z=bg.grid[2].flatten(), mode='markers')
 dfig.show()
 
 '''te, tn, tu = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], bg.ref)

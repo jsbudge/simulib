@@ -70,6 +70,10 @@ class Environment(object):
     def grid(self):
         return self._grid
 
+    @property
+    def grid_function(self):
+        return self._grid_function
+
 
 class MapEnvironment(Environment):
 

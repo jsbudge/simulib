@@ -1,6 +1,6 @@
 import numpy as np
 from osgeo import gdal
-from scipy.interpolate import RectBivariateSpline
+from scipy.interpolate import RectBivariateSpline, interpn
 from scipy.spatial.transform import Rotation as rot
 import scipy.ndimage.filters as filters
 import scipy.ndimage.morphology as morphology
@@ -8,6 +8,7 @@ import open3d as o3d
 import plotly.io as pio
 import plotly.graph_objects as go
 import os
+from numba import jit, prange
 
 pio.renderers.default = 'browser'
 
@@ -92,40 +93,40 @@ def getElevationMap(lats, lons, und=True):
     bin_lon = (lons - gt[0]) / gt[1]
 
     # Linear interpolation using bins
-    # Shift the indexes into the data in case the point is in the wrong spot
-    bx1 = bin_lat.astype(int)
-    bx1[bin_lat % 1 < .5] = (bin_lat[bin_lat % 1 < .5] - 1).astype(int)
-    bx2 = (bin_lat + 1).astype(int)
-    bx2[bin_lat % 1 < .5] = (bin_lat[bin_lat % 1 < .5]).astype(int)
-    by1 = bin_lon.astype(int)
-    by1[bin_lon % 1 < .5] = (bin_lon[bin_lon % 1 < .5] - 1).astype(int)
-    by2 = (bin_lon + 1).astype(int)
-    by2[bin_lon % 1 < .5] = (bin_lon[bin_lon % 1 < .5]).astype(int)
-    '''bx1 = bin_lat.astype(int)
-    bx2 = (bin_lat + 1).astype(int)
-    by1 = bin_lon.astype(int)
-    by2 = (bin_lon + 1).astype(int)'''
-    x1 = bx1 * gt[-1]
-    x2 = bx2 * gt[-1]
-    y1 = by1 * gt[1]
-    y2 = by2 * gt[1]
-    x = lats - gt[3]
-    y = lons - gt[0]
-    dted_mat = np.array([[raster[bx1, by1], raster[bx1, by2], raster[bx2, by1], raster[bx2, by2]]])
-
-    coeff_mat = np.array([[x2 * y2, -y2, -x2, np.ones_like(x2)],
-                          [-x2 * y1, y1, x2, -np.ones_like(x2)],
-                          [-x1 * y2, y2, x1, -np.ones_like(x2)],
-                          [x1 * y1, -y1, -x1, np.ones_like(x2)]])
-
-    poly = np.einsum('ijn,jkn->ikn', dted_mat, coeff_mat)
-
-    sol = np.einsum('ijn,jkn->ikn', poly, np.array([[np.ones_like(x2), x, y, x * y]]).swapaxes(0, 1))
-
-    hght = 1 / ((x2 - x1) * (y2 - y1)) * sol.flatten()
+    hght = interpn(np.array([np.arange(3601), np.arange(3601)]), raster, np.array([bin_lat, bin_lon]).T)
 
     return hght + undulationEGM96(lats, lons) if und else hght
 
+
+@jit(nopython=True, fastmath=True, nogil=True, cache=True, parallel=True)
+def bilinear_interpolation(x_in, y_in, f_in, x_out, y_out):
+    f_out = np.zeros((y_out.size, x_out.size))
+
+    for i in prange(f_out.shape[1]):
+        idx = np.searchsorted(x_in, x_out[i])
+
+        x1 = x_in[idx - 1]
+        x2 = x_in[idx]
+        x = x_out[i]
+
+        for j in prange(f_out.shape[0]):
+            idy = np.searchsorted(y_in, y_out[j])
+            y1 = y_in[idy - 1]
+            y2 = y_in[idy]
+            y = y_out[j]
+
+            f11 = f_in[idy - 1, idx - 1]
+            f21 = f_in[idy - 1, idx]
+            f12 = f_in[idy, idx - 1]
+            f22 = f_in[idy, idx]
+
+            f_out[j, i] = ((f11 * (x2 - x) * (y2 - y) +
+                            f21 * (x - x1) * (y2 - y) +
+                            f12 * (x2 - x) * (y - y1) +
+                            f22 * (x - x1) * (y - y1)) /
+                           ((x2 - x1) * (y2 - y1)))
+
+    return f_out
 
 def getElevation(pt, und=True):
     lat = pt[0]
