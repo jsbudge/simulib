@@ -55,6 +55,10 @@ class Environment(object):
         self._grid_function = NearestNDInterpolator(
             np.array([self._grid[0].ravel(), self._grid[1].ravel()]).T, self._refgrid.ravel())
 
+    def resample(self, pos, width, height, npts, az=0):
+        x, y, z = self.createGrid(pos, width, height, npts, az)
+        self.setGrid(self._grid_function(x.flatten(), y.flatten()).reshape(x.shape), x, y, z)
+
     def save(self, fnme):
         with open(fnme, 'wb') as f:
             pickle.dump(self, f)

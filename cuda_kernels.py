@@ -1,7 +1,7 @@
 import cmath
 import math
 from numba import cuda, njit
-from numba.cuda.random import xoroshiro128p_uniform_float64
+from numba.cuda.random import xoroshiro128p_uniform_float32
 import numpy as np
 
 c0 = 299792458.0
@@ -352,7 +352,7 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             
 @cuda.jit()
 def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
-                                source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, calc_pts, calc_angs,
+                                source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts, calc_angs,
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
     px, py = cuda.grid(ndim=2)
@@ -362,53 +362,55 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
         wavenumber = 2 * np.pi / wavelength
 
         # Get a grid of elevation values for interpolation
-        '''e1 = vgx[px - 1, py] if px >= 0 else vgx[px, py]
-        e2 = vgx[px, py - 1] if py >= 0 else vgx[px, py]
-        n1 = vgy[px - 1, py] if px >= 0 else vgy[px, py]
-        n2 = vgy[px, py - 1] if py >= 0 else vgy[px, py]
-        u11 = vgz[px - 1, py] if px >= 0 else vgz[px, py]
-        u21 = vgz[px, py - 1] if py >= 0 else vgz[px, py]
-        u12 = vgz[px, py + 1] if py <= vgx.shape[1] - 1 else vgz[px, py]
-        u22 = vgz[px + 1, py] if px <= vgx.shape[0] - 1 else vgz[px, py]
-        r11 = vert_reflectivity[px - 1, py] if px >= 0 else vert_reflectivity[px, py]
-        r21 = vert_reflectivity[px, py - 1] if py >= 0 else vert_reflectivity[px, py]
-        r12 = vert_reflectivity[px, py + 1] if py <= vgx.shape[1] - 1 else vert_reflectivity[px, py]
-        r22 = vert_reflectivity[px + 1, py] if px <= vgx.shape[0] - 1 else vert_reflectivity[px, py]'''
-
+        bar_x = vgx[px, py]
+        bar_y = vgy[px, py]
+        bar_z = vgz[px, py]
         gpr = vert_reflectivity[px, py]
-
-        # scale = 1 / ((e2 - e1) * (n2 - n1))
         # if px == 4:
         #     print(vgx.shape[0])
 
-        for _ in range(pts_per_tri):
-            '''bar_x = vgx[px, py] + .5 - \
-            xoroshiro128p_uniform_float64(rng_states, py * vgx.shape[0] + px)
-            bar_y = vgy[px, py] + .5 - \
-            xoroshiro128p_uniform_float64(rng_states, py * vgx.shape[0] + px)
-            bar_z = scale * (u11 * (e2 - bar_x) * (n2 - bar_y) + u21 * (bar_x - e1) * (n2 - bar_y) +
-                             u12 * (e2 - bar_x) * (bar_y - n1) + u22 * (bar_x - e1) * (bar_y - n1))'''
-            bar_x = vgx[px, py]
-            bar_y = vgy[px, py]
-            bar_z = vgz[px, py]
+        for ntri in range(pts_per_tri):
+            if ntri != 0:
+                bx = vgx[px, py] + .5 - \
+                xoroshiro128p_uniform_float32(rng_states, py * vgx.shape[0] + px)
+                by = vgy[px, py] + .5 - \
+                xoroshiro128p_uniform_float32(rng_states, py * vgx.shape[0] + px)
 
-            # gpr = scale * (r11 * (e2 - bar_x) * (n2 - bar_y) + r21 * (bar_x - e1) * (n2 - bar_y) +
-            #                  r12 * (e2 - bar_x) * (bar_y - n1) + r22 * (bar_x - e1) * (bar_y - n1))
+                x3 = vgx[px - 1, py] if bx < vgx[px, py] else vgx[px + 1, py]
+                y3 = vgy[px - 1, py] if bx < vgx[px, py] else vgy[px + 1, py]
+                z3 = vgz[px - 1, py] if bx < vgx[px, py] else vgz[px + 1, py]
+                r3 = vert_reflectivity[px - 1, py] if bx < vgx[px, py] else vert_reflectivity[px + 1, py]
+                x2 = vgx[px, py - 1] if by < vgy[px, py] else vgx[px, py + 1]
+                y2 = vgy[px, py - 1] if by < vgy[px, py] else vgy[px, py + 1]
+                z2 = vgz[px, py - 1] if by < vgy[px, py] else vgz[px, py + 1]
+                r2 = vert_reflectivity[px, py - 1] if by < vgy[px, py] else vert_reflectivity[px, py + 1]
+
+                lam1 = ((y2 - y3) * (bx - x3) + (x3 - x2) * (by - y3)) / \
+                       ((y2 - y3) * (bar_x - x3) + (x3 - x2) * (bar_y - y3))
+                lam2 = ((y3 - bar_y) * (bx - x3) + (bar_x - x3) * (by - y3)) / \
+                       ((y2 - y3) * (bar_x - x3) + (x3 - x2) * (bar_y - y3))
+                lam3 = 1 - lam1 - lam2
+
+                bar_x = bx
+                bar_y = by
+                bar_z = lam1 * bar_z + lam2 * z2 + lam3 * z3
+                gpr = lam1 * gpr + lam2 * r2 + lam3 * r3
+
             for tt in range(source_xyz.shape[1]):
 
                 # Calculate out the angles in azimuth and elevation for the bounce
                 tx = bar_x - source_xyz[0, tt]
                 ty = bar_y - source_xyz[1, tt]
                 tz = bar_z - source_xyz[2, tt]
-                rng = math.sqrt(tx * tx + ty * ty + tz * tz)
+                rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
                 rx = bar_x - receive_xyz[0, tt]
                 ry = bar_y - receive_xyz[1, tt]
                 rz = bar_z - receive_xyz[2, tt]
-                r_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
+                r_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
                 r_el = -math.asin(rz / r_rng)
                 r_az = math.atan2(-ry, rx) + np.pi / 2
-                if debug_flag and tt == 0 and py == 2:
+                if debug_flag and tt == 0 and py == 0:
                     calc_pts[px, 0] = rx
                     calc_pts[px, 1] = ry
                     calc_pts[px, 2] = rz
@@ -418,19 +420,20 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
                 two_way_rng = rng + r_rng
                 rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
                 but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
-                if debug_flag and tt == 0 and py == 2:
-                    calc_angs[px, 2] = but
+                if debug_flag and tt == 0 and py == 0:
+                    calc_angs[px, 2] = r_rng
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
                     reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
                     att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el)
                     acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
-                    cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
-                    cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
+                    cuda.atomic.add(pd_r, (but, np.uint16(tt)), acc_val.real)
+                    cuda.atomic.add(pd_i, (but, np.uint16(tt)), acc_val.imag)
+                cuda.syncthreads()
 
 
-@cuda.jit(fastmath=True)
+@cuda.jit()
 def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, eltx, pulse_data, final_grid,
                 wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
     """
@@ -475,13 +478,13 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             tx = gx[px, py] - source_xyz[0, tt]
             ty = gy[px, py] - source_xyz[1, tt]
             tz = gz[px, py] - source_xyz[2, tt]
-            tx_rng = math.sqrt(tx * tx + ty * ty + tz * tz)
+            tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
             # Rx
             rx = gx[px, py] - receive_xyz[0, tt]
             ry = gy[px, py] - receive_xyz[1, tt]
             rz = gz[px, py] - receive_xyz[2, tt]
-            rx_rng = math.sqrt(rx * rx + ry * ry + rz * rz)
+            rx_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
             r_el = -math.asin(rz / rx_rng)
             r_az = math.atan2(-ry, rx) + np.pi / 2
             if debug_flag and tt == 0 and py == 0:
@@ -490,6 +493,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
                 calc_pts[px, 2] = rz
                 calc_angs[px, 0] = r_el
                 calc_angs[px, 1] = r_az
+                print(receive_xyz[1, tt])
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
@@ -586,8 +590,8 @@ def ambiguity(s1, s2, prf, dopp_bins, mag=True, normalize=True):
 
 def getMaxThreads():
     gpuDevice = cuda.get_current_device()
-    maxThreads = gpuDevice.MAX_THREADS_PER_BLOCK // 3
-    sqrtMaxThreads = int(np.sqrt(maxThreads))
+    maxThreads = int(np.sqrt(gpuDevice.MAX_THREADS_PER_BLOCK))
+    sqrtMaxThreads = maxThreads // 2
     return sqrtMaxThreads, sqrtMaxThreads
 
 
