@@ -385,7 +385,7 @@ def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_
     k = 2 * np.pi / _lambda
     # az, el = np.meshgrid(theta, theta)
     ublock = azelToVec(theta.flatten(), phi.flatten())
-    AF = np.exp(-1j * k * pos.dot(ublock)) * el_pat[None, :]
+    AF = np.exp(-1j * k * pos.dot(ublock)) * el_pat.flatten()[None, :]
     weights = weights if weights is not None else np.ones(pos.shape[0])
     AF = AF.T.dot(weights).flatten() if az_only else AF.T.dot(weights).reshape(theta.shape)
     # Return degree array and antenna pattern
