@@ -793,7 +793,7 @@ def createIFTMatrix(m, fs):
     return D
 
 
-def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20):
+def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20, fft_len=None):
     # Things the PS will need to know from the configuration
     numSamples = chan.nsam
     samplingFreqHz = chan.fs
@@ -846,7 +846,7 @@ def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20):
 
     # Calculate the convolution length
     convolutionLength = numSamples + basebandWaveformLen - 1
-    FFTLength = findPowerOf2(convolutionLength)
+    FFTLength = findPowerOf2(convolutionLength) if fft_len is None else fft_len
 
     # Calculate the inverse transfer function
     FFTCalData = np.fft.fft(calData, FFTLength)

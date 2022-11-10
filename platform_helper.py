@@ -331,7 +331,7 @@ class SDRPlatform(RadarPlatform):
             channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2 * DTR
         except KeyError:
             channel_dep = sdr.ant[0].dep_ang
-        if sdr[channel].is_recieve_only:
+        if sdr[channel].is_receive_only:
             tx_num = np.where([isinstance(n, AntennaPort) for n in sdr.port])[0][0]
         else:
             tx_num = sdr[channel].trans_num

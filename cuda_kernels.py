@@ -351,50 +351,49 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
             
             
 @cuda.jit()
-def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
+def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                                 source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts, calc_angs,
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
     px, py = cuda.grid(ndim=2)
-    if px < vgx.shape[0] and py < vgx.shape[1]:
+    if px < vgz.shape[0] and py < vgz.shape[1]:
         # Load in all the parameters that don't change
         n_samples = pd_r.shape[0]
         wavenumber = 2 * np.pi / wavelength
 
-        # Get a grid of elevation values for interpolation
-        bar_x = vgx[px, py]
-        bar_y = vgy[px, py]
-        bar_z = vgz[px, py]
-        gpr = vert_reflectivity[px, py]
-        # if px == 4:
-        #     print(vgx.shape[0])
-
         for ntri in range(pts_per_tri):
             if ntri != 0:
-                bx = vgx[px, py] + .5 - \
-                xoroshiro128p_uniform_float32(rng_states, py * vgx.shape[0] + px)
-                by = vgy[px, py] + .5 - \
-                xoroshiro128p_uniform_float32(rng_states, py * vgx.shape[0] + px)
+                bx = px + .5 - \
+                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
+                by = py + .5 - \
+                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
 
-                x3 = vgx[px - 1, py] if bx < vgx[px, py] else vgx[px + 1, py]
-                y3 = vgy[px - 1, py] if bx < vgx[px, py] else vgy[px + 1, py]
-                z3 = vgz[px - 1, py] if bx < vgx[px, py] else vgz[px + 1, py]
-                r3 = vert_reflectivity[px - 1, py] if bx < vgx[px, py] else vert_reflectivity[px + 1, py]
-                x2 = vgx[px, py - 1] if by < vgy[px, py] else vgx[px, py + 1]
-                y2 = vgy[px, py - 1] if by < vgy[px, py] else vgy[px, py + 1]
-                z2 = vgz[px, py - 1] if by < vgy[px, py] else vgz[px, py + 1]
-                r2 = vert_reflectivity[px, py - 1] if by < vgy[px, py] else vert_reflectivity[px, py + 1]
+                x3 = px - 1 if bx < px else px + 1
+                y3 = py
+                z3 = vgz[x3, y3]
+                r3 = vert_reflectivity[x3, y3]
+                x2 = px
+                y2 = py - 1 if by < py else py + 1
+                z2 = vgz[x2, y2]
+                r2 = vert_reflectivity[x2, y2]
 
                 lam1 = ((y2 - y3) * (bx - x3) + (x3 - x2) * (by - y3)) / \
-                       ((y2 - y3) * (bar_x - x3) + (x3 - x2) * (bar_y - y3))
-                lam2 = ((y3 - bar_y) * (bx - x3) + (bar_x - x3) * (by - y3)) / \
-                       ((y2 - y3) * (bar_x - x3) + (x3 - x2) * (bar_y - y3))
+                       ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3))
+                lam2 = ((y3 - py) * (bx - x3) + (px - x3) * (by - y3)) / \
+                       ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3))
                 lam3 = 1 - lam1 - lam2
 
-                bar_x = bx
-                bar_y = by
-                bar_z = lam1 * bar_z + lam2 * z2 + lam3 * z3
-                gpr = lam1 * gpr + lam2 * r2 + lam3 * r3
+                bar_z = vgz[px, py] * lam1 + lam2 * z2 + lam3 * z3
+                gpr = lam1 * vert_reflectivity[px, py] + lam2 * r2 + lam3 * r3
+            else:
+                bx = px
+                by = py
+                bar_z = vgz[px, py]
+                gpr = vert_reflectivity[px, py]
+            bx -= vgz.shape[0] / 2
+            by -= vgz.shape[1] / 2
+            bar_x = rot[0, 0] * bx + rot[0, 1] * by + shift[0]
+            bar_y = rot[1, 0] * bx + rot[1, 1] * by + shift[1]
 
             for tt in range(source_xyz.shape[1]):
 
@@ -410,18 +409,18 @@ def genRangeWithoutIntersection(vgx, vgy, vgz, vert_reflectivity,
                 r_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
                 r_el = -math.asin(rz / r_rng)
                 r_az = math.atan2(-ry, rx) + np.pi / 2
-                if debug_flag and tt == 0 and py == 0:
-                    calc_pts[px, 0] = rx
-                    calc_pts[px, 1] = ry
-                    calc_pts[px, 2] = rz
-                    calc_angs[px, 0] = r_el
-                    calc_angs[px, 1] = r_az
+                if debug_flag and tt == 0:
+                    calc_pts[0, px, py] = rx
+                    calc_pts[1, px, py] = ry
+                    calc_pts[2, px, py] = rz
+                    calc_angs[0, px, py] = r_el
+                    calc_angs[1, px, py] = r_az
 
                 two_way_rng = rng + r_rng
                 rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
                 but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
-                if debug_flag and tt == 0 and py == 0:
-                    calc_angs[px, 2] = r_rng
+                if debug_flag and tt == 0:
+                    calc_angs[2, px, py] = r_rng
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
@@ -487,13 +486,12 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             rx_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
             r_el = -math.asin(rz / rx_rng)
             r_az = math.atan2(-ry, rx) + np.pi / 2
-            if debug_flag and tt == 0 and py == 0:
-                calc_pts[px, 0] = rx
-                calc_pts[px, 1] = ry
-                calc_pts[px, 2] = rz
-                calc_angs[px, 0] = r_el
-                calc_angs[px, 1] = r_az
-                print(receive_xyz[1, tt])
+            if debug_flag and tt == 0:
+                calc_pts[0, px, py] = rx
+                calc_pts[1, px, py] = ry
+                calc_pts[2, px, py] = rz
+                calc_angs[0, px, py] = r_el
+                calc_angs[1, px, py] = r_az
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
@@ -511,8 +509,8 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
                                         bw_az, bw_el) / two_way_rng
-            if debug_flag and tt == 0 and py == 0:
-                calc_angs[px, 2] = two_way_rng
+            if debug_flag and tt == 0:
+                calc_angs[2, px, py] = two_way_rng
 
             # Azimuth window to reduce sidelobes
             # Gaussian window
