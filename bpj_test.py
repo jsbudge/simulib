@@ -37,7 +37,7 @@ debug = True
 nbpj_pts = 600
 grid_width = 100
 grid_height = 100
-channel = 1
+channel = 0
 
 print('Loading SDR file...')
 sdr = SDRParse(bg_file, do_exact_matches=False, use_idx=True)
@@ -122,14 +122,13 @@ gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
 
 if debug:
-    # pts_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
-    # angs_debug = cupy.zeros((triangles.shape[0], 3), dtype=np.float64)
-    pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
-    angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
+    pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
+    angs_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
+    # pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
+    # angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
 else:
     pts_debug = cupy.zeros((1, 1), dtype=np.float64)
     angs_debug = cupy.zeros((1, 1), dtype=np.float64)
-test = None
 
 # GPU device calculations
 threads_per_block = getMaxThreads()
@@ -220,6 +219,14 @@ plt.axis('tight')
 plt.figure('IMSHOW truedata')
 plt.imshow(db(bpj_truedata), origin='lower')
 plt.axis('tight')
+
+bg = SDREnvironment(sdr_file=sdr)
+bg.ref = origin
+cx, cy, cz = bg.getGrid(origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+
+fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten())
+fig.show()
 
 '''n_diff = flight[1, :] - pn
 e_diff = flight[0, :] - pe

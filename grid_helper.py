@@ -27,28 +27,20 @@ class Environment(object):
     _altgrid = None
     _transforms = None
     _refgrid = None
-    _grid_function = None
 
-    def __init__(self, rmat=None, shift=None, gz=None, reflectivity=None):
+    def __init__(self, rmat=None, shift=None, reflectivity=None):
         if rmat is not None:
-            self.setGrid(reflectivity, rmat, shift, gz)
+            self.setGrid(reflectivity, rmat, shift)
 
     def getDistance(self, pos):
         return np.linalg.norm(self._grid - pos[None, :], axis=1)
 
-    def createGrid(self, pos, width, height, npts, az=0):
+    def getGridParams(self, pos, width, height, npts, az=0):
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
-        gxx = np.linspace(-width / 2, width / 2, npts[0])
-        gyy = np.linspace(-height / 2, height / 2, npts[1])
-        gx, gy = np.meshgrid(gxx, gyy)
-        pts = np.column_stack((gx.flatten(), gy.flatten()))
         rmat = np.array([[np.cos(az), -np.sin(az)],
-                         [np.sin(az), np.cos(az)]]).dot(np.diag([gxx[1] - gxx[0], gyy[1] - gyy[0]]))
-        pos_r = np.squeeze(np.einsum('ji, mni -> jmn', rmat, [pts])).T + np.array([shift_x, shift_y])
-        latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
-        gz = (getElevationMap(latg, long) - self.ref[2])
+                         [np.sin(az), np.cos(az)]]).dot(np.diag([width / npts[0], height / npts[1]]))
 
-        return rmat, np.array([shift_x, shift_y]), gz.reshape(npts)
+        return rmat, np.array([shift_x, shift_y])
 
     def getGrid(self, pos=None, width=None, height=None, npts=None, az=0):
         if pos is None:
@@ -56,7 +48,8 @@ class Environment(object):
                                np.arange(self.shape[1]) - self.shape[1] / 2)
             pts = np.column_stack((x.flatten(), y.flatten()))
             pos_r = np.squeeze(np.einsum('ji, mni -> jmn', self._transforms[0], [pts])).T + self._transforms[1]
-            gz = self._altgrid
+            latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
+            gz = (getElevationMap(latg, long) - self.ref[2])
             sh = self.shape
         else:
             shift_x, shift_y, _ = llh2enu(*pos, self.ref)
@@ -70,25 +63,22 @@ class Environment(object):
                     np.array([shift_x, shift_y])
             latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
             sh = gx.shape
-            gz = (getElevationMap(latg, long) - self.ref[2]).reshape(sh)
-        return pos_r[:, 0].reshape(sh), pos_r[:, 1].reshape(sh), gz
+            gz = (getElevationMap(latg, long) - self.ref[2])
+        return pos_r[:, 0].reshape(sh), pos_r[:, 1].reshape(sh), gz.reshape(sh)
 
-    def setGrid(self, newgrid, rmat, shift, gz):
+    def setGrid(self, newgrid, rmat, shift):
         self._refgrid = newgrid
-        self._altgrid = gz
         self._transforms = (rmat, shift)
-        x, y = np.meshgrid(np.arange(gz.shape[0]), np.arange(gz.shape[1]))
-        self._grid_function = NearestNDInterpolator(
-            np.array([x.ravel(), y.ravel()]).T, self._refgrid.ravel())
 
     def resample(self, pos, width, height, npts, az=0):
-        rmat, shift, z = self.createGrid(pos, width, height, npts, az)
+        rmat, shift = self.getGridParams(pos, width, height, npts, az)
         x, y, _ = self.getGrid(pos, width, height, npts, az)
         pts = np.column_stack((x.flatten(), y.flatten()))
-        irmat = np.linalg.pinv(rmat)
+        irmat = np.linalg.pinv(self._transforms[0])
         pos_r = np.squeeze(np.einsum('ji, mni -> jmn', irmat, [pts - self._transforms[1]])).T + \
                 np.array([self.shape[0] / 2, self.shape[1] / 2])
-        self.setGrid(self._grid_function(pos_r[:, 0], pos_r[:, 1]).reshape(x.shape), rmat, shift, z)
+        self.setGrid(interpn((np.arange(self.refgrid.shape[0]),
+                              np.arange(self.refgrid.shape[1])), self.refgrid, pos_r).reshape(x.shape), rmat, shift)
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
@@ -98,23 +88,20 @@ class Environment(object):
         return self._transforms[0].dot(np.array([px - self.shape[0] / 2, py - self.shape[1] / 2])) + self._transforms[1]
 
     def getIndex(self, x, y):
-        pass
+        irmat = np.linalg.pinv(self._transforms[0])
+        return irmat.dot(np.array([x, y])) + np.array([self.shape[0] / 2, self.shape[1] / 2])
+
+    def interp(self, x, y):
+        return interpn((np.arange(self.refgrid.shape[0]),
+                 np.arange(self.refgrid.shape[1])), self.refgrid, self.getIndex(x, y)).reshape(x.shape)
 
     @property
     def refgrid(self):
         return self._refgrid
 
     @property
-    def altgrid(self):
-        return self._altgrid
-
-    @property
-    def grid_function(self):
-        return self._grid_function
-
-    @property
     def shape(self):
-        return self._altgrid.shape
+        return self._refgrid.shape
 
 
 class MapEnvironment(Environment):
@@ -189,10 +176,10 @@ class SDREnvironment(Environment):
             self.rps *= rowup
             self.cps *= colup
 
-        rmat, shift, gz = self.createGrid(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps,
-                                              grid.shape, self.heading)
+        rmat, shift = self.getGridParams(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps, grid.shape,
+                                         self.heading)
 
-        super().__init__(rmat=rmat, shift=shift, gz=gz, reflectivity=grid.T.flatten().reshape(gz.shape))
+        super().__init__(rmat=rmat, shift=shift, reflectivity=grid)
 
 
 def mesh(grid, tri_err, num_vertices):

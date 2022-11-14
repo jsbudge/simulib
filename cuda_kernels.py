@@ -78,6 +78,7 @@ def applyRadiationPattern(s_tx, s_ty, s_tz, rngtx, s_rx, s_ry, s_rz, rngrx, az_r
 def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     """
     Applies a very simple sinc radiation pattern.
+    :param txonly:
     :param el_c: float. Center of beam in elevation, radians.
     :param az_c: float. Azimuth center of beam in radians.
     :param az_rx: float. Azimuth value of Rx antenna in radians.

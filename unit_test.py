@@ -22,7 +22,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 from tqdm import tqdm
-from SDRParsing import SDRParse
+from SDRParsing import SDRParse, load
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -99,19 +99,19 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
-upsample = 1
-cpi_len = 64
+upsample = 4
+cpi_len = 32
 plp = 0
 max_pts_per_tri = 1
 debug = True
-nbpj_pts = 200
-grid_width = 400
-grid_height = 400
-do_truth_backproject = False
+nbpj_pts = 400
+grid_width = 100
+grid_height = 100
+do_truth_backproject = True
 custom_waveform = False
 
 print('Loading SDR file...')
-sdr = SDRParse(bg_file, do_exact_matches=False)
+sdr = load(bg_file, export_pickle=False)
 
 # Generate the background for simulation
 print('Generating environment...', end='')
@@ -140,7 +140,7 @@ print('Done.')
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
-fdelay = 0
+fdelay = 5
 nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
 nsam = rp.calcNumSamples(fdelay, plp)
 ranges = rp.calcRangeBins(fdelay, upsample, plp)
@@ -193,27 +193,29 @@ else:
     tay_drop[offset_shift - taywin // 2:offset_shift] = taytay[:taywin // 2]
     tay_drop[offset_shift:offset_shift + taywin // 2] = taytay[-taywin // 2:]
 mfilt *= tay_drop
-# chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
-# mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
+chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
+mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
-autocorr_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T * np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
+bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
+
+# autocorr_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T * np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 # autocorr_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
-bg.resample(bg.origin, grid_width + 10, grid_height + 10, (nbpj_pts * 2, nbpj_pts * 2), bg.heading)
-ngz_gpu = cupy.array(bg.altgrid.T, dtype=np.float32)
-ng = np.zeros(bg.shape)
+bg.resample(bg.origin, grid_width, grid_height, (nbpj_pts * 1, nbpj_pts * 1), bg.heading)
+ngz_gpu = cupy.array(bg.getGrid()[2].T, dtype=np.float32)
+'''ng = np.zeros(bg.shape)
 # ng = bg.grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape)
 pts_dist = np.linalg.norm(np.array([n for n in bg.getGrid()]) - np.array(llh2enu(*bg.origin, bg.ref))[:, None, None], axis=0)
 ng[np.where(pts_dist < 10)] = 1
-ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1
-ng[ng.shape[0] // 2 - 15, :] = 1
-ng[:, ng.shape[1] // 2 - 15] = 1
-ng[::15, ::15] = 1
+# ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1
+# ng[ng.shape[0] // 2 - 15, :] = 1
+# ng[:, ng.shape[1] // 2 - 15] = 1
+ng[::15, ::15] = 1'''
 
 # ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.grid[0].shape, Image.ANTIALIAS)
 # ng = np.linalg.norm(np.array(ng), axis=2)
 # bg._refgrid = ng
-gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
 bgx_gpu = cupy.array(gx, dtype=np.float32)
 bgy_gpu = cupy.array(gy, dtype=np.float32)
 bgz_gpu = cupy.array(gz, dtype=np.float32)
@@ -267,23 +269,21 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float32)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float32)
     postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float32)
-    data_r = cupy.zeros((up_nsam, tmp_len), dtype=np.float64)
-    data_i = cupy.zeros((up_nsam, tmp_len), dtype=np.float64)
+    data_r = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-6
+    data_i = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-6
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](rmat_gpu, shift_gpu, ngz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, rng_states,
-                                                               pts_debug, angs_debug, c0 / (fc - offset_hz),
+                                                               pts_debug, angs_debug, bpj_wavelength,
                                                                ranges[0] / c0, rp.fs * upsample, rp.az_half_bw,
                                                                rp.el_half_bw, max_pts_per_tri, debug_flag)
     cuda.synchronize()
 
-    rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * autocorr_gpu[:, :tmp_len]
+    rtdata = cupy.fft.fft(data_r + 1j * data_i, fft_len, axis=0) * chirp_gpu[:, :tmp_len] * mfilt_gpu[:, :tmp_len]
     upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
     upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-    rcdata = cupy.fft.ifft(upsample_data, axis=0)[:up_nsam, :] + \
-             cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) + \
-             1j * cupy.random.randn(up_nsam, tmp_len, dtype=np.float64)
+    rcdata = cupy.fft.ifft(upsample_data, axis=0)[:up_nsam, :]
     cuda.synchronize()
 
     # Simulated data debug checks
@@ -298,7 +298,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu, panrx_gpu,
                                             elrx_gpu, panrx_gpu, elrx_gpu, rcdata, bpj_grid,
-                                            c0 / (fc - offset_hz), ranges[0] / c0,
+                                            bpj_wavelength, ranges[0] / c0,
                                             rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
                                             angs_debug, debug_flag)
 
@@ -313,7 +313,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
 
     # Reset the grid for truth data
     if do_truth_backproject:
-        trtdata = cupy.fft.fft(cupy.array(sdr.getPulses(tidx, 0),
+        trtdata = cupy.fft.fft(cupy.array(sdr.getPulses(sdr[0].frame_num[tidx], 0),
                                          dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
         tupsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
         tupsample_data[:fft_len // 2, :] = trtdata[:fft_len // 2, :]
@@ -322,18 +322,12 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
         cupy.cuda.Device().synchronize()
         bpj_grid2 = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
-        if ts[0] < rp.gpst.mean() <= ts[-1]:
-            locp = rp.pos(ts[-1])
-            test = rtdata.get()
-            angd = angs_debug.get()
-            locd = pts_debug.get()
-
-        backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
+        backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu, panrx_gpu,
                                                 elrx_gpu,
                                                 panrx_gpu, elrx_gpu, trtdata, bpj_grid2,
-                                                c0 / (fc - bwidth / 2 - offset_hz), ranges[0] / c0,
+                                                bpj_wavelength, ranges[0] / c0,
                                                 rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
-                                                angs_debug, debug)
+                                                angs_debug, False)
         cuda.synchronize()
         bpj_truedata += bpj_grid2.get()
 
@@ -361,10 +355,15 @@ del bgx_gpu
 del bgy_gpu
 del bgz_gpu
 del ngz_gpu
+del mfilt_gpu
+del chirp_gpu
+mempool.free_all_blocks()
 
 # dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
 ngx, ngy, ngz = bg.getGrid()
+x, y = np.meshgrid(np.arange(bg.shape[0]), np.arange(bg.shape[1]))
+x, y = np.meshgrid(np.linspace(500, 650, 500), np.linspace(500, 650, 500))
 if debug:
     flight = rp.pos(rp.gpst)
     # dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
@@ -382,7 +381,6 @@ if debug:
     # dfig.add_scatter3d(x=bg.grid[0].flatten(), y=bg.grid[1].flatten(), z=bg.grid[2].flatten(), mode='markers')
     dfig.show()
 
-ngx, ngy, ngz = bg.getGrid()
 fig = px.scatter(x=ngx.flatten(), y=ngy.flatten(), color=bg.refgrid.flatten(), range_color=[0, 140])
 fig.add_scatter(x=gx.flatten(), y=gy.flatten(), mode='markers')
 fig.show()
