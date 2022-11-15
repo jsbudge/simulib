@@ -30,7 +30,7 @@ class Environment(object):
 
     def __init__(self, rmat=None, shift=None, reflectivity=None):
         if rmat is not None:
-            self.setGrid(reflectivity, rmat, shift)
+            self.setGrid(reflectivity / reflectivity.max() + 1, rmat, shift)
 
     def getDistance(self, pos):
         return np.linalg.norm(self._grid - pos[None, :], axis=1)

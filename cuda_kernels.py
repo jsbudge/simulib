@@ -363,18 +363,19 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
         wavenumber = 2 * np.pi / wavelength
 
         for ntri in range(pts_per_tri):
+            # I'm not sure why but vgz and vert_reflectivity need their indexes swapped here
             if ntri != 0:
                 bx = px + .5 - \
                 xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
                 by = py + .5 - \
                 xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
 
-                x3 = px - 1 if bx < px else px + 1
-                y3 = py
+                x3 = py - 1 if bx < py else py + 1
+                y3 = px
                 z3 = vgz[x3, y3]
                 r3 = vert_reflectivity[x3, y3]
-                x2 = px
-                y2 = py - 1 if by < py else py + 1
+                x2 = py
+                y2 = px - 1 if by < px else px + 1
                 z2 = vgz[x2, y2]
                 r2 = vert_reflectivity[x2, y2]
 
@@ -384,15 +385,15 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                        ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3))
                 lam3 = 1 - lam1 - lam2
 
-                bar_z = vgz[px, py] * lam1 + lam2 * z2 + lam3 * z3
-                gpr = lam1 * vert_reflectivity[px, py] + lam2 * r2 + lam3 * r3
+                bar_z = vgz[py, px] * lam1 + lam2 * z2 + lam3 * z3
+                gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
             else:
-                bx = px
-                by = py
-                bar_z = vgz[px, py]
-                gpr = vert_reflectivity[px, py]
-            bx -= vgz.shape[0] / 2
-            by -= vgz.shape[1] / 2
+                bx = float(px)
+                by = float(py)
+                bar_z = vgz[py, px]
+                gpr = vert_reflectivity[py, px]
+            bx -= float(vgz.shape[0]) / 2.
+            by -= float(vgz.shape[1]) / 2.
             bar_x = rot[0, 0] * bx + rot[0, 1] * by + shift[0]
             bar_y = rot[1, 0] * bx + rot[1, 1] * by + shift[1]
 

@@ -30,8 +30,8 @@ inch_to_m = .0254
 # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
 # bg_file = '/data5/SAR_DATA/2022/Redstone/SAR_08122022_170753.sar'
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
-upsample = 4
-cpi_len = 128
+upsample = 8
+cpi_len = 32
 plp = 0
 debug = True
 nbpj_pts = 600
@@ -225,7 +225,7 @@ bg.ref = origin
 cx, cy, cz = bg.getGrid(origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
 
 fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
-fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten())
+fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten(), mode='markers')
 fig.show()
 
 '''n_diff = flight[1, :] - pn

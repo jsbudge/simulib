@@ -99,15 +99,15 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
-upsample = 4
+upsample = 1
 cpi_len = 32
 plp = 0
 max_pts_per_tri = 1
 debug = True
-nbpj_pts = 400
+nbpj_pts = 200
 grid_width = 100
 grid_height = 100
-do_truth_backproject = True
+do_truth_backproject = False
 custom_waveform = False
 
 print('Loading SDR file...')
@@ -127,7 +127,7 @@ gimbal_debug = '/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Gimbal.dat'
 postCorr = loadPostCorrectionsGPSData(gps_debug)
 rawGPS = loadGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_GPSDataPostJumpCorrection.dat')
 preCorr = loadPreCorrectionsGPSData('/home/jeff/repo/Debug/03112022/SAR_03112022_135854_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')'''
-rp = SDRPlatform(sdr, bg.ref)
+rp = SDRPlatform(sdr, bg.ref, channel=0)
 
 # Get reference data
 # flight = rp.pos(postCorr['sec'])
@@ -201,21 +201,22 @@ bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
 # autocorr_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T * np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 # autocorr_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
-bg.resample(bg.origin, grid_width, grid_height, (nbpj_pts * 1, nbpj_pts * 1), bg.heading)
-ngz_gpu = cupy.array(bg.getGrid()[2].T, dtype=np.float32)
-'''ng = np.zeros(bg.shape)
+bg.resample(bg.origin, grid_width + 10, grid_height + 10, (nbpj_pts * 3, nbpj_pts * 3))
+gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+ngz_gpu = cupy.array(bg.getGrid()[2], dtype=np.float32)
+ng = np.zeros(bg.shape)
 # ng = bg.grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape)
 pts_dist = np.linalg.norm(np.array([n for n in bg.getGrid()]) - np.array(llh2enu(*bg.origin, bg.ref))[:, None, None], axis=0)
 ng[np.where(pts_dist < 10)] = 1
-# ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1
-# ng[ng.shape[0] // 2 - 15, :] = 1
-# ng[:, ng.shape[1] // 2 - 15] = 1
-ng[::15, ::15] = 1'''
+ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1
+ng[ng.shape[0] // 2 - 15, :] = 1
+ng[:, ng.shape[1] // 2 - 15] = 1
+ng[::15, ::15] = 1
 
 # ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.grid[0].shape, Image.ANTIALIAS)
 # ng = np.linalg.norm(np.array(ng), axis=2)
-# bg._refgrid = ng
-gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts), bg.heading)
+bg._refgrid = ng
+
 bgx_gpu = cupy.array(gx, dtype=np.float32)
 bgy_gpu = cupy.array(gy, dtype=np.float32)
 bgz_gpu = cupy.array(gz, dtype=np.float32)
@@ -269,8 +270,8 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float32)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float32)
     postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float32)
-    data_r = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-6
-    data_i = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-6
+    data_r = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-1
+    data_i = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-1
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](rmat_gpu, shift_gpu, ngz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, rng_states,
@@ -288,7 +289,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
 
     # Simulated data debug checks
     if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp = rp.pos(ts[-1])
+        locp = rp.rxpos(ts[-1])
         test = rcdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
@@ -304,7 +305,7 @@ for tidx in tqdm([idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_
 
     cuda.synchronize()
     if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp_bj = rp.pos(ts[-1])
+        locp_bj = rp.rxpos(ts[-1])
         test_bj = rcdata.get()
         angd_bj = angs_debug.get()
         locd_bj = pts_debug.get()
@@ -362,8 +363,6 @@ mempool.free_all_blocks()
 # dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
 ngx, ngy, ngz = bg.getGrid()
-x, y = np.meshgrid(np.arange(bg.shape[0]), np.arange(bg.shape[1]))
-x, y = np.meshgrid(np.linspace(500, 650, 500), np.linspace(500, 650, 500))
 if debug:
     flight = rp.pos(rp.gpst)
     # dfig.add_scatter3d(x=flight[0, :], y=flight[1, :], z=flight[2, :], mode='markers')
@@ -433,3 +432,32 @@ plt.figure('Elevation')
 plt.imshow(gz, origin='lower')
 plt.axis('tight')
 plt.show()
+
+'''bg = SDREnvironment(sdr)
+bg.resample(bg.origin, grid_width, grid_height, (nbpj_pts * 1, nbpj_pts * 1), -np.pi / 3)
+vgz = bg.getGrid()[2]
+vert_reflectivity = bg.refgrid
+rot = bg._transforms[0]
+shift = bg._transforms[1]
+ptx, py = np.meshgrid(np.arange(bg.shape[0]), np.arange(bg.shape[1]))
+bx = ptx.astype(float)
+by = py.astype(float)
+bar_z = vgz[py, ptx]
+gpr = vert_reflectivity[ptx, py]
+bx -= vgz.shape[0] / 2
+by -= vgz.shape[1] / 2
+bar_x = rot[0, 0] * bx + rot[0, 1] * by + shift[0]
+bar_y = rot[1, 0] * bx + rot[1, 1] * by + shift[1]
+
+shift_x, shift_y, _ = llh2enu(*bg.origin, bg.ref)
+gx, gy = np.meshgrid(np.linspace(-grid_width / 2, grid_width / 2, nbpj_pts),
+                     np.linspace(-grid_height / 2, grid_height / 2, nbpj_pts))
+gx += shift_x
+gy += shift_y
+latg, long, altg = enu2llh(gx.flatten(), gy.flatten(), np.zeros(gx.flatten().shape[0]), bg.ref)
+gz = (getElevationMap(latg, long) - bg.ref[2]).reshape(gx.shape)
+
+fig = px.scatter_3d(x=bar_x.flatten(), y=bar_y.flatten(), z=vgz.flatten())
+fig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten(), mode='markers')
+fig.add_scatter3d(x=bar_x.flatten(), y=bar_y.flatten(), z=bar_z.flatten(), mode='markers')
+fig.show()'''
