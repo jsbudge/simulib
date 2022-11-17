@@ -103,6 +103,10 @@ class Environment(object):
     def shape(self):
         return self._refgrid.shape
 
+    @property
+    def transforms(self):
+        return self._transforms
+
 
 class MapEnvironment(Environment):
 

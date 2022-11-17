@@ -35,8 +35,8 @@ cpi_len = 32
 plp = 0
 debug = True
 nbpj_pts = 600
-grid_width = 100
-grid_height = 100
+grid_width = 200
+grid_height = 200
 channel = 0
 
 print('Loading SDR file...')
@@ -151,8 +151,6 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
     postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
-    data_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
-    data_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
     bpj_grid = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
 
     # Reset the grid for truth data
@@ -183,8 +181,6 @@ del panrx_gpu
 del postx_gpu
 del posrx_gpu
 del elrx_gpu
-del data_r
-del data_i
 del rtdata
 del upsample_data
 del bpj_grid

@@ -385,6 +385,12 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                        ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3))
                 lam3 = 1 - lam1 - lam2
 
+                # Quick check to see if something's out of whack with the interpolation
+                # lam3 + lam1 + lam2 should always be one
+                if lam3 < 0.:
+                    continue
+                if px == 399 and py == 399:
+                    print(lam1)
                 bar_z = vgz[py, px] * lam1 + lam2 * z2 + lam3 * z3
                 gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
             else:
@@ -422,7 +428,7 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
                 but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
                 if debug_flag and tt == 0:
-                    calc_angs[2, px, py] = r_rng
+                    calc_angs[2, px, py] = gpr
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
