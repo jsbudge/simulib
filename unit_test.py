@@ -99,7 +99,7 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
-upsample = 1
+upsample = 8
 channel = 0
 cpi_len = 128
 plp = 0
@@ -177,6 +177,8 @@ if sdr[channel].xml['Offset_Video_Enabled'] == 'True':
     offset_hz = sdr[channel].xml['DC_Offset_MHz'] * 1e6
     bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
     offset_shift = int((offset_hz + bwidth / 2) / (1 / fft_len * fs) * upsample)
+    # bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
+    # offset_shift = int((offset_hz + bwidth / 2) / (1 / fft_len * fs) * upsample)
 else:
     offset_hz = 0
     offset_shift = int(offset_hz / (1 / fft_len * fs) * upsample)
@@ -204,22 +206,22 @@ sim_chirp = chirp * mfilt
 # autocorr_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T * np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 autocorr_gpu = cupy.array(np.tile(sim_chirp, (cpi_len, 1)).T, dtype=np.complex128)
 
-bg.resample(bg.origin, grid_width + 10, grid_height + 10, (nbpj_pts * 4, nbpj_pts * 4), bg.heading)
-gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
-# gx, gy, gz = bg.getGrid()
+bg.resample(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+# gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+gx, gy, gz = bg.getGrid()
 ngz_gpu = cupy.array(bg.getGrid()[2], dtype=np.float64)
 ng = np.zeros(bg.shape)
 # ng = bg.grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape)
 pts_dist = np.linalg.norm(np.array([n for n in bg.getGrid()]) - np.array(llh2enu(*bg.origin, bg.ref))[:, None, None],
                           axis=0)
 ng[np.where(pts_dist < 10)] = 1
-ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1
-# ng[ng.shape[0] // 2 - 15, :] = 1
-# ng[:, ng.shape[1] // 2 - 15] = 1
-# ng[::15, ::15] = 1
+# ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1
+ng[ng.shape[0] // 2 - 15, :] = 1
+ng[:, ng.shape[1] // 2 - 15] = 1
+ng[::5, ::5] = 1
 
-# ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.shape, Image.ANTIALIAS)
-# ng = np.linalg.norm(np.array(ng), axis=2)
+ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.shape, Image.ANTIALIAS)
+ng = np.linalg.norm(np.array(ng), axis=2)
 bg._refgrid = ng
 
 bgx_gpu = cupy.array(gx, dtype=np.float64)

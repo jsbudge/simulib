@@ -389,8 +389,6 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 # lam3 + lam1 + lam2 should always be one
                 if lam3 < 0.:
                     continue
-                if px == 399 and py == 399:
-                    print(lam1)
                 bar_z = vgz[py, px] * lam1 + lam2 * z2 + lam3 * z3
                 gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
             else:
@@ -433,7 +431,7 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
                     reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
-                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el)
+                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) / two_way_rng
                     acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
                     cuda.atomic.add(pd_r, (but, np.uint16(tt)), acc_val.real)
                     cuda.atomic.add(pd_i, (but, np.uint16(tt)), acc_val.imag)
