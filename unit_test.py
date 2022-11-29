@@ -99,11 +99,11 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
-upsample = 8
+upsample = 16
 channel = 0
-cpi_len = 128
+cpi_len = 32
 plp = 0
-max_pts_per_tri = 1
+max_pts_per_tri = 5
 debug = True
 nbpj_pts = 200
 grid_width = 100
@@ -222,7 +222,7 @@ ng[::5, ::5] = 1
 
 ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.shape, Image.ANTIALIAS)
 ng = np.linalg.norm(np.array(ng), axis=2)
-bg._refgrid = ng
+# bg._refgrid = ng
 
 bgx_gpu = cupy.array(gx, dtype=np.float64)
 bgy_gpu = cupy.array(gy, dtype=np.float64)
@@ -277,8 +277,8 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
     postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
-    data_r = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-6
-    data_i = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 1e-6
+    data_r = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 0
+    data_i = cupy.random.randn(up_nsam, tmp_len, dtype=np.float64) * 0
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](rmat_gpu, shift_gpu, ngz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, rng_states,

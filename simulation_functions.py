@@ -348,7 +348,7 @@ def rotate(az, nel, rot_mat):
 
 
 def azelToVec(az, el):
-    return -np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), np.sin(el)])
+    return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
 
 
 def hornPattern(fc, width, height, theta=None, phi=None, deg_per_bin=.5, az_only=False):
@@ -366,7 +366,7 @@ def hornPattern(fc, width, height, theta=None, phi=None, deg_per_bin=.5, az_only
     lcwm = lcw.flatten()
     k = 2 * np.pi / _lambda
     locs = np.array([lcwm, np.zeros_like(lcwm), lchm]).T
-    ublock = azelToVec(theta.flatten(), phi.flatten())
+    ublock = -azelToVec(theta.flatten(), phi.flatten())
     AF = np.sum(np.exp(-1j * k * locs.dot(ublock)), axis=0)
     AF = AF.flatten() if az_only else AF.reshape(theta.shape)
 
@@ -374,8 +374,16 @@ def hornPattern(fc, width, height, theta=None, phi=None, deg_per_bin=.5, az_only
     return theta, phi, AF
 
 
-def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_only=False):
-    _, _, el_pat = hornPattern(fc, .0766, .0646, theta=theta, phi=phi, deg_per_bin=deg_per_bin, az_only=az_only)
+def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_only=False, horn_dim=None,
+                horn_pattern=None):
+    use_pat = False
+    if horn_pattern is not None:
+        _, _, el_pat = horn_pattern
+        use_pat = True
+    elif horn_dim is not None:
+        use_pat = True
+        _, _, el_pat = hornPattern(fc, horn_dim[0], horn_dim[1], theta=theta, phi=phi,
+                                   deg_per_bin=deg_per_bin, az_only=az_only)
     _lambda = c0 / fc
     if theta is None:
         theta = np.arange(0, np.pi, deg_per_bin * DTR)
@@ -384,8 +392,10 @@ def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_
     theta, phi = np.meshgrid(theta, phi)
     k = 2 * np.pi / _lambda
     # az, el = np.meshgrid(theta, theta)
-    ublock = azelToVec(theta.flatten(), phi.flatten())
-    AF = np.exp(-1j * k * pos.dot(ublock)) * el_pat.flatten()[None, :]
+    ublock = -azelToVec(theta.flatten(), phi.flatten())
+    AF = np.exp(-1j * k * pos.dot(ublock))
+    if use_pat:
+        AF *= el_pat.flatten()[None, :]
     weights = weights if weights is not None else np.ones(pos.shape[0])
     AF = AF.T.dot(weights).flatten() if az_only else AF.T.dot(weights).reshape(theta.shape)
     # Return degree array and antenna pattern
