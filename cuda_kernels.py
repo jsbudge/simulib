@@ -390,7 +390,13 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 if lam3 < 0.:
                     continue
                 bar_z = vgz[py, px] * lam1 + lam2 * z2 + lam3 * z3
-                gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
+                if lam1 < lam2 and lam1 < lam3:
+                    gpr = vert_reflectivity[py, px]
+                elif lam2 < lam1 and lam2 < lam3:
+                    gpr = r2
+                else:
+                    gpr = r3
+                # gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
             else:
                 bx = float(px)
                 by = float(py)
@@ -424,7 +430,8 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
 
                 two_way_rng = rng + r_rng
                 rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
-                but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+                but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+
                 if debug_flag and tt == 0:
                     calc_angs[2, px, py] = gpr
 

@@ -444,7 +444,6 @@ class PlotWithSliders(object):
                          "direction": "left", "pad": {"r": 10, "t": 1}, "type": "buttons", "x": 0.1, "y": 0, }]
         self._fig.update(frames=self._frames)
         self._fig.update_layout(updatemenus=update_menus, sliders=slider)
-        self._fig.update_layout(sliders=slider)
         self._fig.show()
 
 
