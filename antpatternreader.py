@@ -19,6 +19,7 @@ def colorDistance(n, m):
     return np.sqrt((2 + rm / 256) * (n[0] - m[:, :, 0])**2 + 4 * (n[1] - m[:, :, 1])**2 + (2 + (255 - rm) / 256) * (n[2] - m[:, :, 2])**2)
 
 
+import itertools
 fnme = '/home/jeff/Pictures/horn329ghzhighgain.png'
 
 img = np.array(imread(fnme)[:, :, :3], dtype=float)
@@ -52,7 +53,9 @@ for idx, pol in enumerate([hline, eline]):
     with open(f'./{fnme.split("/")[-1].split(".")[0]}_{pols[idx]}.pic', 'wb') as f:
         pickle.dump(pic_dict, f)
 
-
+'''
+from scipy.integrate import dblquad
+fc = 35e9
 _lambda = c0 / fc
 k = 2 * np.pi / _lambda
 A = 3 * _lambda
@@ -62,7 +65,10 @@ Ea = lambda x, y: np.cos(np.pi * x / A) * np.exp(-1j * k / 2 * (x**2 / Rh + y**2
 
 azes = np.linspace(-np.pi / 2, np.pi / 2, 100)
 eles = np.linspace(-np.pi / 2, np.pi / 2, 100)
-E = np.zeros((100,), dtype=np.complex128)
-for idx in range(100):
-    E[idx] = k / (4 * np.pi) * (1 + np.cos(azes[idx])) * dblquad(lambda x, y: Ea(x, y) * np.exp(1j * k * (x * np.sin(azes[idx]))),
-                                                                 -A / 2, A / 2)
+E = np.zeros((100, 100), dtype=np.complex128)
+for az, el in itertools.product(range(100), range(100)):
+    E[az, el] = k / (4 * np.pi) * (1 + np.cos(azes[az])) * \
+                (dblquad(lambda x, y: (Ea(x, y) * np.exp(1j * k * (x * np.sin(azes[az]) * np.cos(eles[el]) + y * np.sin(azes[az]) * np.sin(eles[el])))).real,
+                         -A / 2, A / 2, -B / 2, B / 2)[0] +
+                 1j * dblquad(lambda x, y: (Ea(x, y) * np.exp(1j * k * (x * np.sin(azes[az]) * np.cos(eles[el]) + y * np.sin(azes[az]) * np.sin(eles[el])))).imag,
+                                                                 -A / 2, A / 2, -B / 2, B / 2)[0])'''

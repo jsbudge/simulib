@@ -1,3 +1,4 @@
+import keras.models
 import numpy as np
 from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap, enu2llh, \
     loadPostCorrectionsGPSData, loadPreCorrectionsGPSData, loadGPSData, loadGimbalData, GetAdvMatchedFilter
@@ -23,6 +24,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from tqdm import tqdm
 from SDRParsing import SDRParse, load
+import pickle
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -43,7 +45,7 @@ def compileWaveformData(sdr_f, fft_sz, l_sz, bandwidth, fc, slant_min, slant_max
                    :] - td_mu) / td_std
 
     # Generate the Clutter PSDs from the SDR file
-    clutter_data = sdr_f.getPulses(np.arange(0, l_sz), 0)
+    clutter_data = sdr_f.getPulses(sdr_f[0].frame_num[np.arange(0, l_sz)], 0)
     cd_fftdata = np.fft.fft(clutter_data, fft_sz, axis=0)
     clutter_data = db(cd_fftdata)
     clutter_data /= np.linalg.norm(clutter_data, axis=0)
@@ -99,14 +101,14 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
-sim_upsample = 32
+sim_upsample = 2
 upsample = 2
 channel = 0
-cpi_len = 64
+cpi_len = 32
 plp = 0
-max_pts_per_tri = 5
+max_pts_per_tri = 2
 debug = True
-nbpj_pts = 200
+nbpj_pts = 800
 grid_width = 100
 grid_height = 100
 do_truth_backproject = False
@@ -139,7 +141,7 @@ bwidth = sdr[channel].bw
 print('Done.')
 
 # Generate a backprojected image
-print('Calculating grid parameters...')
+print('Calculating grid parameters...', end='')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
 fdelay = 5
@@ -153,30 +155,35 @@ up_nsam = nsam * upsample
 sim_up_fft_len = fft_len * sim_upsample
 sim_up_nsam = nsam * sim_upsample
 sim_bpj_decimation = sim_upsample // upsample
+print('Done.')
 
 # Model for waveform simulation
 if custom_waveform:
-    '''mdl_fft = 2048
-    n_conv_filters = 4
-    kernel_sz = 128
-    mdl_bin_bw = int(1500e6 // (fs / mdl_fft))
+    print('Using custom waveform from DNN model.')
+    with open('/home/jeff/repo/apache_mla/model/model_params.pic', 'rb') as f:
+        model_params = pickle.load(f)
+    mdl_fft = model_params['mdl_fft']
+    n_conv_filters = model_params['n_conv_filters']
+    kernel_sz = model_params['kernel_sz']
+    mdl_bin_bw = int(model_params['bandwidth'] // (fs / mdl_fft))
     mdl = genModel(mdl_bin_bw, n_conv_filters, kernel_sz, mdl_fft)
-    mdl.load_weights('/home/jeff/repo/apache_mla/model/weights.h5')
+    mdl.load_weights('/home/jeff/repo/apache_mla/model/model')
 
     # Generate model data for waveform
     wfd = compileWaveformData(sdr, mdl_fft, cpi_len, bwidth, fc, ranges[0], ranges[-1], fs, mdl_bin_bw)
 
     # Get waveforms
     wf_data = getWaveFromData(mdl, *wfd, cpi_len, 2, mdl_fft, mdl_bin_bw)
-    chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), fft_len)'''
-    chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(0, 1, 10),
-                                nr, fs, sdr[channel].baseband_fc, bwidth), sim_up_fft_len)
+    chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), sim_up_fft_len)
 else:
     mchirp = np.mean(sdr.getPulses(sdr[channel].cal_num, 0, is_cal=True), axis=1)
     chirp = np.fft.fft(mchirp, sim_up_fft_len)
     chirp /= (10**(np.floor(np.log10(abs(chirp).max()))))
 
+chirp *= 10e-4
+
 # Chirp and matched filter calculations
+print('Calculating Taylor window.')
 if sdr[channel].xml['Offset_Video_Enabled'] == 'True':
     offset_hz = sdr[channel].xml['DC_Offset_MHz'] * 1e6
     bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
@@ -192,6 +199,8 @@ taywin = taywin + 1 if taywin % 2 != 0 else taywin
 taytay = taylor(taywin)
 # tayd = np.fft.fftshift(taylor(cpi_len))
 # taydopp = np.fft.fftshift(np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1)), axes=1)
+
+print('Calculating matched filter.')
 mfilt = chirp.conj()
 if offset_shift - taywin // 2 < 0:
     mfilt[:taywin // 2 + offset_shift] *= taytay[-(taywin // 2 + offset_shift):]
@@ -288,6 +297,8 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
                                                                ranges[0] / c0, rp.fs * sim_upsample, rp.az_half_bw,
                                                                rp.el_half_bw, max_pts_per_tri, debug_flag)
     cuda.synchronize()
+    data_r[np.isnan(data_r)] = 0
+    data_i[np.isnan(data_i)] = 0
 
     # Create data using chirp
     rtdata = cupy.fft.fft(data_r + 1j * data_i, sim_up_fft_len, axis=0) * chirp_gpu[:, :tmp_len]
