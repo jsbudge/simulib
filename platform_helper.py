@@ -221,14 +221,15 @@ class RadarPlatform(Platform):
         self.near_range_angle = self.dep_ang + self.el_half_bw
         self.far_range_angle = self.dep_ang - self.el_half_bw
 
-    def calcRanges(self, height):
+    def calcRanges(self, height, exp_factor=1):
         """
         Calculates out the expected near and far slant ranges of the antenna.
+        :param exp_factor: float. Expansion factor for range.
         :param height: float. Height of antenna off the ground in meters.
         :return: tuple of near and far slant ranges in meters.
         """
-        nrange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw)
-        frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang + self.el_half_bw)
+        nrange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang + self.el_half_bw * exp_factor)
+        frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw * exp_factor)
         return nrange, frange
 
     def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
@@ -328,9 +329,9 @@ class SDRPlatform(RadarPlatform):
         goff = np.array([sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
         grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
         try:
-            channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2 * DTR
+            channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2
         except KeyError:
-            channel_dep = sdr.ant[0].dep_ang
+            channel_dep = sdr.ant[0].dep_ang / DTR
         if sdr[channel].is_receive_only:
             tx_num = np.where([isinstance(n, AntennaPort) for n in sdr.port])[0][0]
         else:

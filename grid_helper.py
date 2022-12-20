@@ -30,7 +30,7 @@ class Environment(object):
 
     def __init__(self, rmat=None, shift=None, reflectivity=None):
         if rmat is not None:
-            self.setGrid(reflectivity / reflectivity.max() + 1, rmat, shift)
+            self.setGrid(reflectivity, rmat, shift)
 
     def getDistance(self, pos):
         return np.linalg.norm(self._grid - pos[None, :], axis=1)
@@ -141,7 +141,7 @@ class SDREnvironment(Environment):
             grid = asi
         except TypeError:
             asi = sdr.loadASI(sdr.files['asi'][list(sdr.files['asi'].keys())[0]])
-            grid = db(asi)
+            grid = abs(asi)
         self._sdr = sdr
         self._asi = asi
         self.heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
@@ -174,11 +174,11 @@ class SDREnvironment(Environment):
             grid = local_grid
         else:
             # Set grid to be one meter resolution
-            rowup = int(1 / self.rps) if self.rps < 1 else 1
+            '''rowup = int(1 / self.rps) if self.rps < 1 else 1
             colup = int(1 / self.cps) if self.cps < 1 else 1
             grid = grid[::rowup, ::colup]
             self.rps *= rowup
-            self.cps *= colup
+            self.cps *= colup'''
 
         rmat, shift = self.getGridParams(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps, grid.shape,
                                          self.heading)

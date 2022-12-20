@@ -364,12 +364,13 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
 
         for ntri in range(pts_per_tri):
             # I'm not sure why but vgz and vert_reflectivity need their indexes swapped here
-            if ntri != 0:
+            if ntri != 0 and px < vgz.shape[0] - 1 and py < vgz.shape[1] - 1:
                 bx = px + .5 - \
                 xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
                 by = py + .5 - \
                 xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
 
+                # Apply barycentric interpolation to get random point height and power
                 x3 = py - 1 if bx < py else py + 1
                 y3 = px
                 z3 = vgz[x3, y3]
@@ -397,6 +398,8 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 else:
                     gpr = r3
                 # gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
+            elif ntri != 0:
+                continue
             else:
                 bx = float(px)
                 by = float(py)
@@ -432,13 +435,15 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
                 but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
 
-                if debug_flag and tt == 0:
-                    calc_angs[2, px, py] = gpr
+                # if debug_flag and tt == 0:
+                #     calc_angs[2, px, py] = gpr
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
                     reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
-                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) / two_way_rng
+                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) / (two_way_rng * two_way_rng)
+                    if debug_flag and tt == 0:
+                        calc_angs[2, px, py] = att
                     acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
                     cuda.atomic.add(pd_r, (but, np.uint16(tt)), acc_val.real)
                     cuda.atomic.add(pd_i, (but, np.uint16(tt)), acc_val.imag)
