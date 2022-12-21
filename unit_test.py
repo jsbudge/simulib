@@ -84,19 +84,19 @@ inch_to_m = .0254
 
 bg_file = '/data5/SAR_DATA/2022/03112022/SAR_03112022_135955.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
-sim_upsample = 8
+sim_upsample = 1
 upsample = 1
 channel = 0
-cpi_len = 128
+cpi_len = 32
 plp = .95
-max_pts_per_tri = 5
+max_pts_per_tri = 20
 debug = True
 nbpj_pts = 200
 grid_width = 200
 grid_height = 200
 do_truth_backproject = False
 custom_waveform = False
-use_sdr_file = False
+use_sdr_file = True
 
 print('Loading SDR file...')
 sdr = load(bg_file, export_pickle=False)
@@ -134,7 +134,7 @@ print('Calculating grid parameters...', end='')
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
 fdelay = 5 if use_sdr_file else rp.pos(rp.gpst)[2, :].mean()
 nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
-nsam = 8192  # rp.calcNumSamples(fdelay, plp)
+nsam = rp.calcNumSamples(fdelay, plp)
 ranges = rp.calcRangeBins(fdelay, upsample, plp)
 granges = ranges * np.cos(rp.dep_ang)
 fft_len = findPowerOf2(nsam + nr)
@@ -171,8 +171,6 @@ else:
     chirp = np.fft.fft(mchirp, sim_up_fft_len)
     chirp /= (10 ** (np.floor(np.log10(abs(chirp).max()))))
 
-chirp *= 10e-4
-
 # Chirp and matched filter calculations
 print('Calculating Taylor window.')
 if sdr[channel].xml['Offset_Video_Enabled'] == 'True':
@@ -208,11 +206,11 @@ mfilt_gpu = cupy.array(np.tile(mfilt[::sim_upsample], (cpi_len, 1)).T, dtype=np.
 # autocorr_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T * np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 chirp_gpu = cupy.array(np.tile(chirp * mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 
-bg.resample(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
-# gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
-gx, gy, gz = bg.getGrid()
+bg.resample(bg.origin, grid_width, grid_height, (nbpj_pts * 2, nbpj_pts * 2))
+gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+# gx, gy, gz = bg.getGrid()
 ngz_gpu = cupy.array(bg.getGrid()[2], dtype=np.float64)
-ng = np.zeros(bg.shape)
+'''ng = np.zeros(bg.shape)
 # ng = bg.grid_function(gx.flatten(), gy.flatten()).reshape(gx.shape)
 pts_dist = np.linalg.norm(np.array([n for n in bg.getGrid()]) - np.array(llh2enu(*bg.origin, bg.ref))[:, None, None],
                           axis=0)
@@ -222,9 +220,9 @@ ng[ng.shape[0] // 2 - 15, :] = 1
 ng[:, ng.shape[1] // 2 - 15] = 1
 ng[::5, ::5] = 1
 
-ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.shape, Image.ANTIALIAS)
-ng = np.linalg.norm(np.array(ng), axis=2)
-# bg._refgrid = ng
+# ng = Image.open('/home/jeff/Downloads/artemislogo.png').resize(bg.shape, Image.ANTIALIAS)
+# ng = np.linalg.norm(np.array(ng), axis=2)
+bg._refgrid = ng'''
 
 bgx_gpu = cupy.array(gx, dtype=np.float64)
 bgy_gpu = cupy.array(gy, dtype=np.float64)
@@ -279,8 +277,8 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
     postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
-    data_r = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * 1e-7
-    data_i = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * 1e-7
+    data_r = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * 0 #1e-7
+    data_i = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * 0 #1e-7
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](rmat_gpu, shift_gpu, ngz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, rng_states,
