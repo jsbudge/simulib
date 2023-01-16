@@ -185,6 +185,10 @@ class SDREnvironment(Environment):
 
         super().__init__(rmat=rmat, shift=shift, reflectivity=grid)
 
+    @property
+    def sdr(self):
+        return self._sdr
+
 
 def mesh(grid, tri_err, num_vertices):
     # Generate a mesh using SVS metrics to make triangles in the right spots

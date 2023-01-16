@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
+from scipy.signal import medfilt
 from SDRParsing import SDRParse, AntennaPort
 from simulation_functions import llh2enu, findPowerOf2, loadPostCorrectionsGPSData, loadRawData, loadGimbalData, \
     loadMatchedFilter, loadReferenceChirp
@@ -49,6 +50,7 @@ class Platform(object):
         self._gimbal = gimbal
         self._gimbal_offset = gimbal_offset
         self._gimbal_offset_mat = None
+        self.gimbal_rotations = gimbal_rotations
         new_t = gps_data['sec'] if gps_data is not None else t
 
         # attitude spline
@@ -125,9 +127,9 @@ class Platform(object):
         self._rxpos = lambda lam_t: np.array([rre(lam_t), rrn(lam_t), rru(lam_t)])
 
         # Build a velocity spline
-        ve = CubicSpline(t, np.gradient(e) * INS_REFRESH_HZ)
-        vn = CubicSpline(t, np.gradient(n) * INS_REFRESH_HZ)
-        vu = CubicSpline(t, np.gradient(u) * INS_REFRESH_HZ)
+        ve = CubicSpline(t, medfilt(np.gradient(e), 15) * INS_REFRESH_HZ)
+        vn = CubicSpline(t, medfilt(np.gradient(n), 15) * INS_REFRESH_HZ)
+        vu = CubicSpline(t, medfilt(np.gradient(u), 15) * INS_REFRESH_HZ)
         self._vel = lambda lam_t: np.array([ve(lam_t), vn(lam_t), vu(lam_t)])
 
         # heading check
@@ -176,6 +178,10 @@ class Platform(object):
     def vel(self):
         # Return velocity lambda
         return self._vel
+
+    @property
+    def gimbal_offset(self):
+        return self._gimbal_offset
 
 
 """

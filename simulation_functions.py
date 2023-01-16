@@ -8,6 +8,7 @@ import open3d as o3d
 import plotly.io as pio
 import plotly.graph_objects as go
 import os
+from functools import reduce
 from numba import jit, prange
 
 pio.renderers.default = 'browser'
@@ -594,6 +595,11 @@ def loadDechirpRawData(filename, num_pulses, start_pulse=0):
                                                                                             '')) * 10 ** (
                                      attenuation[i] / 20)
     return raw_data, num_pulses, attenuation, sys_time
+
+
+def factors(n):
+    return list(set(reduce(list.__add__,
+                           ([i, n // i] for i in range(1, int(pow(n, 0.5) + 1)) if n % i == 0))))
 
 
 def getDechirpRawDataGen(filename, numPulses, numDesiredFrames=None, start_pulse=0):
