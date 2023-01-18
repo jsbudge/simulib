@@ -247,8 +247,8 @@ class RadarPlatform(Platform):
         :return: Expected pulse length in either TAC or seconds.
         """
         nrange, _ = self.calcRanges(height)
-        plength_s = (nrange * 2 / c0 - 1 / TAC) * pulse_length_percent
-        return int(plength_s * self.fs) if use_tac else plength_s
+        plength_s = (nrange * 2 / c0) * pulse_length_percent
+        return int(np.round(plength_s * self.fs)) if use_tac else plength_s
 
     def calcNumSamples(self, height, plp=1.):
         """

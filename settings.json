@@ -34,12 +34,12 @@
     "collect_time": 18.45,
     "collect_alt": 1524,
     "custom_waveform": false,
-    "pulse_length_percent": 0.5,
+    "pulse_length_percent": 0.12,
     "center_frequency": 10000000000.0,
     "sample_frequency": 2000000000.0,
-    "bandwidth": 500000000.0,
-    "prf": 2600,
-    "write_file": true,
+    "bandwidth": 1500000000.0,
+    "prf": 1300,
+    "write_file": false,
     "write_fnme": "/home/jeff/repo/Raw/sim_write.sar",
     "noise_level": 0.00000001
 }

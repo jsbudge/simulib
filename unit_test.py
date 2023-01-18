@@ -27,7 +27,6 @@ from SDRWriting import SDRWrite
 import pickle
 import json
 
-
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
 mempool = cupy.get_default_memory_pool()
@@ -89,41 +88,23 @@ command_line_args = sys.argv
 print('Getting settings from JSON file...')
 with open('./settings.json', 'r') as sf:
     settings = json.load(sf)
-    sim_upsample = settings['sim_upsample']
-    upsample = settings['upsample']
     channel = settings['channel']
-    cpi_len = settings['cpi_len']
-    max_pts_per_tri = settings['pts_per_tri']
-    debug = settings['debug']
-    do_truth_backproject = settings['do_truth_backproject']
-    no_backproject = settings['no_backproject']
-    use_sdr_file = settings['use_sdr_file']
-    nbpj_pts = settings['nbpj_pts']
-    grid_width = settings['grid_width']
-    grid_height = settings['grid_height']
     grid_center = settings['grid_center']
-    write_file = settings['write_file']
-    write_fnme = settings['write_fnme']
-    noise_level = settings['noise_level']
-    cal_num = settings['ncals']
+    channel_data = settings['channels']
+    nchannels = len(channel_data)
 
-    # These settings get overridden if use_custom_params == True
-    use_custom_params = settings['use_custom_params']
-    if use_custom_params:
-        collect_time = settings['collect_time']
-        collect_alt = settings['collect_alt']
-        custom_waveform = settings['custom_waveform']
-        plp = settings['pulse_length_percent']
-        fc = settings['center_frequency']
-        fs = settings['sample_frequency']
-        bwidth = settings['bandwidth']
-        prf = settings['prf']
+use_custom_params = settings['use_custom_params']
+if use_custom_params:
+    settings['collect_alt'] = settings['collect_alt']
+    custom_waveform = settings['custom_waveform']
+    plp = settings['pulse_length_percent']
+    fc = settings['center_frequency']
+    fs = settings['sample_frequency']
+    bwidth = settings['bandwidth']
+    prf = settings['prf']
 
-    if not use_sdr_file:
-        gimbal_offset = np.array(settings['gimbal_offset'])
-        gimbal_rotation = np.array(settings['gimbal_rotations'])
+    if not settings['use_sdr_file']:
         antenna_beamwidths = (settings['az_beamwidth'], settings['el_beamwidth'])
-        gimbal_dep_angle = settings['gimbal_dep_angle']
 
 if len(command_line_args) > 1:
     bg_file = command_line_args[1]
@@ -149,77 +130,101 @@ print('Generating environment...', end='')
 bg = SDREnvironment(sdr)
 grid_center = bg.origin
 
-# Get reference data
-# flight = rp.pos(postCorr['sec'])
-plp = sdr[channel].xml['Pulse_Length_Percent'] / 100 if not use_custom_params else plp
-fc = sdr[channel].fc if not use_custom_params else fc
-fs = sdr[channel].fs if not use_custom_params else fs
-bwidth = sdr[channel].bw if not use_custom_params else bwidth
-prf = sdr[channel].prf if not use_custom_params else prf
+# Set the channel specific data if not using custom params
+if settings['use_sdr_file'] and not settings['use_custom_params']:
+    for channel, ch in enumerate(settings['channels']):
+        settings['channels'][channel]['pulse_length_percent'] = sdr[channel].xml['Pulse_Length_Percent'] / 100
+        settings['channels'][channel]['center_frequency'] = sdr[channel].fc
+        settings['channels'][channel]['sample_frequency'] = sdr[channel].fs
+        settings['channels'][channel]['bandwidth'] = sdr[channel].bw
 
 print('Done.')
 
 # Generate a platform
 print('Generating platform...', end='')
+rps = []
 start_loc = llh2enu(bg.sdr.xml['Flight_Line']['Start_Latitude_D'], bg.sdr.xml['Flight_Line']['Start_Longitude_D'],
-                        bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
-stop_loc = llh2enu(bg.sdr.xml['Flight_Line']['Stop_Latitude_D'], bg.sdr.xml['Flight_Line']['Stop_Longitude_D'],
                     bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
+stop_loc = llh2enu(bg.sdr.xml['Flight_Line']['Stop_Latitude_D'], bg.sdr.xml['Flight_Line']['Stop_Longitude_D'],
+                   bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
 course_heading = np.arctan2(start_loc[0] - stop_loc[0], start_loc[1] - stop_loc[1]) + np.pi
-if use_sdr_file:
-    rp = SDRPlatform(sdr, bg.ref, channel=channel)
+if settings['use_sdr_file']:
+    fdelay = 55
+    for ch_num, ch in enumerate(sdr):
+        rps.append(SDRPlatform(sdr, bg.ref, channel=ch_num))
+        settings['channels'][ch_num]['nr'] = rp.calcPulseLength(fdelay,
+                                                                settings['channels'][channel]['pulse_length_percent'],
+                                                                use_tac=True)
+        settings['channels'][ch_num]['nsam'] = rp.calcNumSamples(fdelay,
+                                                                 settings['channels'][channel]['pulse_length_percent'])
+        settings['channels'][ch_num]['ranges'] = rp.calcRangeBins(fdelay,
+                                                                  settings['upsample'],
+                                                                  settings['channels'][channel]['pulse_length_percent'])
+    settings['prf'] = sdr[0].prf if not settings['use_custom_params'] else settings['prf']
+
 else:
     gps_times = sdr.gps_data.index.values
     nt = len(gps_times)
-    rp = RadarPlatform(e=np.linspace(start_loc[0], stop_loc[0], nt), n=np.linspace(start_loc[1], stop_loc[1], nt),
-                       u=np.zeros(nt) + collect_alt,
-                       r=np.zeros(nt), p=np.zeros(nt), y=np.zeros(nt) + course_heading, t=gps_times,
-                       gimbal=np.zeros((nt, 2)) + np.array([sdr.gimbal['pan'].mean(), sdr.gimbal['tilt'].mean()]),
-                       dep_angle=gimbal_dep_angle,
-                       el_bw=antenna_beamwidths[1], az_bw=antenna_beamwidths[0],
-                       gimbal_offset=gimbal_offset,
-                       gimbal_rotations=gimbal_rotation)
+    for ch_num, ch in enumerate(settings['channels']):
+        rps.append(RadarPlatform(e=np.linspace(start_loc[0], stop_loc[0], nt),
+                                 n=np.linspace(start_loc[1], stop_loc[1], nt),
+                           u=np.zeros(nt) + settings['collect_alt'],
+                           r=np.zeros(nt), p=np.zeros(nt), y=np.zeros(nt) + course_heading, t=gps_times,
+                           gimbal=np.zeros((nt, 2)) + np.array([sdr.gimbal['pan'].mean(), sdr.gimbal['tilt'].mean()]),
+                           dep_angle=settings['gimbal_dep_angle'],
+                           el_bw=settings['antennas'][ch['tx_ant']]['el_beamwidth'],
+                                 az_bw=settings['antennas'][ch['tx_ant']]['az_beamwidth'],
+                           gimbal_offset=settings['gimbal_offset'],
+                           gimbal_rotations=settings['gimbal_rotations'],
+                                 rx_offset=settings['antennas'][ch['rx_ant']]['offset'],
+                                 tx_offset=settings['antennas'][ch['tx_ant']]['offset']))
+        plat_height = rp.pos(rp.gpst)[2, :].mean()
+        settings['channels'][ch_num]['nr'] = rp.calcPulseLength(plat_height, plp, use_tac=True)
+        settings['channels'][ch_num]['nsam'] = rp.calcNumSamples(plat_height, plp)
+        settings['channels'][ch_num]['ranges'] = rp.calcRangeBins(plat_height, settings['upsample'], plp)
 print('Done.')
 
 print('Calculating grid parameters...', end='')
 # General calculations for slant ranges, etc.
-# plat_height = rp.pos(rp.gpst)[2, :].mean()
-if use_sdr_file:
-    fdelay = 55
-    nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
-    nsam = rp.calcNumSamples(fdelay, plp)
-    ranges = rp.calcRangeBins(fdelay, upsample, plp)
-else:
-    plat_height = rp.pos(rp.gpst)[2, :].mean()
-    nr = rp.calcPulseLength(plat_height, plp, use_tac=True)
-    nsam = rp.calcNumSamples(plat_height, plp)
-    ranges = rp.calcRangeBins(plat_height, upsample, plp)
-granges = ranges * np.cos(rp.dep_ang)
-fft_len = findPowerOf2(nsam + nr)
-up_fft_len = fft_len * upsample
-up_nsam = nsam * upsample
-sim_up_fft_len = fft_len * sim_upsample
-sim_up_nsam = nsam * sim_upsample
-sim_bpj_decimation = sim_upsample // upsample
+fft_len = findPowerOf2(settings['nsam'] + settings['nr'])
+up_fft_len = fft_len * settings['upsample']
+up_nsam = settings['nsam'] * settings['upsample']
+sim_up_fft_len = fft_len * settings['sim_upsample']
+sim_up_nsam = settings['nsam'] * settings['sim_upsample']
+sim_bpj_decimation = settings['sim_upsample'] // settings['upsample']
 print('Done.')
 
-if write_file:
+if settings['write_file']:
     print('Initiating file writing...', end='')
-    if use_sdr_file:
+    if settings['use_sdr_file']:
         trumode = getModeValues(int(sdr[0].mode, 16), not sdr.dataversion)
     else:
-        trumode = {'digital_channel': 0, 'wavenumber': 0,
-           'operation': 0, 'adc_channel': 0, 'receiver_slot': 5, 'receiver_channel': 0, 'upconverter_slot': 3,
-           '8/9_select': 1, 'band': 2, 'dac_channel': 0,
-           'ddc_enable': 0, 'filter_select': 0,
-           'rx_port': 0, 'tx_port': 0, 'polarization': 3,
-           'numconsmodes': 0, 'awg_enable': 0,
-           'rf_ref_wavenumber': 0}
+        # Get the band
+        band_number = 2 if 8e9 < fc < 12e9 else 3 if 26.5e9 < fc < 40e9 \
+            else 0 if 1e9 < fc < 2e9 else 1
+        trumode = {'digital_channel': 0,  # Channel number
+                   'wavenumber': 0,  # For AWG waveform files
+                   'operation': 0,  # Op mode. 0 for normal operation, 1 for cal
+                   'adc_channel': 0,
+                   'receiver_slot': 5,
+                   'receiver_channel': 0,
+                   'upconverter_slot': 3,
+                   '8/9_select': 1,
+                   'band': band_number,  # Band the center frequency is at
+                   'dac_channel': 0,
+                   'ddc_enable': 0,
+                   'filter_select': 0,  # Chooses a filter for reducing the sampling rate. Zero if none
+                   'rx_port': 0,  # Antenna port location for receive
+                   'tx_port': 0,  # Antenna port location for transmit
+                   'polarization': 3,  # Polarization for this channel
+                   'numconsmodes': 0,  # Number of simultaneous modes
+                   'awg_enable': 0,  # True if the AWG is enabled
+                   'rf_ref_wavenumber': 0}
 
     lats, lons, alts = enu2llh(*rp.pos(rp.gpst), bg.ref)
     r, p, y = rp.att(rp.gpst)
     vn, ve, vu = rp.vel(rp.gpst)
-    if use_sdr_file:
+    if settings['use_sdr_file']:
         sys_to_gps = np.poly1d(np.polyfit(sdr.timesync['systime'], sdr.timesync['secs'], 1))
         gimbal = np.array([sys_to_gps(sdr.gimbal['systime']), sdr.gimbal['pan'],
                            sdr.gimbal['tilt']]).T
@@ -228,7 +233,7 @@ if write_file:
         gimbal = np.array([rp.gpst, rp._gimbal[:, 0], rp._gimbal[:, 1]]).T
         gps_wk = 2176
 
-    sdr_wr = SDRWrite(write_fnme, gps_wk, rp.gpst, lats, lons, alts, r, p, y, vn, ve, vu,
+    sdr_wr = SDRWrite(settings['write_fnme'], gps_wk, rp.gpst, lats, lons, alts, r, p, y, vn, ve, vu,
                       gimbal,
                       digital_channel=trumode['digital_channel'], wavenumber=trumode['wavenumber'],
                       adc_channel=trumode['adc_channel'], receiver_slot=trumode['receiver_slot'],
@@ -237,9 +242,9 @@ if write_file:
                       ddc_enable=trumode['ddc_enable'], filter_select=trumode['filter_select'],
                       rx_port=trumode['rx_port'], tx_port=trumode['tx_port'], polarization=trumode['polarization'],
                       numconsmodes=trumode['numconsmodes'], awg_enable=trumode['awg_enable'],
-                      rf_ref_wavenumber=trumode['rf_ref_wavenumber'], settings_alt=collect_alt, settings_vel=150)
+                      rf_ref_wavenumber=trumode['rf_ref_wavenumber'], settings_alt=settings['collect_alt'], settings_vel=150)
 
-    sdr_wr.addChannel(fc, bwidth, nr / fs, prf / 1.5, rp.near_range_angle / DTR,
+    sdr_wr.addChannel(fc, bwidth, settings['nr'] / fs, prf / 1.5, rp.near_range_angle / DTR,
                       rp.far_range_angle / DTR, plp * 100,
                       1, trans_on_tac=1000, att_mode='AGC', rec_only=False, rec_slice='A', prf_broad=1.5,
                       offset_video=0.)
@@ -269,24 +274,24 @@ if custom_waveform:
     mdl.load_weights('/home/jeff/repo/apache_mla/model/model')
 
     # Generate model data for waveform
-    wfd = compileWaveformData(sdr, mdl_fft, cpi_len, bwidth, fc, ranges[0], ranges[-1], fs, mdl_bin_bw)
+    wfd = compileWaveformData(sdr, mdl_fft, settings['cpi_len'], bwidth, fc, settings['ranges'][0], settings['ranges'][-1], fs, mdl_bin_bw)
 
     # Get waveforms
-    wf_data = getWaveFromData(mdl, *wfd, cpi_len, 2, mdl_fft, mdl_bin_bw)
+    wf_data = getWaveFromData(mdl, *wfd, settings['cpi_len'], 2, mdl_fft, mdl_bin_bw)
     chirp = np.fft.fft(np.fft.ifft(wf_data[0, 0, :]), sim_up_fft_len)
 else:
-    if use_sdr_file:
-        mchirp = np.mean(sdr.getPulses(sdr[channel].cal_num, 0, is_cal=True), axis=1)
+    if settings['use_sdr_file']:
+        mchirp = np.mean(sdr.getPulses(sdr[channel].settings['ncals'], 0, is_cal=True), axis=1)
     else:
-        mchirp = np.zeros(nsam, dtype=np.complex128)
-        mchirp[5:5 + nr] = genPulse(np.linspace(0, 1, 10),
-                                    np.linspace(0, 1, 10), nr, fs, fc, bwidth) * 31 * (10 ** (31 / 20)) * 100
+        mchirp = np.zeros(settings['nsam'], dtype=np.complex128)
+        mchirp[5:5 + settings['nr']] = genPulse(np.linspace(0, 1, 10),
+                                    np.linspace(0, 1, 10), settings['nr'], fs, fc, bwidth) * 31 * (10 ** (31 / 20)) * 100
     chirp = np.fft.fft(mchirp, sim_up_fft_len)
 
 # Write out cal pulses for .sar file
-if write_file:
+if settings['write_file']:
     sys_to_gps = np.poly1d(np.polyfit(sdr.timesync['systime'], sdr.timesync['secs'], 1))
-    if use_sdr_file:
+    if settings['use_sdr_file']:
         for fr in np.arange(sdr[channel].ncals):
             pulse = sdr.getPulse(fr, is_cal=True)
             if pulse is not None:
@@ -295,50 +300,49 @@ if write_file:
                 sdr_wr.writePulse(time, 31, pulse, True)
     else:
         cal_time_start = rp.gpst[0] + .05
-        for p in np.arange(cal_num):
+        for p in np.arange(settings['ncals']):
             sdr_wr.writePulse(cal_time_start + p / prf, 31, mchirp, True)
 
 # Chirp and matched filter calculations
-if sdr[channel].xml['Offset_Video_Enabled'] == 'True' and use_sdr_file:
-    offset_hz = sdr[channel].xml['DC_Offset_MHz'] * 1e6
-    bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
-    offset_shift = int((offset_hz + bwidth / 2) / (1 / fft_len * fs) * sim_upsample)
-    # bpj_wavelength = c0 / (fc - bwidth / 2 - offset_hz)
-    # offset_shift = int((offset_hz + bwidth / 2) / (1 / fft_len * fs) * upsample)
-else:
-    offset_hz = 0
-    offset_shift = int(offset_hz / (1 / fft_len * fs) * sim_upsample)
-    bpj_wavelength = c0 / fc
-if not no_backproject:
-    print('Calculating Taylor window.')
-    taywin = int(bwidth / fs * sim_up_fft_len)
-    taywin = taywin + 1 if taywin % 2 != 0 else taywin
-    taytay = taylor(taywin)
-    tmp = np.zeros(sim_up_fft_len)
-    tmp[:taywin // 2] = taytay[-taywin // 2:]
-    tmp[-taywin // 2:] = taytay[:taywin // 2]
-    taytay = np.fft.ifft(tmp)
-    # tayd = np.fft.fftshift(taylor(cpi_len))
-    # taydopp = np.fft.fftshift(np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1)), axes=1)
-
-    print('Calculating matched filter.')
-    reflection_freq = c0 / bpj_wavelength - fs * np.round(c0 / bpj_wavelength / fs)
-    if reflection_freq != 0:
-        tayshifted = taytay * np.sin(2 * np.pi * reflection_freq * np.arange(sim_up_fft_len) * 1 / fs)
-        mfilt = chirp.conj() * np.fft.fft(tayshifted, sim_up_fft_len)
-        if reflection_freq < 0:
-            mfilt[sim_up_fft_len // 2:] = 0
-        elif reflection_freq > 0:
-            mfilt[:sim_up_fft_len // 2] = 0
+for ch_num, ch in enumerate(settings['channels']):
+    if sdr[channel].xml['Offset_Video_Enabled'] == 'True' and settings['use_sdr_file']:
+        offset_hz = sdr[channel].xml['DC_Offset_MHz'] * 1e6
+        settings['bpj_wavelength'] = c0 / (fc - bwidth / 2 - offset_hz)
+        # settings['bpj_wavelength'] = c0 / (fc - bwidth / 2 - offset_hz)
+        # offset_shift = int((offset_hz + bwidth / 2) / (1 / fft_len * fs) * upsample)
     else:
-        mfilt = chirp.conj() * np.fft.fft(taytay, sim_up_fft_len)
+        offset_hz = 0
+        settings['bpj_wavelength'] = c0 / fc
+    if not settings['no_backproject']:
+        print('Calculating Taylor window.')
+        taywin = int(bwidth / fs * sim_up_fft_len)
+        taywin = taywin + 1 if taywin % 2 != 0 else taywin
+        taytay = taylor(taywin)
+        tmp = np.zeros(sim_up_fft_len)
+        tmp[:taywin // 2] = taytay[-taywin // 2:]
+        tmp[-taywin // 2:] = taytay[:taywin // 2]
+        taytay = np.fft.ifft(tmp)
+        # tayd = np.fft.fftshift(taylor(cpi_len))
+        # taydopp = np.fft.fftshift(np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1)), axes=1)
 
-    mfilt_gpu = cupy.array(np.tile(mfilt[::sim_upsample], (cpi_len, 1)).T, dtype=np.complex128)
+        print('Calculating matched filter.')
+        reflection_freq = c0 / settings['bpj_wavelength'] - fs * np.round(c0 / settings['bpj_wavelength'] / fs)
+        if reflection_freq != 0:
+            tayshifted = taytay * np.sin(2 * np.pi * reflection_freq * np.arange(sim_up_fft_len) * 1 / fs)
+            mfilt = chirp.conj() * np.fft.fft(tayshifted, sim_up_fft_len)
+            if reflection_freq < 0:
+                mfilt[sim_up_fft_len // 2:] = 0
+            elif reflection_freq > 0:
+                mfilt[:sim_up_fft_len // 2] = 0
+        else:
+            mfilt = chirp.conj() * np.fft.fft(taytay, sim_up_fft_len)
 
-chirp_gpu = cupy.array(np.tile(chirp, (cpi_len, 1)).T, dtype=np.complex128)
+        mfilt_gpu = cupy.array(np.tile(mfilt[::settings['sim_upsample']], (settings['cpi_len'], 1)).T, dtype=np.complex128)
 
-bg.resample(grid_center, grid_width, grid_height, (nbpj_pts, nbpj_pts))
-# gx, gy, gz = bg.getGrid(bg.origin, grid_width, grid_height, (nbpj_pts, nbpj_pts))
+    chirp_gpu = cupy.array(np.tile(chirp, (settings['cpi_len'], 1)).T, dtype=np.complex128)
+
+bg.resample(grid_center, settings['grid_width'], settings['grid_height'], (settings['nbpj_pts'], settings['nbpj_pts']))
+# gx, gy, gz = bg.getGrid(bg.origin, settings['grid_width'], settings['grid_height'], (settings['nbpj_pts'], settings['nbpj_pts']))
 gx, gy, gz = bg.getGrid()
 ngz_gpu = cupy.array(bg.getGrid()[2], dtype=np.float64)
 ng = np.zeros(bg.shape)
@@ -359,15 +363,15 @@ bgx_gpu = cupy.array(gx, dtype=np.float64)
 bgy_gpu = cupy.array(gy, dtype=np.float64)
 bgz_gpu = cupy.array(gz, dtype=np.float64)
 ref_coef_gpu = cupy.array(bg.refgrid, dtype=np.float64)
-rbins_gpu = cupy.array(ranges, dtype=np.float64)
+rbins_gpu = cupy.array(settings['ranges'], dtype=np.float64)
 rmat_gpu = cupy.array(bg.transforms[0], dtype=np.float64)
 shift_gpu = cupy.array(bg.transforms[1], dtype=np.float64)
 
-if debug:
+if settings['debug']:
     pts_debug = cupy.zeros((3, *bg.shape), dtype=np.float64)
     angs_debug = cupy.zeros((3, *bg.shape), dtype=np.float64)
-    # pts_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
-    # angs_debug = cupy.zeros((nbpj_pts, 3), dtype=np.float64)
+    # pts_debug = cupy.zeros((settings['nbpj_pts'], 3), dtype=np.float64)
+    # angs_debug = cupy.zeros((settings['nbpj_pts'], 3), dtype=np.float64)
 else:
     pts_debug = cupy.zeros((1, 1, 1), dtype=np.float64)
     angs_debug = cupy.zeros((1, 1, 1), dtype=np.float64)
@@ -381,41 +385,41 @@ bpg_bpj = (gx.shape[0] // threads_per_block[0] + 1,
            gx.shape[1] // threads_per_block[1] + 1)
 
 # Data blocks for imaging
-if not no_backproject:
+if not settings['no_backproject']:
     bpj_res = np.zeros(gx.shape, dtype=np.complex128)
-if do_truth_backproject:
+if settings['do_truth_backproject']:
     bpj_truedata = np.zeros(gx.shape, dtype=np.complex128)
 
 rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
                                          seed=10)
 
 # Run through loop to get data simulated
-if use_sdr_file:
+if settings['use_sdr_file']:
     data_t = sdr[channel].pulse_time[0] + np.arange(sdr[channel].nframes) / sdr[0].prf
 else:
-    data_t = np.arange(rp.gpst[0], rp.gpst[0] + collect_time, 1 / prf)
+    data_t = np.arange(rp.gpst[0], rp.gpst[0] + settings['collect_time'], 1 / prf)
 print('Simulating...')
 pulse_pos = 0
-for tidx in tqdm(np.arange(0, len(data_t), cpi_len)):
+for tidx in tqdm(np.arange(0, len(data_t), settings['cpi_len'])):
     init_xoroshiro128p_states(rng_states, seed=10)
-    ts = data_t[tidx + np.arange(min(cpi_len, len(data_t) - tidx))]
+    ts = data_t[tidx + np.arange(min(settings['cpi_len'], len(data_t) - tidx))]
     tmp_len = len(ts)
     if ts[0] < rp.gpst.mean() <= ts[-1]:
-        debug_flag = debug
+        debug_flag = settings['debug']
     else:
         debug_flag = False
     panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
     postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
-    data_r = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * noise_level
-    data_i = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * noise_level
+    data_r = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * settings['noise_level']
+    data_i = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * settings['noise_level']
     genRangeWithoutIntersection[bpg_ranges, threads_per_block](rmat_gpu, shift_gpu, ngz_gpu, ref_coef_gpu,
                                                                postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                panrx_gpu, elrx_gpu, data_r, data_i, rng_states,
-                                                               pts_debug, angs_debug, bpj_wavelength,
-                                                               ranges[0] / c0, rp.fs * sim_upsample, rp.az_half_bw,
-                                                               rp.el_half_bw, max_pts_per_tri, debug_flag)
+                                                               pts_debug, angs_debug, settings['bpj_wavelength'],
+                                                               settings['ranges'][0] / c0, rp.fs * settings['sim_upsample'], rp.az_half_bw,
+                                                               rp.el_half_bw, settings['pts_per_tri'], debug_flag)
     cuda.synchronize()
     data_r[np.isnan(data_r)] = 0
     data_i[np.isnan(data_i)] = 0
@@ -423,12 +427,12 @@ for tidx in tqdm(np.arange(0, len(data_t), cpi_len)):
     # Create data using chirp
     rtdata = cupy.fft.fft(data_r + 1j * data_i, sim_up_fft_len, axis=0) * chirp_gpu[:, :tmp_len]
     # Decimate to fit backprojection
-    if not no_backproject:
+    if not settings['no_backproject']:
         rcdata = cupy.fft.ifft(rtdata * mfilt_gpu[:, :tmp_len], axis=0)[:sim_up_nsam:sim_bpj_decimation, :]
     cuda.synchronize()
 
     # Simulated data debug checks
-    if ts[0] < rp.gpst.mean() <= ts[-1] and not no_backproject and debug:
+    if ts[0] < rp.gpst.mean() <= ts[-1] and not settings['no_backproject'] and settings['debug']:
         print(f'Center of data at {tidx}')
         locp = rp.rxpos(ts[0])
         test = rcdata.get()
@@ -436,25 +440,25 @@ for tidx in tqdm(np.arange(0, len(data_t), cpi_len)):
         angd = angs_debug.get()
         locd = pts_debug.get()
 
-    if write_file:
+    if settings['write_file']:
         wr_data = cupy.fft.ifft(rtdata, axis=0).get()[:sim_up_nsam:sim_bpj_decimation, :]
         for idx in range(wr_data.shape[1]):
             att = 1
             pulse = wr_data[:, idx]
-            while abs(pulse).max() / 10**(att / 20) > 32767 and att < 31:
+            while abs(pulse).max() / 10 ** (att / 20) > 32767 and att < 31:
                 att += 1
-            if np.any(abs(pulse).max() / 10**(att / 20) > 32767):
+            if np.any(abs(pulse).max() / 10 ** (att / 20) > 32767):
                 print('TOO BIG OF A VALUE!')
             sdr_wr.writePulse(ts[idx], att, pulse)
 
     cuda.synchronize()
 
-    if not no_backproject:
+    if not settings['no_backproject']:
         bpj_grid = cupy.zeros(gx.shape, dtype=np.complex128)
         backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu, panrx_gpu,
                                                 elrx_gpu, panrx_gpu, elrx_gpu, rcdata, bpj_grid,
-                                                bpj_wavelength, ranges[0] / c0,
-                                                rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
+                                                settings['bpj_wavelength'], settings['ranges'][0] / c0,
+                                                rp.fs * settings['upsample'], bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
                                                 angs_debug, debug_flag)
 
         cuda.synchronize()
@@ -467,7 +471,7 @@ for tidx in tqdm(np.arange(0, len(data_t), cpi_len)):
         bpj_res += bpj_grid.get()
 
     # Reset the grid for truth data
-    if do_truth_backproject:
+    if settings['do_truth_backproject']:
         trtdata = cupy.fft.fft(cupy.array(sdr.getPulses(frames, 0),
                                           dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
         tupsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
@@ -475,13 +479,13 @@ for tidx in tqdm(np.arange(0, len(data_t), cpi_len)):
         tupsample_data[-fft_len // 2:, :] = trtdata[-fft_len // 2:, :]
         trtdata = cupy.fft.ifft(tupsample_data, axis=0)[:up_nsam, :]
         cupy.cuda.Device().synchronize()
-        bpj_grid2 = cupy.zeros((nbpj_pts, nbpj_pts), dtype=np.complex128)
+        bpj_grid2 = cupy.zeros((settings['nbpj_pts'], settings['nbpj_pts']), dtype=np.complex128)
 
         backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu, panrx_gpu,
                                                 elrx_gpu,
                                                 panrx_gpu, elrx_gpu, trtdata, bpj_grid2,
-                                                bpj_wavelength, ranges[0] / c0,
-                                                rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
+                                                settings['bpj_wavelength'], settings['ranges'][0] / c0,
+                                                rp.fs * settings['upsample'], bwidth, rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
                                                 angs_debug, False)
         cuda.synchronize()
         bpj_truedata += bpj_grid2.get()
@@ -493,12 +497,12 @@ for tidx in tqdm(np.arange(0, len(data_t), cpi_len)):
     del data_r
     del data_i
     del rtdata
-    if not no_backproject:
+    if not settings['no_backproject']:
         del rcdata
         del bpj_grid
     mempool.free_all_blocks()
 
-    if do_truth_backproject:
+    if settings['do_truth_backproject']:
         del trtdata
         del tupsample_data
         del bpj_grid2
@@ -511,18 +515,18 @@ del bgy_gpu
 del bgz_gpu
 del ngz_gpu
 del chirp_gpu
-if not no_backproject:
+if not settings['no_backproject']:
     del mfilt_gpu
 mempool.free_all_blocks()
 
-if write_file:
+if settings['write_file']:
     sdr_wr.writeXML(prf)
     print(f'File written as {sdr_wr.fnme}')
 
 # dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
 
-if debug and not no_backproject:
+if settings['debug'] and not settings['no_backproject']:
     print('Generating debug plots...')
     ngx, ngy, ngz = bg.getGrid()
     flight = rp.pos(rp.gpst)
@@ -539,9 +543,9 @@ if debug and not no_backproject:
     dfig.add_scatter3d(x=locd[0, ...].flatten() + locp[0], y=locd[1, ...].flatten() + locp[1],
                        z=locd[2, ...].flatten() + locp[2], marker={'color': angd[2, ...].flatten()}, mode='markers',
                        name='SimGrid Projected Positions')
-    dfig.add_scatter3d(x=locd_bj[0, :nbpj_pts, :nbpj_pts].flatten() + locp[0],
-                       y=locd_bj[1, :nbpj_pts, :nbpj_pts].flatten() + locp[1],
-                       z=locd_bj[2, :nbpj_pts, :nbpj_pts].flatten() + locp[2], mode='markers',
+    dfig.add_scatter3d(x=locd_bj[0, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[0],
+                       y=locd_bj[1, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[1],
+                       z=locd_bj[2, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[2], mode='markers',
                        name='BPJ Grid Projected Positions')
     dfig.show()
 
@@ -554,7 +558,7 @@ if debug and not no_backproject:
     fig.show()
 
     plt.figure('Doppler data')
-    tayd = taylor(cpi_len)
+    tayd = taylor(settings['cpi_len'])
     taydopp = np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1))
     plt.subplot(2, 1, 1)
     plt.title('Generated')
@@ -569,7 +573,7 @@ if debug and not no_backproject:
     plt.imshow(db(test))
     plt.axis('tight')
 
-    if do_truth_backproject:
+    if settings['do_truth_backproject']:
         bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
         bfig.show()
 
@@ -611,8 +615,10 @@ if debug and not no_backproject:
     plt.plot(np.angle(chirp))
     plt.axis('off')
 
-    gps_written = loadPostCorrectionsGPSData('/home/jeff/repo/Debug/sim_write_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
-    gps_orig = loadPostCorrectionsGPSData('/home/jeff/repo/Debug/09202021/SAR_09202021_151245_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
+    gps_written = loadPostCorrectionsGPSData(
+        '/home/jeff/repo/Debug/sim_write_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
+    gps_orig = loadPostCorrectionsGPSData(
+        '/home/jeff/repo/Debug/09202021/SAR_09202021_151245_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
     ew, nw, uw = llh2enu(gps_written['rx_lat'], gps_written['rx_lon'], gps_written['rx_alt'], bg.ref)
     ew = gps_written['rx_lat'] * gps_written['latConv']
     nw = gps_written['rx_lon'] * gps_written['lonConv']
