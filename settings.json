@@ -7,24 +7,39 @@
     "debug": true,
     "do_truth_backproject": false,
     "use_sdr_file": false,
+    "use_custom_params": true,
+    "no_backproject": false,
     "nbpj_pts": 100,
-    "grid_width": 300,
-    "grid_height": 300,
+    "grid_width": 100,
+    "grid_height": 100,
     "grid_center": [
         40.1004287396,
         -111.6582602596,
         1381.6525315054919
     ],
+    "gimbal_offset": [
+	-0.3461, 
+	1.3966, 
+	-1.2522
+    ],
+    "gimbal_rotations": [
+	0.0, 
+	0.0, 
+	-1.5707963267948966
+    ],
+    "el_beamwidth": 15.0,
+    "az_beamwidth": 10.0,
+    "gimbal_dep_angle": 38.0,
     "ncals": 500,
     "collect_time": 18.45,
     "collect_alt": 1524,
     "custom_waveform": false,
-    "pulse_length_percent": 0.12,
+    "pulse_length_percent": 0.5,
     "center_frequency": 10000000000.0,
     "sample_frequency": 2000000000.0,
     "bandwidth": 500000000.0,
-    "prf": 2500,
+    "prf": 2600,
     "write_file": true,
     "write_fnme": "/home/jeff/repo/Raw/sim_write.sar",
-    "noise_level": 0.0000001
+    "noise_level": 0.00000001
 }
