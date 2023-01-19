@@ -196,7 +196,7 @@ class RadarPlatform(Platform):
 
     def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, tx_offset=None, rx_offset=None,
                  gimbal=None, gimbal_offset=None, gimbal_rotations=None, dep_angle=45.,
-                 squint_angle=0., az_bw=10., el_bw=10., fs=2e9, gps_data=None):
+                 squint_angle=0., az_bw=10., el_bw=10., fs=2e9, gps_data=None, tx_num=0, rx_num=0):
         """
         Init function.
         :param e: array. Eastings in meters used to generate position function.
@@ -226,6 +226,8 @@ class RadarPlatform(Platform):
         self.fs = fs
         self.near_range_angle = self.dep_ang + self.el_half_bw
         self.far_range_angle = self.dep_ang - self.el_half_bw
+        self.rx_num = rx_num
+        self.tx_num = tx_num
 
     def calcRanges(self, height, exp_factor=1):
         """
@@ -351,7 +353,8 @@ class SDRPlatform(RadarPlatform):
                          gimbal_offset=goff, gimbal_rotations=grot, dep_angle=channel_dep,
                          squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
                          az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
-                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_data=gps_data)
+                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_data=gps_data, tx_num=tx_num,
+                         rx_num=rx_num)
         self._sdr = sdr
         self.origin = origin
         self._channel = channel

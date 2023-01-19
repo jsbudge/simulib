@@ -1,45 +1,76 @@
 {
     "sim_upsample": 1,
     "upsample": 1,
-    "channel": 0,
     "cpi_len": 32,
-    "pts_per_tri": 1,
+    "pts_per_tri": 2,
     "debug": true,
     "do_truth_backproject": false,
-    "use_sdr_file": false,
+    "use_sdr_file": true,
+    "channel": 0,
     "use_custom_params": true,
     "no_backproject": false,
-    "nbpj_pts": 100,
+    "nbpj_pts": 400,
     "grid_width": 100,
     "grid_height": 100,
     "grid_center": [
-        40.1004287396,
-        -111.6582602596,
-        1381.6525315054919
+        40.098898,
+        -111.659663,
+        1399
     ],
     "gimbal_offset": [
-	-0.3461, 
-	1.3966, 
-	-1.2522
+        -0.3461,
+        1.3966,
+        -1.2522
     ],
     "gimbal_rotations": [
-	0.0, 
-	0.0, 
-	-1.5707963267948966
+        0.0,
+        0.0,
+        -1.5707963267948966
     ],
-    "el_beamwidth": 15.0,
-    "az_beamwidth": 10.0,
     "gimbal_dep_angle": 38.0,
+    "prf": 2600,
     "ncals": 500,
     "collect_time": 18.45,
     "collect_alt": 1524,
-    "custom_waveform": false,
-    "pulse_length_percent": 0.12,
-    "center_frequency": 10000000000.0,
-    "sample_frequency": 2000000000.0,
-    "bandwidth": 1500000000.0,
-    "prf": 1300,
     "write_file": false,
     "write_fnme": "/home/jeff/repo/Raw/sim_write.sar",
-    "noise_level": 0.00000001
+    "noise_level": 1e-08,
+    "sample_frequency": 2000000000.0,
+    "tx": [
+        {
+            "custom_waveform": false,
+            "pulse_length_percent": 0.5,
+            "center_frequency": 34000000000.0,
+            "bandwidth": 750000000.0
+        },
+        {
+            "custom_waveform": false,
+            "pulse_length_percent": 0.5,
+            "center_frequency": 34000000000.0,
+            "sample_frequency": 2000000000.0,
+            "bandwidth": 750000000.0
+        }
+    ],
+    "antennas": [
+        {
+            "offset": [
+                0.2241,
+                0.0,
+                0.1344
+	    ],
+            "az_beamwidth": 10.0,
+            "el_beamwidth": 15.0,
+            "dopp_beamwidth": 15.0
+        },
+        {
+            "offset": [
+                -0.1339,
+                0.0,
+                0.1344
+	    ],
+            "az_beamwidth": 10.0,
+            "el_beamwidth": 15.0,
+            "dopp_beamwidth": 15.0
+        }
+    ]
 }

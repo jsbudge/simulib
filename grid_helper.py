@@ -78,7 +78,8 @@ class Environment(object):
         pos_r = np.squeeze(np.einsum('ji, mni -> jmn', irmat, [pts - self._transforms[1]])).T + \
                 np.array([self.shape[0] / 2, self.shape[1] / 2])
         self.setGrid(interpn((np.arange(self.refgrid.shape[0]),
-                              np.arange(self.refgrid.shape[1])), self.refgrid, pos_r).reshape(x.shape), rmat, shift)
+                              np.arange(self.refgrid.shape[1])), self.refgrid, pos_r, bounds_error=False,
+                             fill_value=0).reshape(x.shape), rmat, shift)
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
