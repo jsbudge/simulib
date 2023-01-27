@@ -2,16 +2,16 @@
     "sim_upsample": 1,
     "upsample": 1,
     "cpi_len": 32,
-    "pts_per_tri": 2,
-    "debug": true,
+    "pts_per_tri": 5,
+    "debug": false,
     "do_truth_backproject": false,
-    "use_sdr_file": true,
+    "use_sdr_gps": false,
+    "use_sdr_waveform": false,
     "channel": 0,
-    "use_custom_params": true,
-    "no_backproject": false,
-    "nbpj_pts": 400,
-    "grid_width": 100,
-    "grid_height": 100,
+    "no_backproject": true,
+    "nbpj_pts": 300,
+    "grid_width": 300,
+    "grid_height": 300,
     "grid_center": [
         40.098898,
         -111.659663,
@@ -28,49 +28,48 @@
         -1.5707963267948966
     ],
     "gimbal_dep_angle": 38.0,
-    "prf": 2600,
+    "prf": 1300,
     "ncals": 500,
     "collect_time": 18.45,
     "collect_alt": 1524,
-    "write_file": false,
+    "collect_vel": 150,
+    "write_file": true,
     "write_fnme": "/home/jeff/repo/Raw/sim_write.sar",
-    "noise_level": 1e-08,
+    "noise_level": 1e-06,
     "sample_frequency": 2000000000.0,
     "tx": [
         {
-            "custom_waveform": false,
+            "custom_waveform": true,
             "pulse_length_percent": 0.5,
-            "center_frequency": 34000000000.0,
-            "bandwidth": 750000000.0
-        },
-        {
-            "custom_waveform": false,
-            "pulse_length_percent": 0.5,
-            "center_frequency": 34000000000.0,
-            "sample_frequency": 2000000000.0,
-            "bandwidth": 750000000.0
+            "center_frequency": 10000000000.0,
+            "bandwidth": 750000000.0,
+	    "power": 100,
+	    "antenna": 0
         }
+    ],
+    "rx": [
+	0
     ],
     "antennas": [
         {
             "offset": [
-                0.2241,
+                0.0,
                 0.0,
                 0.1344
 	    ],
             "az_beamwidth": 10.0,
             "el_beamwidth": 15.0,
-            "dopp_beamwidth": 15.0
+            "dopp_beamwidth": 10.0
         },
-        {
+	{
             "offset": [
-                -0.1339,
+                -1.5,
                 0.0,
-                0.1344
+                -0.1344
 	    ],
             "az_beamwidth": 10.0,
             "el_beamwidth": 15.0,
-            "dopp_beamwidth": 15.0
+            "dopp_beamwidth": 10.0
         }
     ]
 }

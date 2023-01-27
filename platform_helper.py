@@ -196,7 +196,7 @@ class RadarPlatform(Platform):
 
     def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, tx_offset=None, rx_offset=None,
                  gimbal=None, gimbal_offset=None, gimbal_rotations=None, dep_angle=45.,
-                 squint_angle=0., az_bw=10., el_bw=10., fs=2e9, gps_data=None, tx_num=0, rx_num=0):
+                 squint_angle=0., az_bw=10., el_bw=10., fs=2e9, gps_data=None, tx_num=0, rx_num=0, wavenumber=0):
         """
         Init function.
         :param e: array. Eastings in meters used to generate position function.
@@ -218,7 +218,8 @@ class RadarPlatform(Platform):
         :param fs: float. Sampling frequency in Hz.
         :param gps_data: DataFrame. This is a dataframe of GPS data, taken from the GPS debug data in APS. Optional.
         """
-        super().__init__(e, n, u, r, p, y, t, gimbal, gimbal_offset, gimbal_rotations, tx_offset, rx_offset, gps_data)
+        super().__init__(e, n, u, r, p, y, t, gimbal, np.array(gimbal_offset), np.array(gimbal_rotations),
+                         tx_offset, rx_offset, gps_data)
         self.dep_ang = dep_angle * DTR
         self.squint_ang = squint_angle * DTR
         self.az_half_bw = az_bw * DTR / 2
@@ -228,6 +229,7 @@ class RadarPlatform(Platform):
         self.far_range_angle = self.dep_ang - self.el_half_bw
         self.rx_num = rx_num
         self.tx_num = tx_num
+        self.wavenumber = wavenumber
 
     def calcRanges(self, height, exp_factor=1):
         """
@@ -250,7 +252,7 @@ class RadarPlatform(Platform):
         """
         nrange, _ = self.calcRanges(height)
         plength_s = (nrange * 2 / c0) * pulse_length_percent
-        return int(np.round(plength_s * self.fs)) if use_tac else plength_s
+        return int(np.ceil(plength_s * self.fs)) if use_tac else plength_s
 
     def calcNumSamples(self, height, plp=1.):
         """
