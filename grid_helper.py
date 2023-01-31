@@ -129,7 +129,7 @@ class SDREnvironment(Environment):
 
     def __init__(self, sdr_file, local_grid=None, origin=None):
         # Load in the SDR file
-        sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
+        sdr = SDRParse(sdr_file) if isinstance(sdr_file, str) else sdr_file
         grid = None
         print('SDR loaded')
         try:
@@ -147,10 +147,15 @@ class SDREnvironment(Environment):
         self._asi = asi
         self.heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
         if sdr.ash is None:
-            hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
-            pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
-                  (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
-            alt = getElevation(pt)
+            try:
+                hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
+                pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
+                      (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
+                alt = getElevation(pt)
+            except KeyError:
+                alt = sdr.gps_data['alt'].mean()
+                pt = (sdr.gps_data['lat'].mean(), sdr.gps_data['lon'].mean())
+                hght = alt + getElevation(pt)
             mrange = hght / np.tan(sdr.ant[0].dep_ang)
             if origin is None:
                 ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,

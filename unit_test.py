@@ -17,6 +17,7 @@ import cupyx.scipy.signal
 from numba import cuda, njit
 from numba.cuda.random import create_xoroshiro128p_states, init_xoroshiro128p_states
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 from scipy.signal.windows import taylor
 import plotly.express as px
 import plotly.graph_objects as go
@@ -96,7 +97,7 @@ with open('./settings.json', 'r') as sf:
 if len(command_line_args) > 1:
     bg_file = command_line_args[1]
 else:
-    bg_file = '/data5/SAR_DATA/2021/09202021/SAR_09202021_151245.sar'
+    bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_130706.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
 
 print(f'Loading SAR file {bg_file}...')
@@ -129,21 +130,24 @@ print('Done.')
 # Generate a platform
 print('Generating platform...', end='')
 rps = []
-start_loc = llh2enu(bg.sdr.xml['Flight_Line']['Start_Latitude_D'], bg.sdr.xml['Flight_Line']['Start_Longitude_D'],
-                    bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
-stop_loc = llh2enu(bg.sdr.xml['Flight_Line']['Stop_Latitude_D'], bg.sdr.xml['Flight_Line']['Stop_Longitude_D'],
-                   bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
-course_heading = np.arctan2(start_loc[0] - stop_loc[0], start_loc[1] - stop_loc[1]) + np.pi
+
 settings['nsam'] = 0
 if settings['use_sdr_gps']:
     fdelay = 55
     rps.append(SDRPlatform(sdr, bg.ref, channel=settings['channel']))
+    rps[0].rx_num = 0
+    rps[0].tx_num = 0
     settings['tx'][0]['nr'] = \
         rps[-1].calcPulseLength(fdelay, settings['tx'][0]['pulse_length_percent'], use_tac=True)
     settings['ranges'] = rps[-1].calcRangeBins(fdelay, settings['upsample'], settings['tx'][0]['pulse_length_percent'])
     settings['nsam'] = rps[0].calcNumSamples(fdelay, settings['tx'][0]['pulse_length_percent'])
 
 else:
+    start_loc = llh2enu(bg.sdr.xml['Flight_Line']['Start_Latitude_D'], bg.sdr.xml['Flight_Line']['Start_Longitude_D'],
+                        bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
+    stop_loc = llh2enu(bg.sdr.xml['Flight_Line']['Stop_Latitude_D'], bg.sdr.xml['Flight_Line']['Stop_Longitude_D'],
+                       bg.sdr.xml['Flight_Line']['Flight_Line_Altitude_M'], bg.ref)
+    course_heading = np.arctan2(start_loc[0] - stop_loc[0], start_loc[1] - stop_loc[1]) + np.pi
     gps_times = sdr.gps_data.index.values
     nt = len(gps_times)
     for tx_ant, rx_ant in np.dstack(np.meshgrid(*[settings['tx'], settings['rx']], indexing='ij')).reshape(-1, 2):
@@ -693,10 +697,19 @@ if settings['debug'] and not settings['no_backproject']:
         plt.plot(db(settings['tx'][t]['chirp']), c='blue')
         plt.plot(db(settings['tx'][t]['mfilt']), c='orange')
 
-    plt.figure('BeamPattern')
-    plt.scatter(locd[0, ...].ravel(), locd[1, ...].ravel(), c=angd[2, ...].ravel())
+    oval_times = rps[0].gpst[::len(rps[0].gpst) // 10]
+    plat_height = 0 if settings['use_sdr_gps'] else rps[0].pos(oval_times)[2].mean()
+    midrange = (rps[0].calcRanges(plat_height)[0] + rps[0].calcRanges(plat_height)[1]) / 2
+    swath = np.sqrt(rps[0].calcRanges(plat_height)[1]**2 - plat_height**2) - \
+        np.sqrt(rps[0].calcRanges(plat_height)[0]**2 - plat_height**2)
 
-    gps_written = loadPostCorrectionsGPSData(
+    fig, ax = plt.subplots(1, 1)
+    ax.scatter(locd[0, ...].ravel(), locd[1, ...].ravel(), c=angd[2, ...].ravel())
+    for ot in oval_times:
+        ax.add_patch(Ellipse((rps[0].boresight(ot).flatten() * midrange + rp.pos(ot))[:2],
+                             midrange * rps[0].az_half_bw * 2, swath, angle=rps[0].pan(ot) / DTR, fill=False))
+
+    '''gps_written = loadPostCorrectionsGPSData(
         '/home/jeff/repo/Debug/sim_write_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
     gps_orig = loadPostCorrectionsGPSData(
         '/home/jeff/repo/Debug/09202021/SAR_09202021_151245_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
@@ -860,6 +873,6 @@ if settings['debug'] and not settings['no_backproject']:
         plt.plot(debug_refchirp.real)
         plt.plot(debug_mfilt.real)
     except KeyError:
-        print('Written file not found for debug.')
+        print('Written file not found for debug.')'''
 
     plt.show()
