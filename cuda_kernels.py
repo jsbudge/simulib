@@ -441,7 +441,8 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
                     reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
-                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) / (two_way_rng * two_way_rng)
+                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt],
+                                                pantx[tt], eltx[tt], bw_az, bw_el) / (two_way_rng * two_way_rng)
                     if debug_flag and tt == 0:
                         calc_angs[2, px, py] = att
                     acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
