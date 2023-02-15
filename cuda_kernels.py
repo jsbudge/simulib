@@ -248,51 +248,103 @@ def getAngleBlock(sp, data, range_bin, az, el, rx, fc):
 
 
 @cuda.jit
-def calcBounceFromMesh(tri_vert_indices, vert_xyz, vert_norms, vert_reflectivity, source_xyz, bounce_uv, return_xyz,
-                       return_pow, bounce_xyz):
-    tri, tt = cuda.grid(ndim=2)
-    if tri < tri_vert_indices.shape[0] and tt < source_xyz.shape[1]:
-        tv1 = tri_vert_indices[tri, 0]
-        tv2 = tri_vert_indices[tri, 1]
-        tv3 = tri_vert_indices[tri, 2]
+def calcBounceFromMesh(rot, shift, vgz, vert_reflectivity,
+                                source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts, calc_angs,
+                                wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
+    # sourcery no-metrics
+    px, py = cuda.grid(ndim=2)
+    if px < vgz.shape[0] and py < vgz.shape[1]:
+        # Load in all the parameters that don't change
+        n_samples = pd_r.shape[0]
+        wavenumber = 2 * np.pi / wavelength
 
-        for n in range(bounce_uv.shape[0]):
-            u = bounce_uv[n, 0]
-            v = bounce_uv[n, 1]
-            w = 1 - (u + v)
-            # Get barycentric coordinates for bounce points
-            bar_x = vert_xyz[tv1, 0] * u + vert_xyz[tv2, 0] * v + vert_xyz[tv3, 0] * w
-            bar_y = vert_xyz[tv1, 1] * u + vert_xyz[tv2, 1] * v + vert_xyz[tv3, 1] * w
-            bar_z = vert_xyz[tv1, 2] * u + vert_xyz[tv2, 2] * v + vert_xyz[tv3, 2] * w
+        for ntri in range(pts_per_tri):
+            # I'm not sure why but vgz and vert_reflectivity need their indexes swapped here
+            if ntri != 0 and px < vgz.shape[0] - 1 and py < vgz.shape[1] - 1:
+                bx = px + .5 - \
+                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
+                by = py + .5 - \
+                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
 
-            norm_x = vert_norms[tv1, 0] * u + vert_norms[tv2, 0] * v + vert_norms[tv3, 0] * w
-            norm_y = vert_norms[tv1, 1] * u + vert_norms[tv2, 1] * v + vert_norms[tv3, 1] * w
-            norm_z = vert_norms[tv1, 2] * u + vert_norms[tv2, 2] * v + vert_norms[tv3, 2] * w
+                # Apply barycentric interpolation to get random point height and power
+                x3 = py - 1 if bx < py else py + 1
+                y3 = px
+                z3 = vgz[x3, y3]
+                r3 = vert_reflectivity[x3, y3]
+                x2 = py
+                y2 = px - 1 if by < px else px + 1
+                z2 = vgz[x2, y2]
+                r2 = vert_reflectivity[x2, y2]
 
-            # Calculate out the angles in azimuth and elevation for the bounce
-            s_tx = bar_x - source_xyz[0, tt]
-            s_ty = bar_y - source_xyz[1, tt]
-            s_tz = bar_z - source_xyz[2, tt]
-            rng = math.sqrt(s_tx * s_tx + s_ty * s_ty + s_tz * s_tz)
+                lam1 = ((y2 - y3) * (bx - x3) + (x3 - x2) * (by - y3)) / \
+                       ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3))
+                lam2 = ((y3 - py) * (bx - x3) + (px - x3) * (by - y3)) / \
+                       ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3))
+                lam3 = 1 - lam1 - lam2
 
-            # Calculate out the bounce angles
-            rnorm = norm_x * s_tx / rng + norm_y * s_ty / rng + norm_z * s_tz / rng
-            b_y = -(2 * rnorm * norm_x - s_tx / rng)
-            b_x = -(2 * rnorm * norm_y - s_ty / rng)
-            b_z = -(2 * rnorm * norm_z - s_tz / rng)
+                # Quick check to see if something's out of whack with the interpolation
+                # lam3 + lam1 + lam2 should always be one
+                if lam3 < 0.:
+                    continue
+                bar_z = vgz[py, px] * lam1 + lam2 * z2 + lam3 * z3
+                if lam1 < lam2 and lam1 < lam3:
+                    gpr = vert_reflectivity[py, px]
+                elif lam2 < lam1 and lam2 < lam3:
+                    gpr = r2
+                else:
+                    gpr = r3
+                # gpr = lam1 * vert_reflectivity[py, px] + lam2 * r2 + lam3 * r3
+            elif ntri != 0:
+                continue
+            else:
+                bx = float(px)
+                by = float(py)
+                bar_z = vgz[py, px]
+                gpr = vert_reflectivity[py, px]
+            bx -= float(vgz.shape[0]) / 2.
+            by -= float(vgz.shape[1]) / 2.
+            bar_x = rot[0, 0] * bx + rot[0, 1] * by + shift[0]
+            bar_y = rot[1, 0] * bx + rot[1, 1] * by + shift[1]
 
-            # Calc power multiplier based on range, reflectivity
-            pt_idx = tri * bounce_uv.shape[0] + n - 1
-            pow_mult = vert_reflectivity[tv1] * u + vert_reflectivity[tv2] * v + vert_reflectivity[tv3] * w
-            return_xyz[pt_idx, tt, 0] = s_tx
-            return_xyz[pt_idx, tt, 1] = s_ty
-            return_xyz[pt_idx, tt, 2] = s_tz
+            for tt in range(source_xyz.shape[1]):
 
-            bounce_xyz[pt_idx, tt, 0] = b_x
-            bounce_xyz[pt_idx, tt, 1] = b_y
-            bounce_xyz[pt_idx, tt, 2] = b_z
+                # Calculate out the angles in azimuth and elevation for the bounce
+                tx = bar_x - source_xyz[0, tt]
+                ty = bar_y - source_xyz[1, tt]
+                tz = bar_z - source_xyz[2, tt]
+                rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
-            return_pow[pt_idx, tt] = pow_mult
+                rx = bar_x - receive_xyz[0, tt]
+                ry = bar_y - receive_xyz[1, tt]
+                rz = bar_z - receive_xyz[2, tt]
+                r_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
+                r_el = -math.asin(rz / r_rng)
+                r_az = math.atan2(-ry, rx) + np.pi / 2
+                if debug_flag and tt == 0:
+                    calc_pts[0, px, py] = rx
+                    calc_pts[1, px, py] = ry
+                    calc_pts[2, px, py] = rz
+                    calc_angs[0, px, py] = r_el
+                    calc_angs[1, px, py] = r_az
+
+                two_way_rng = rng + r_rng
+                rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+                but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+
+                # if debug_flag and tt == 0:
+                #     calc_angs[2, px, py] = gpr
+
+                if n_samples > but > 0:
+                    # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
+                    reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
+                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt],
+                                                pantx[tt], eltx[tt], bw_az, bw_el) / (two_way_rng * two_way_rng)
+                    if debug_flag and tt == 0:
+                        calc_angs[2, px, py] = att
+                    acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
+                    cuda.atomic.add(pd_r, (but, np.uint16(tt)), acc_val.real)
+                    cuda.atomic.add(pd_i, (but, np.uint16(tt)), acc_val.imag)
+                cuda.syncthreads()
 
 
 @cuda.jit
