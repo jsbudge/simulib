@@ -230,6 +230,10 @@ class RadarPlatform(Platform):
         self.rx_num = rx_num
         self.tx_num = tx_num
         self.wavenumber = wavenumber
+        self.pulse = None
+        self.mfilt = None
+        self.fc = None
+        self.bwidth = None
 
     def calcRanges(self, height, exp_factor=1):
         """
@@ -242,39 +246,51 @@ class RadarPlatform(Platform):
         frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw * exp_factor)
         return nrange, frange
 
-    def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False):
+    def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False, nrange=None):
         """
         Calculates the pulse length given a height off the ground and a pulse percent.
+        :param nrange: float. Near range, for override, if desired.
         :param height: float. Height of antenna off the ground in meters.
         :param pulse_length_percent: float, <1. Percentage of maximum pulse length to use in radar.
         :param use_tac: bool. If True, returns the pulse length in TAC. If False, returns in seconds.
         :return: Expected pulse length in either TAC or seconds.
         """
-        nrange, _ = self.calcRanges(height)
+        if nrange is None:
+            nrange, _ = self.calcRanges(height)
         plength_s = (nrange * 2 / c0) * pulse_length_percent
         return int(np.ceil(plength_s * self.fs)) if use_tac else plength_s
 
-    def calcNumSamples(self, height, plp=1.):
+    def calcNumSamples(self, height, plp=1., ranges=None):
         """
         Calculate the number of samples in a pulse.
+        :param ranges: 2-tuple. (Near range, Far range) for range override if desired.
         :param height: float. Height of antenna off the ground in meters.
         :param plp: float, <1. Percentage of maximum pulse length to use in radar.
         :return: Number of samples in a returned pulse.
         """
-        nrange, frange = self.calcRanges(height)
+        if ranges is None:
+            nrange, frange = self.calcRanges(height)
+        else:
+            nrange = ranges[0]
+            frange = ranges[1]
         pl_s = self.calcPulseLength(height, plp)
         return int((np.ceil((2 * frange / c0 + pl_s) * TAC) - np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
 
-    def calcRangeBins(self, height, upsample=1, plp=1.):
+    def calcRangeBins(self, height, upsample=1, plp=1., ranges=None):
         """
         Calculates the range bins for a given pulse.
+        :param ranges: 2-tuple. (Near range, Far range) for range override if desired.
         :param height: float. Height of antenna off the ground in meters.
         :param upsample: int. Upsample factor.
         :param plp: float, <1. Percentage of maximum pulse length to use in radar.
         :return: array of range bins.
         """
-        nrange, frange = self.calcRanges(height)
-        pl_s = self.calcPulseLength(height, plp)
+        if ranges is None:
+            nrange, frange = self.calcRanges(height)
+        else:
+            nrange = ranges[0]
+            frange = ranges[1]
+        pl_s = self.calcPulseLength(height, plp, nrange=None if ranges is None else ranges[0])
         nsam = int((np.ceil((2 * frange / c0 + pl_s) * TAC) -
                     np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
         MPP = c0 / self.fs / upsample / 2

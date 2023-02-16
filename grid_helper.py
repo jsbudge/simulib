@@ -111,15 +111,11 @@ class Environment(object):
 
 class MapEnvironment(Environment):
 
-    def __init__(self, origin, extent, npts_background=500):
-        lats = np.linspace(origin[0] - extent[0] / 2 / 111111, origin[0] + extent[0] / 2 / 111111, npts_background)
-        lons = np.linspace(origin[1] - extent[1] / 2 / 111111, origin[1] + extent[1] / 2 / 111111, npts_background)
-        lt, ln = np.meshgrid(lats, lons)
-        ltp = lt.flatten()
-        lnp = ln.flatten()
-        e, n, u = llh2enu(ltp, lnp, getElevationMap(ltp, lnp), origin)
+    def __init__(self, origin, extent, npts_background=(500, 500)):
         self.origin = origin
-        super().__init__(grid=np.array([e.reshape(grid.shape), n.reshape(grid.shape), u.reshape(grid.shape)]).T)
+        self.ref = origin
+        gp = getGridParams(origin, (0, 0, 0), extent[0], extent[1], npts_background)
+        super().__init__(gp[1], gp[0], np.zeros(npts_background))
 
 
 class SDREnvironment(Environment):
@@ -245,3 +241,12 @@ def mesh(grid, tri_err, num_vertices):
     pty = tri.points[:, 1]
     reflectivity = tri.find_simplex(pts).reshape((grid.shape[1], grid.shape[2]))
     return ptx, pty, reflectivity, tri.simplices
+
+
+def getGridParams(ref, pos, width, height, npts, az=0):
+    shift_x, shift_y, _ = llh2enu(*pos, ref)
+    rmat = np.array([[np.cos(az), -np.sin(az)],
+                     [np.sin(az), np.cos(az)]]).dot(np.diag([width / npts[0], height / npts[1]]))
+
+    return (shift_x, shift_y), rmat
+
