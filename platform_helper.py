@@ -213,8 +213,8 @@ class RadarPlatform(Platform):
         :param gimbal_rotations: 3-tuple. Initial gimbal rotation from the inertial frame in degrees.
         :param dep_angle: float. Depression angle of antenna in degrees.
         :param squint_angle: float. Squint angle of antenna in degrees.
-        :param az_bw: float. Beamwidth of antenna in azimuth.
-        :param el_bw: float. Beamwidth of antenna in elevation.
+        :param az_bw: float. Beamwidth of antenna in azimuth, in degrees.
+        :param el_bw: float. Beamwidth of antenna in elevation, in degrees.
         :param fs: float. Sampling frequency in Hz.
         :param gps_data: DataFrame. This is a dataframe of GPS data, taken from the GPS debug data in APS. Optional.
         """

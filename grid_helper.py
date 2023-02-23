@@ -114,7 +114,7 @@ class MapEnvironment(Environment):
     def __init__(self, origin, extent, npts_background=(500, 500)):
         self.origin = origin
         self.ref = origin
-        gp = getGridParams(origin, (0, 0, 0), extent[0], extent[1], npts_background)
+        gp = getGridParams(origin, origin, extent[0], extent[1], npts_background)
         super().__init__(gp[1], gp[0], np.zeros(npts_background))
 
 
