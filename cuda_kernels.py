@@ -475,7 +475,7 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 rz = bar_z - receive_xyz[2, tt]
                 r_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
                 r_el = -math.asin(rz / r_rng)
-                r_az = math.atan2(-ry, rx) + np.pi / 2
+                r_az = math.atan2(rx, ry)
                 if debug_flag and tt == 0:
                     calc_pts[0, px, py] = rx
                     calc_pts[1, px, py] = ry
