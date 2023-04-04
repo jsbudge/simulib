@@ -375,6 +375,30 @@ def hornPattern(fc, width, height, theta=None, phi=None, deg_per_bin=.5, az_only
     return theta, phi, AF
 
 
+def calcSNR(p_s, ant_g, az, el, wavelength, pulse_time, bandw, dopp_mult, rng, rcs_val=None):
+    sig = calcPower(p_s, ant_g, az, el, wavelength, pulse_time, bandw, dopp_mult, rng, rcs_val)
+    # Boltzmans constant
+    kb = 1.3806503e-23
+    # the reference temperature (in Kelvin)
+    T0 = 290.0
+    # Noise figure of 3dB
+    F = 10.0 ** (3.0 / 10.0)
+    N0 = kb * T0 * F
+    sigma_n = np.sqrt(N0 * bandw)
+    noise = sigma_n ** 2
+    return db(np.array([sig / noise]))[0]
+
+
+def calcPower(p_s, ant_g, az, el, wavelength, pulse_time, bandw, dopp_mult, rng, rcs_val=None):
+    if rcs_val is None:
+        sig = p_s * ant_g ** 2 * np.tan(az) * np.tan(el) * wavelength ** 2 * pulse_time * bandw * dopp_mult
+        sig /= (4 * np.pi) ** 3 * rng ** 2
+    else:
+        sig = p_s * ant_g ** 2 * rcs_val * wavelength ** 2 * pulse_time * bandw * dopp_mult
+        sig /= (4 * np.pi) ** 3 * rng ** 4
+    return sig
+
+
 def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_only=False, horn_dim=None,
                 horn_pattern=None):
     use_pat = False
@@ -408,6 +432,46 @@ def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_
 ------------------- RENDERING AND PLOTTING FUNCTIONS -------------------------------
 ------------------------------------------------------------------------------------
 '''
+
+
+def createFigureDict(xrngs=None, yrngs=None, zrngs=None):
+    figure = {
+        'data': [],
+        'layout': {},
+        'frames': []
+    }
+    figure['layout']['scene'] = dict(
+        xaxis=dict(range=xrngs, autorange=False),
+        yaxis=dict(range=yrngs, autorange=False),
+        zaxis=dict(range=zrngs, autorange=False),
+        aspectratio=dict(x=1, y=1, z=1))
+    figure['layout']['updatemenus'] = [dict(
+        type="buttons",
+        buttons=[dict(label="Play",
+                      method="animate",
+                      args=[None]),
+                 {"args": [[None], {"frame": {"duration": 0, "redraw": True},
+                                    "mode": "immediate",
+                                    "transition": {"duration": 0}}],
+                  "label": "Pause",
+                  "method": "animate"}
+                 ])]
+    sliders_dict = {
+        'active': 0, 'yanchor': 'top', 'xanchor': 'left',
+        'currentvalue': {
+            'font': {'size': 20},
+            'prefix': 'Time: ',
+            'visible': True,
+            'xanchor': 'right'
+        },
+        'transition': {'duration': 0},
+        'pad': {'b': 10, 't': 50},
+        'len': 0.9,
+        'x': 0.1,
+        'y': 0,
+        'steps': []
+    }
+    return figure, sliders_dict
 
 
 class PlotWithSliders(object):

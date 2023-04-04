@@ -2,6 +2,7 @@ import cmath
 import math
 from numba import cuda, njit
 from numba.cuda.random import xoroshiro128p_uniform_float32
+from simulation_functions import findPowerOf2
 import numpy as np
 
 c0 = 299792458.0
@@ -494,7 +495,8 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
                     reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
                     att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt],
-                                                pantx[tt], eltx[tt], bw_az, bw_el) / (two_way_rng * two_way_rng)
+                                                pantx[tt], eltx[tt], bw_az, bw_el) / \
+                          (two_way_rng * two_way_rng * two_way_rng * two_way_rng)
                     if debug_flag and tt == 0:
                         calc_angs[2, px, py] = att
                     acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
@@ -629,32 +631,16 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
         final_grid[px, py] = acc_val
 
 
-@njit
-def apply_shift(ray: np.ndarray, freq_shift: np.float64, samp_rate: np.float64) -> np.ndarray:
-    # apply frequency shift
-    precache = 2j * np.pi * freq_shift / samp_rate
-    new_ray = np.empty_like(ray)
-    for idx, val in enumerate(ray):
-        new_ray[idx] = val * np.exp(precache * idx)
-    return new_ray
-
-
-def ambiguity(s1, s2, prf, dopp_bins, mag=True, normalize=True):
+def ambiguity(s1, s2, prf, dopp_bins, a_fs, mag=True, normalize=True):
     fdopp = np.linspace(-prf / 2, prf / 2, dopp_bins)
     fft_sz = findPowerOf2(len(s1)) * 2
     s1f = np.fft.fft(s1, fft_sz).conj().T
-    shift_grid = np.zeros((len(s2), dopp_bins), dtype=np.complex64)
-    for n in range(dopp_bins):
-        shift_grid[:, n] = apply_shift(s2, fdopp[n], fs)
-    s2f = np.fft.fft(shift_grid, n=fft_sz, axis=0)
-    A = np.fft.fftshift(np.fft.ifft(s2f * s1f[:, None], axis=0, n=fft_sz * 2),
-                        axes=0)[fft_sz - dopp_bins // 2: fft_sz + dopp_bins // 2]
+    shift_grid = np.arange(len(s2)) / a_fs
+    sg = np.fft.fft(np.array([np.exp(2j * np.pi * f * shift_grid) for f in fdopp]) * s2, fft_sz, axis=1)
+    A = np.fft.fftshift(np.fft.ifft(sg * s1f, axis=1), axes=1)
     if normalize:
         A = A / abs(A).max()
-    if mag:
-        return abs(A) ** 2, fdopp, np.linspace(-len(s1) / 2 / fs, len(s1) / 2 / fs, len(s1))
-    else:
-        return A, fdopp, np.linspace(-dopp_bins / 2 * fs / c0, dopp_bins / 2 * fs / c0, dopp_bins)
+    return abs(A) if mag else A, fdopp, (np.arange(fft_sz) - fft_sz // 2) * c0 / a_fs
 
 
 def getMaxThreads():
