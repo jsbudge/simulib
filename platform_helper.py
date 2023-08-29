@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, interp1d
 from scipy.signal import medfilt
 from SDRParsing import SDRParse, AntennaPort
 from simulation_functions import llh2enu, findPowerOf2, loadPostCorrectionsGPSData, loadRawData, loadGimbalData, \
@@ -308,7 +308,7 @@ class SDRPlatform(RadarPlatform):
     _sdr = None
 
     def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, gps_debug=None,
-                 gimbal_debug=None, gimbal_offset=None):
+                 gimbal_debug=None, gimbal_offset=None, gps_replace=None, use_ecef=True):
         """
         Init function.
         :param sdr_file: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
@@ -326,14 +326,42 @@ class SDRPlatform(RadarPlatform):
         fs = fs if fs is not None else sdr[channel].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
         if gps_debug is not None:
-            gps_data = loadPostCorrectionsGPSData(gps_debug)
-            gps_data['te'], gps_data['tn'], gps_data['tu'] = llh2enu(gps_data['tx_lat'], gps_data['tx_lon'],
-                                                                     gps_data['tx_alt'], origin)
-            gps_data['re'], gps_data['rn'], gps_data['ru'] = llh2enu(gps_data['rx_lat'], gps_data['rx_lon'],
-                                                                     gps_data['rx_alt'], origin)
+            gps_data = gps_debug
+            t = gps_data['sec']
+            if use_ecef:
+                gps_data['te'], gps_data['tn'], gps_data['tu'] = llh2enu(gps_data['tx_lat'], gps_data['tx_lon'],
+                                                                         gps_data['tx_alt'], origin)
+                gps_data['re'], gps_data['rn'], gps_data['ru'] = llh2enu(gps_data['rx_lat'], gps_data['rx_lon'],
+                                                                         gps_data['rx_alt'], origin)
+            else:
+                gps_data['tn'] = gps_data['tx_lat'] * gps_data['latConv'] - origin[0] * gps_data['latConv']
+                gps_data['te'] = gps_data['tx_lon'] * gps_data['lonConv'] - origin[1] * gps_data['lonConv']
+                gps_data['tu'] = gps_data['tx_alt'] - origin[2]
+
+                gps_data['rn'] = gps_data['rx_lat'] * gps_data['latConv'] - origin[0] * gps_data['latConv']
+                gps_data['re'] = gps_data['rx_lon'] * gps_data['lonConv'] - origin[1] * gps_data['lonConv']
+                gps_data['ru'] = gps_data['rx_alt'] - origin[2]
+
         else:
             gps_data = None
-        e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
+        if gps_replace is not None:
+            if use_ecef:
+                e, n, u = llh2enu(gps_replace['lat'], gps_replace['lon'], gps_replace['alt'], origin)
+            else:
+                e = gps_replace['lat'] * gps_data['latConv'] - origin[0] * gps_data['latConv']
+                n = gps_replace['lon'] * gps_data['lonConv'] - origin[1] * gps_data['lonConv']
+                u = gps_replace['alt'] - origin[2]
+            r = np.interp(t, gps_replace['gps_ms'], gps_replace['r'])
+            p = np.interp(t, gps_replace['gps_ms'], gps_replace['p'])
+            y = np.interp(t, gps_replace['gps_ms'], np.angle(gps_replace['azimuthY'] + 1j * gps_replace['azimuthX']))
+            e = np.interp(t, gps_replace['gps_ms'], e)
+            n = np.interp(t, gps_replace['gps_ms'], n)
+            u = np.interp(t, gps_replace['gps_ms'], u)
+        else:
+            e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
+            r = sdr.gps_data['r'].values
+            p = sdr.gps_data['p'].values
+            y = sdr.gps_data['y'].values
         if gimbal_debug is None:
             try:
                 pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
@@ -343,6 +371,8 @@ class SDRPlatform(RadarPlatform):
             except TypeError:
                 pan = np.zeros_like(sdr.gps_data['systime'].values)
                 tilt = np.zeros_like(sdr.gps_data['systime'].values)
+            pan = np.interp(t, sdr.gps_data.index.values, pan)
+            tilt = np.interp(t, sdr.gps_data.index.values, tilt)
         else:
             gim = loadGimbalData(gimbal_debug)
             if len(gim['systime']) == 0:
@@ -365,11 +395,9 @@ class SDRPlatform(RadarPlatform):
             tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
         rx_num = sdr[channel].rec_num
         rx_offset = np.array([sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]) if rx_offset is None else rx_offset
-        super().__init__(e=e, n=n, u=u, r=sdr.gps_data['r'].values, p=sdr.gps_data['p'].values,
-                         y=sdr.gps_data['y'].values,
-                         t=t, tx_offset=tx_offset, rx_offset=rx_offset, gimbal=np.array([pan, tilt]).T,
-                         gimbal_offset=goff, gimbal_rotations=grot, dep_angle=channel_dep,
-                         squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
+        super().__init__(e=e, n=n, u=u, r=r, p=p, y=y, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
+                         gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
+                         dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
                          az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
                          el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_data=gps_data, tx_num=tx_num,
                          rx_num=rx_num)

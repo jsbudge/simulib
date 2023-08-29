@@ -2,7 +2,6 @@ import contextlib
 import numpy as np
 from simulation_functions import getElevationMap, llh2enu, \
     enu2llh, getElevation, db, resampleGrid
-import open3d as o3d
 from SDRParsing import SDRParse
 from scipy.spatial.transform import Rotation as rot
 from scipy.spatial import Delaunay
@@ -49,7 +48,7 @@ class Environment(object):
             pts = np.column_stack((x.flatten(), y.flatten()))
             pos_r = np.squeeze(np.einsum('ji, mni -> jmn', self._transforms[0], [pts])).T + self._transforms[1]
             latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
-            gz = (getElevationMap(latg, long) - self.ref[2])
+            gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2])
             sh = self.shape
         else:
             shift_x, shift_y, _ = llh2enu(*pos, self.ref)
@@ -63,7 +62,7 @@ class Environment(object):
                     np.array([shift_x, shift_y])
             latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
             sh = gx.shape
-            gz = (getElevationMap(latg, long) - self.ref[2])
+            gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2])
         return pos_r[:, 0].reshape(sh), pos_r[:, 1].reshape(sh), gz.reshape(sh)
 
     def setGrid(self, newgrid, rmat, shift):
@@ -90,7 +89,7 @@ class Environment(object):
 
     def getIndex(self, x, y):
         irmat = np.linalg.pinv(self._transforms[0])
-        return irmat.dot(np.array([x, y])) + np.array([self.shape[0] / 2, self.shape[1] / 2])
+        return irmat.dot(np.array([x, y]) - self._transforms[1]) + np.array([self.shape[0] / 2, self.shape[1] / 2])
 
     def interp(self, x, y):
         return interpn((np.arange(self.refgrid.shape[0]),
@@ -137,7 +136,7 @@ class SDREnvironment(Environment):
             asi[750, 750] = 10
             grid = asi
         except TypeError:
-            asi = sdr.loadASI(sdr.files['asi'][list(sdr.files['asi'].keys())[0]])
+            asi = sdr.loadASI(sdr.files['asi'][0])
             grid = abs(asi)
         self._sdr = sdr
         self._asi = asi

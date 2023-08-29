@@ -1,15 +1,15 @@
 import numpy as np
-from osgeo import gdal
 from scipy.interpolate import RectBivariateSpline, interpn
 from scipy.spatial.transform import Rotation as rot
+from itertools import product
 import scipy.ndimage.filters as filters
 import scipy.ndimage.morphology as morphology
-import open3d as o3d
 import plotly.io as pio
 import plotly.graph_objects as go
 import os
 from functools import reduce
-from numba import jit, prange
+# from numba import jit, prange
+from dted import Tile
 
 pio.renderers.default = 'browser'
 
@@ -76,99 +76,62 @@ def undulationEGM96(lat, lon):
     return egc
 
 
-def getElevationMap(lats, lons, und=True):
+def getElevationMap(lats, lons, und=True, interp_method='linear'):
+    # First, check to see if multiple DTEDs are needed
+    floor_lats = np.floor(lats)
+    floor_lons = np.floor(lons)
+    hght = np.zeros_like(lats)
+    dteds = list(product(np.unique(np.floor(lats)), np.unique(np.floor(lons))))
+    for ted in dteds:
+        idx = np.logical_and(floor_lats == ted[0], floor_lons == ted[1])
+        dtedName = getDTEDName(*ted)
+        block = Tile(dtedName, in_memory=False)
+        block.load_data(perform_checksum=False)
+        data = block.data
+        ulx = block.dsi.origin.latitude
+        uly = block.dsi.origin.longitude
+        xres = 1 / block.dsi.shape[0]
+        yres = 1 / block.dsi.shape[1]
+
+        y = (lats[idx] - ulx) / xres
+        x = (lons[idx] - uly) / yres
+
+        hght[idx] = interpn(np.array([np.arange(3601), np.arange(3601)]), data, np.array([x, y]).T,
+                            method=interp_method, bounds_error=False, fill_value=0) + undulationEGM96(lats[idx], lons[
+            idx]) if und else hght
+
+    return hght
+
+
+def getElevation(lat, lon, und=True):
+
     """Returns the digital elevation for a latitude and longitude"""
-    dtedName = getDTEDName(lats[0], lons[0])
+    ted = getDTEDName(np.floor(lat), np.floor(lon))
+    data = Tile(ted, in_memory=False)
+    ulx = data.dsi.origin.latitude
+    uly = data.dsi.origin.longitude
+    xres = 1 / data.dsi.shape[0]
+    yres = -1 / data.dsi.shape[1]
 
-    # open DTED file for reading
-    ds = gdal.Open(dtedName)
+    x = data.dsi.shape[0] - (lat - ulx) / xres
+    y = (lon - uly) / yres
+    x1 = int(x) * xres
+    x2 = int(x + 1) * xres
+    y1 = int(y) * yres
+    y2 = int(y + 1) * yres
+    x *= xres
+    y *= yres
 
-    # grab geo transform with resolutions
-    gt = ds.GetGeoTransform()
+    dtedData = np.array([data.get_elevation(LatLon(latitude=ulx + 1 - x1, longitude=uly + y1)),
+                         data.get_elevation(LatLon(latitude=ulx + 1 - x1, longitude=uly + y2)),
+                         data.get_elevation(LatLon(latitude=ulx + 1 - x2, longitude=uly + y1)),
+                         data.get_elevation(LatLon(latitude=ulx + 1 - x2, longitude=uly + y2))])
 
-    # read in raster data
-    raster = ds.GetRasterBand(1).ReadAsArray()
-
-    # Get lats and lons as bins into raster
-    bin_lat = (lats - gt[3]) / gt[-1]
-    bin_lon = (lons - gt[0]) / gt[1]
-
-    # Linear interpolation using bins
-    hght = interpn(np.array([np.arange(3601), np.arange(3601)]), raster, np.array([bin_lat, bin_lon]).T)
-
-    return hght + undulationEGM96(lats, lons) if und else hght
-
-
-@jit(nopython=True, fastmath=True, nogil=True, cache=True, parallel=True)
-def bilinear_interpolation(x_in, y_in, f_in, x_out, y_out):
-    f_out = np.zeros((y_out.size, x_out.size))
-
-    for i in prange(f_out.shape[1]):
-        idx = np.searchsorted(x_in, x_out[i])
-
-        x1 = x_in[idx - 1]
-        x2 = x_in[idx]
-        x = x_out[i]
-
-        for j in prange(f_out.shape[0]):
-            idy = np.searchsorted(y_in, y_out[j])
-            y1 = y_in[idy - 1]
-            y2 = y_in[idy]
-            y = y_out[j]
-
-            f11 = f_in[idy - 1, idx - 1]
-            f21 = f_in[idy - 1, idx]
-            f12 = f_in[idy, idx - 1]
-            f22 = f_in[idy, idx]
-
-            f_out[j, i] = ((f11 * (x2 - x) * (y2 - y) +
-                            f21 * (x - x1) * (y2 - y) +
-                            f12 * (x2 - x) * (y - y1) +
-                            f22 * (x - x1) * (y - y1)) /
-                           ((x2 - x1) * (y2 - y1)))
-
-    return f_out
-
-def getElevation(pt, und=True):
-    lat = pt[0]
-    lon = pt[1]
-    """Returns the digital elevation for a latitude and longitude"""
-    dtedName = getDTEDName(lat, lon)
-    gdal.UseExceptions()
-    # open DTED file for reading
-    ds = gdal.Open(dtedName)
-
-    # get the geo transform info for the dted
-    # ulx is upper left corner longitude
-    # xres is the resolution in the x-direction (in degrees/sample)
-    # xskew is useless (0.0)
-    # uly is the upper left corner latitude
-    # yskew is useless (0.0)
-    # yres is the resolution in the y-direction (in degrees/sample)
-    ulx, xres, xskew, uly, yskew, yres = ds.GetGeoTransform()
-    # calculate the x and y indices into the DTED data for the lat/lon
-    px = int((lon - ulx) / xres) - (1 if (lon - ulx) / xres % 1 < .5 else 0)
-    py = int((lat - uly) / yres) - (1 if (lat - uly) / yres % 1 < .5 else 0)
-
-    # only if these x and y indices are within the bounds of the DTED, get the
-    # raster band and try to read in the DTED values
-    elevation = -1e20
-    if (0 <= px < ds.RasterXSize) and (0 <= py < ds.RasterYSize):
-        rasterBand = ds.GetRasterBand(1)
-        dtedData = rasterBand.ReadAsArray(px, py, 2, 2)
-
-        # use bilinear interpolation to get the elevation for the lat/lon
-        x = (lon - ulx)
-        y = (lat - uly)
-        x1 = int((lon - ulx) / xres) * xres
-        x2 = int((lon - ulx) / xres + 1) * xres
-        y1 = int((lat - uly) / yres) * yres
-        y2 = int((lat - uly) / yres + 1) * yres
-        elevation = 1 / ((x2 - x1) * (y2 - y1)) * \
-                    dtedData.ravel().dot(np.array([[x2 * y2, -y2, -x2, 1],
-                                                    [-x2 * y1, y1, x2, -1],
-                                                    [-x1 * y2, y2, x1, -1],
-                                                    [x1 * y1, -y1, -x1, 1]])).dot(np.array([1, x, y, x * y]))
+    elevation = 1 / ((x2 - x1) * (y2 - y1)) * \
+                dtedData.dot(np.array([[x2 * y2, -y2, -x2, 1],
+                                       [-x2 * y1, y1, x2, -1],
+                                       [-x1 * y2, y2, x1, -1],
+                                       [x1 * y1, -y1, -x1, 1]])).dot(np.array([1, x, y, x * y]))
 
     return elevation + undulationEGM96(lat, lon) if und else elevation
 
@@ -245,34 +208,6 @@ def ecef2enu(x, y, z, refllh):
                     [np.cos(latr) * np.cos(lonr), np.cos(latr) * np.sin(lonr), np.sin(latr)]])
     enu = rot.dot(np.array([x - rx, y - ry, z - rz]))
     return enu[0], enu[1], enu[2]
-
-
-def getLivingRoom(voxel_downsample=.05):
-    pcd = o3d.io.read_point_cloud("./livingroom.ply")
-
-    # Stupid thing has walls, need to crop them out
-    cube_ext = 3
-    cube_hght = 2.5
-    cube_hght_below = .1
-    cube_points = np.array([
-        # Vertices Polygon1
-        [(cube_ext / 2), cube_hght, (cube_ext / 2)],  # face-topright
-        [-(cube_ext / 2), cube_hght, (cube_ext / 2)],  # face-topleft
-        [-(cube_ext / 2), cube_hght, -(cube_ext / 2)],  # rear-topleft
-        [(cube_ext / 2), cube_hght, -(cube_ext / 2)],  # rear-topright
-        # Vertices Polygon 2
-        [(cube_ext / 2), cube_hght_below, (cube_ext / 2)],
-        [-(cube_ext / 2), cube_hght_below, (cube_ext / 2)],
-        [-(cube_ext / 2), cube_hght_below, -(cube_ext / 2)],
-        [-(cube_ext / 2), cube_hght_below, -(cube_ext / 2)],
-    ]).astype("float64")
-    v3dv = o3d.utility.Vector3dVector(cube_points)
-    oriented_bounding_box = o3d.geometry.AxisAlignedBoundingBox.create_from_points(v3dv)
-    pcd = pcd.crop(oriented_bounding_box)
-
-    # This is not needed after the walls are removed
-    pcd = pcd.voxel_down_sample(voxel_size=voxel_downsample)
-    return pcd
 
 
 def getMapLocation(p1, extent, init_llh, npts_background=500, resample=True):
@@ -1007,6 +942,17 @@ def window_taylor(N, nbar=4, sll=-30):
     scale = W((N - 1) / 2)
     w /= scale
     return w
+
+
+def sinc_interp(x, s, u):
+    if len(x) != len(s):
+        raise ValueError('x and s must be the same length')
+
+    # Find the period
+    T = s[1] - s[0]
+
+    sincM = np.tile(u, (len(s), 1)) - np.tile(s[:, np.newaxis], (1, len(u)))
+    return np.dot(x, np.sinc(sincM / T))
 
 
 def getDopplerLine(effAzI, rangeBins, antVel, antPos, nearRangeGrazeR, azBeamwidthHalf, PRF, wavelength, origin):

@@ -4,6 +4,7 @@ from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, 
 from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject, cpudiff
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
+import open3d as o3d
 from scipy.interpolate import CubicSpline
 from scipy.optimize import minimize, basinhopping
 import cupy as cupy
@@ -11,14 +12,21 @@ import cupyx.scipy.signal
 from numba import cuda, njit
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
-from scipy.signal import medfilt
+from scipy.signal import medfilt, stft
 import plotly.express as px
+from scipy.spatial.transform import Rotation as Rot
 import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 from tqdm import tqdm
 from SDRParsing import SDRParse, load, findAllFilenames
 from SARParsing import SARParse
+from celluloid import Camera
+from sarpy.geometry import point_projection
+from sarpy.io.complex.sicd import SICDReader
+from sarpy.processing.sicd.subaperture import subaperture_processing_array
+import vg
+from pytransform3d.rotations import matrix_from_axis_angle
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -48,32 +56,25 @@ inch_to_m = .0254
 # bg_file = '/data5/SAR_DATA/2021/05052021/SAR_05052021_112647.sar'
 # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
 # bg_file = '/data5/SAR_DATA/2022/Redstone/SAR_08122022_170753.sar'
-# bg_file = '/data6/SAR_DATA/2023/06202023/SAR_06202023_135617.sar'
+bg_file = '/data5/SAR_DATA/2022/09262022/SAR_09262022_143509.sar'
 # bg_file = '/data6/Tower_Redo_Again/tower_redo_SAR_03292023_120731.sar'
 # bg_file = '/data5/SAR_DATA/2022/09272022/SAR_09272022_103053.sar'
 # bg_file = '/data5/SAR_DATA/2019/08072019/SAR_08072019_100120.sar'
-bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_123311.sar'
-# bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_122801.sar'
-# bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_123050.sar'
 upsample = 4
 poly_num = 1
 use_rcorr = False
 use_aps_debug = True
 rotate_grid = True
-use_ecef = True
-ipr_mode = False
-cpi_len = 128
+use_ecef = False
+cpi_len = 32
 plp = 0
 partial_pulse_percent = .2
 debug = True
-pts_per_m = 1
-grid_width = 200
-grid_height = 200
+pulse_dec_factor = 2
+pts_per_m = .25
+grid_width = 1000
+grid_height = 1000
 channel = 0
-fdelay = 6.3
-origin = (40.136013, -111.661530, 1382)
-
-nbpj_pts = (int(grid_width // pts_per_m), int(grid_height // pts_per_m))
 
 files = findAllFilenames(bg_file, use_debug=True, exact_matches=False)
 
@@ -86,42 +87,27 @@ except KeyError:
     print('Using SlimSAR parser instead.')
     sdr = SARParse(bg_file)
     sdr.ash = sdr.loadASH('/data5/SAR_DATA/2019/08072019/SAR_08072019_100120RVV_950000_95.ash')
-
-if origin is None:
-    try:
-        origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
-                  getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
-        heading = sdr.gim.initial_course_angle
-    except TypeError:
-        heading = sdr.gim.initial_course_angle
-        pt = (sdr.gps_data['lat'].values[0], sdr.gps_data['lon'].values[0])
-        alt = getElevation(pt)
-        nrange = ((sdr[channel].receive_on_TAC - sdr[channel].transmit_on_TAC) / TAC -
-                  sdr[channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        frange = ((sdr[channel].receive_off_TAC - sdr[channel].transmit_on_TAC) / TAC -
-                  sdr[channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        mrange = (nrange + frange) / 2
-        origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
-                         (pt[0], pt[1], alt))
-
-sdr.gimbal['systime'] += TAC * .01
-
-bg = SDREnvironment(sdr_file=sdr)
-
-if ipr_mode:
-    print('IPR mode...', end='')
-    dx_shift = np.inf
-    iters = 0
-    while dx_shift > .5 and iters < 10:
-        oe, on, ou = llh2enu(*origin, bg.ref)
-        ix, iy = bg.getIndex(oe, on).astype(int)
-        minigrid = bg.refgrid[ix-int(50 / bg.rps):ix+int(50 / bg.rps), iy-int(50 / bg.cps):iy+int(50 / bg.cps)]
-        nx, ny = np.where(minigrid == minigrid.max())
-        origin = enu2llh(*bg.getPos(nx[0] + ix-int(50 / bg.rps), ny[0] + iy-int(50 / bg.cps)), 0, bg.ref)
-        dx_shift = np.sqrt(((nx[0] - 50 / bg.rps) * bg.rps)**2 + ((ny[0] - 50 / bg.cps) * bg.cps)**2)
-        iters += 1
-    print(f'Origin set to {origin}')
-ref_llh = bg.ref
+try:
+    origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
+              getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+    heading = sdr.gim.initial_course_angle
+except TypeError:
+    heading = sdr.gim.initial_course_angle
+    pt = (sdr.gps_data['lat'].values[0], sdr.gps_data['lon'].values[0])
+    alt = getElevation(pt)
+    nrange = ((sdr[channel].receive_on_TAC - sdr[channel].transmit_on_TAC) / TAC -
+              sdr[channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+    frange = ((sdr[channel].receive_off_TAC - sdr[channel].transmit_on_TAC) / TAC -
+              sdr[channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+    mrange = (nrange + frange) / 2
+    origin = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
+                     (pt[0], pt[1], alt))
+# origin = (40.025675, -111.764105, 1413)
+# origin = (40.037026, -74.353155, 27)
+# origin = (43.020269, -95.579805, 458)
+# origin = (40.02612, -74.35176, 26)
+origin = (40.032520, -74.347000, 28)
+ref_llh = origin
 
 # Generate a platform
 print('Generating platform...', end='')
@@ -154,8 +140,6 @@ if use_aps_debug:
 else:
     rp = SDRPlatform(sdr, ref_llh, channel=channel)
 
-# rp.az_half_bw = 5 * DTR
-
 # Atmospheric modeling params
 Ns = 313
 Nb = 66.65
@@ -175,10 +159,11 @@ print('Done.')
 print('Calculating grid parameters...')
 # General calculations for slant ranges, etc.
 # plat_height = rp.pos(rp.gpst)[2, :].mean()
+fdelay = 0
 nr = rp.calcPulseLength(fdelay, plp, use_tac=True)
 nsam = rp.calcNumSamples(fdelay, plp)
 ranges = rp.calcRangeBins(fdelay, upsample, plp)
-granges = ranges * np.cos(rp.dep_ang)
+granges = np.sqrt(ranges**2 - rp.pos(rp.gpst)[2, :].mean()**2)
 fft_len = findPowerOf2(nsam + nr)
 up_fft_len = fft_len * upsample
 
@@ -198,8 +183,107 @@ else:
 mfilt_gpu = cupy.array(np.tile(mfilt, (cpi_len, 1)).T, dtype=np.complex128)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
-# Calculate out points on the ground
-gx, gy, gz = bg.getGrid(origin, grid_width, grid_height, nbpj_pts, bg.heading if rotate_grid else 0)
+# Calculate out points on the arcr grid
+ideal_vel = (rp.pos(rp.gpst[-1]) - rp.pos(rp.gpst[0])) / (rp.gpst[-1] - rp.gpst[0])
+# Calculate the mean of the points, i.e. the 'center' of the cloud
+datamean = rp.pos(rp.gpst).mean(axis=1)
+
+# Do an SVD on the mean-centered data.
+uu, dd, vv = np.linalg.svd(rp.pos(rp.gpst).T - datamean, full_matrices=False)
+ideal_vel = vv[0] * np.linalg.norm(ideal_vel)
+# downrange_vec = azelToVec(np.arctan2(ideal_vel[0], ideal_vel[1]) + np.pi / 2, rp.dep_ang)
+
+coll_time = sdr[0].sys_time / TAC
+ideal_path = rp.pos(rp.gpst[0]) + np.outer(coll_time, ideal_vel)
+azes = np.arctan2(-ideal_path[:, 1], -ideal_path[:, 0])
+eles = np.arcsin(ideal_path[:, 2] / np.linalg.norm(ideal_path, axis=1))
+downrange_vec = azelToVec(np.arctan2(ideal_vel[0], ideal_vel[1]) + np.pi / 2,
+                          eles[(azes - np.pi / 2) == (azes - np.pi / 2).min()][0])
+coa_pt = ideal_path.mean(axis=0)
+'''downrange = np.outer(ranges[2000:10000:5], downrange_vec)
+gx = sum(np.meshgrid(ideal_path[:, 0], downrange[:, 0]))
+gy = sum(np.meshgrid(ideal_path[:, 1], downrange[:, 1]))
+gz = sum(np.meshgrid(ideal_path[:, 2], downrange[:, 2]))'''
+
+# Calculate out grid
+'''nu = 800
+nv = 800
+du = (ranges[1] - ranges[0]) * nu / nu
+dv = du
+u = np.arange(-nu / 2, nu / 2) * du
+v = np.arange(-nv / 2, nv / 2) * dv
+n_hat = np.cross(ideal_vel / np.linalg.norm(ideal_vel), downrange_vec)
+v_hat = np.cross(n_hat, downrange_vec)/np.linalg.norm(np.cross(n_hat, downrange_vec))
+u_hat = np.cross(v_hat, n_hat)/np.linalg.norm(np.cross(v_hat, n_hat))
+# Represent u and v in (x,y,z)
+[uu, vv] = np.meshgrid(u, v)
+uu = uu.flatten()
+vv = vv.flatten()
+
+A = np.asmatrix(np.hstack((
+    np.array([u_hat]).T, np.array([v_hat]).T
+)))
+b = np.asmatrix(np.vstack((uu, vv)))
+pixel_locs = np.asarray(A * b)
+gx = pixel_locs[0, :].reshape((nu, nv))
+gy = pixel_locs[1, :].reshape((nu, nv))
+gz = pixel_locs[2, :].reshape((nu, nv))'''
+
+# Grid using downrange and isodoppler contours
+'''downrange_az = np.arctan2(downrange_vec[0], downrange_vec[1])
+downrange_el = -np.arcsin(downrange_vec[2])
+gx = np.zeros((4000, 4000))
+gy = np.zeros_like(gx)
+gz = np.zeros_like(gx)
+init_rng = 0
+for n, ang in enumerate(np.linspace(downrange_az - rp.az_half_bw, downrange_az + rp.az_half_bw, gx.shape[0])):
+    vecs = np.outer(azelToVec(ang, downrange_el), ranges) + coa_pt[:, None]
+    gx[:, n] = vecs[0, init_rng:init_rng + 4 * gx.shape[1]:4]
+    gy[:, n] = vecs[1, init_rng:init_rng + 4 * gx.shape[1]:4]
+    gz[:, n] = vecs[2, init_rng:init_rng + 4 * gx.shape[1]:4]'''
+
+normal = np.array([0, 0, 1.])
+vel = ideal_vel
+scoa = ideal_path.mean(axis=0)
+vecs = scoa[:, None] - np.array([gx.flatten(), gy.flatten(), gz.flatten()])
+Rg = np.linalg.norm(vecs, axis=0)
+fd = (c0 + ideal_vel.dot(vecs / Rg)) / c0 * fc - fc
+
+plt.figure()
+plt.scatter(gx.flatten(), gy.flatten(), c=ideal_vel.dot(vecs) - fd * c0 * Rg / fc)
+
+
+def minfunc(x):
+    Rhat = scoa - x
+    ncon = normal.dot(x)
+    doppcon = vel.dot(Rhat) - fd * c0 * Rg / fc
+    return np.sqrt(ncon**2 + doppcon**2)
+
+
+test = minimize(minfunc, np.array([0, 0, 0]))
+
+bg = SDREnvironment(sdr)
+bg.ref = origin
+gx, gy, gz = bg.getGrid(origin, grid_width, grid_height, (1000, 1000))
+gz = np.zeros_like(gx)
+
+
+# fig = px.scatter_3d(x=rotmat[:, 0], y=rotmat[:, 1], z=rotmat[:, 2])
+# fig.add_scatter3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+# fig.show()
+
+'''path_r = np.linalg.norm(ideal_path, axis=1)
+gr_center = np.where(abs(ranges - np.min(path_r)) == abs(ranges - np.min(path_r)).min())[0][0]
+path_center = np.where(path_r == path_r.min())[0][0]
+gx = sum(np.meshgrid(granges[gr_center - 1000 * upsample:gr_center + 1000 * upsample:2] *
+                     np.sin(np.arctan2(ideal_vel[1], ideal_vel[0]) - np.pi / 2),
+                     ideal_path[path_center - 4000:path_center + 4000:pulse_dec_factor, 1]))
+gy = sum(np.meshgrid(granges[gr_center - 1000 * upsample:gr_center + 1000 * upsample:2] *
+                     np.cos(np.arctan2(ideal_vel[1], ideal_vel[0]) - np.pi / 2),
+                     ideal_path[path_center - 4000:path_center + 4000:pulse_dec_factor, 0]))
+gz = np.zeros_like(gx)'''
+
+nbpj_pts = gx.shape
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
@@ -218,15 +302,17 @@ threads_per_block = getMaxThreads()
 bpg_bpj = (max(1, nbpj_pts[0] // threads_per_block[0] + 1), nbpj_pts[1] // threads_per_block[1] + 1)
 # rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
 
+# Data blocks for imaging
+bpj_truedata = np.zeros(nbpj_pts, dtype=np.complex128)
+
 # Run through loop to get data simulated
-data_t = sdr[channel].pulse_time
-idx_t = sdr[channel].frame_num
+data_t = sdr[channel].pulse_time[::pulse_dec_factor]
+idx_t = sdr[channel].frame_num[::pulse_dec_factor]
 test = None
 freqs = np.fft.fftfreq(fft_len, 1 / sdr[0].fs)
 print('Backprojecting...')
 pulse_pos = 0
-# Data blocks for imaging
-bpj_truedata = np.zeros(nbpj_pts, dtype=np.complex128)
+spline_knots = [(0, 0, 0.)]
 for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, len(data_t), cpi_len)),
                          total=len(data_t) // cpi_len + 1):
     ts = data_t[tidx * cpi_len + np.arange(len(frames))]
@@ -260,9 +346,11 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
     cupy.cuda.Device().synchronize()
 
     backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, rbins_gpu, panrx_gpu,
-                                            elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                            bpj_wavelength, ranges[0] / c0, rp.fs * upsample, bwidth, rp.az_half_bw,
-                                            rp.el_half_bw, poly_num, pts_debug, angs_debug, debug, r_corr_gpu)
+                                            elrx_gpu,
+                                            panrx_gpu, elrx_gpu, rtdata, bpj_grid,
+                                            bpj_wavelength, ranges[0] / c0,
+                                            rp.fs * upsample, bwidth, rp.az_half_bw, rp.el_half_bw, poly_num, pts_debug,
+                                            angs_debug, debug, r_corr_gpu)
     cupy.cuda.Device().synchronize()
 
     if ts[0] < rp.gpst.mean() <= ts[-1]:
@@ -270,8 +358,6 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
         test = rtdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
-
-    # bpj_traces.append(go.Heatmap(z=db(bpj_grid.get())))
     bpj_truedata += bpj_grid.get()
 
 del panrx_gpu
@@ -289,120 +375,136 @@ del gx_gpu
 del gy_gpu
 del gz_gpu
 
-# Apply range roll-off compensation to final image
-mag_data = np.sqrt(abs(bpj_truedata))
-brightness_raw = np.median(np.sqrt(abs(bpj_truedata)), axis=0)
-brightness_curve = np.polyval(np.polyfit(np.arange(bpj_truedata.shape[0]), brightness_raw, 4),
-                              np.arange(bpj_truedata.shape[0]))
-brightness_curve /= brightness_curve.max()
-brightness_curve = 1. / brightness_curve
-mag_data *= np.outer(np.ones(mag_data.shape[1]), brightness_curve)
+# bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
+# bfig.add_scatter(x=rp.pos(rp.gpst)[0, :], y=rp.pos(rp.gpst)[1, :])
+# bfig.show()
 
 if test is not None:
     plt.figure('Doppler data')
-    plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1),
-               extent=[-sdr[channel].prf / 2, sdr[channel].prf / 2, ranges[-1], ranges[0]])
+    plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1), extent=[0, cpi_len, ranges[0], ranges[-1]])
     plt.axis('tight')
 
 plt.figure('IMSHOW backprojected data')
-plt.imshow(db(mag_data), origin='lower')
+plt.imshow(db(bpj_truedata), origin='lower')
 plt.axis('tight')
 
 try:
-    if (nbpj_pts[0] * nbpj_pts[1]) < 400 ** 2:
-        cx, cy, cz = bg.getGrid(origin, grid_width, grid_height, nbpj_pts)
-
-        fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
-        fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten(), mode='markers')
-        fig.show()
+    bg = SDREnvironment(sdr_file=sdr)
+    bg.ref = origin
 
     plt.figure('IMSHOW truth data')
     plt.imshow(db(bg.refgrid), origin='lower')
     plt.axis('tight')
-except Exception as e:
-    print(f'Error in generating background image: {e}')
+    if (nbpj_pts[0] * nbpj_pts[1]) < 400**2:
+        fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+        fig.add_scatter3d(x=rp.pos(rp.gpst)[0, :], y=rp.pos(rp.gpst)[1, :], z=rp.pos(rp.gpst)[2, :], mode='markers')
+        fig.show()
+except:
+    pass
 
-from sklearn.preprocessing import QuantileTransformer
+from sklearn.preprocessing import power_transform
 
-# mag_data = np.sqrt(abs(sdr.loadASI(sdr.files['asi'][0])))
-nbits = 256
-plot_data_init = QuantileTransformer(output_distribution='normal').fit(
-    mag_data[mag_data > 0].reshape(-1, 1)).transform(mag_data.reshape(-1, 1)).reshape(mag_data.shape)
-plot_data = plot_data_init
-max_bin = 3
-hist_counts, hist_bins = \
-    np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
-while hist_counts[-1] == 0:
-    max_bin -= .2
-    hist_counts, hist_bins = \
-        np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
-scaled_data = np.digitize(plot_data_init, hist_bins)
+plot_data = np.fliplr(db(bpj_truedata))
+scaled_data = power_transform(db(bpj_truedata).reshape(-1, 1)).reshape(plot_data.shape)
 
-# px.imshow(db(mag_data), color_continuous_scale=px.colors.sequential.gray).show()
-px.imshow(np.fliplr(scaled_data), color_continuous_scale=px.colors.sequential.gray, zmin=0, zmax=nbits).show()
-plt.figure('Image Histogram')
-plt.plot(hist_bins[1:], hist_counts)
+# px.imshow(plot_data, color_continuous_scale=px.colors.sequential.gray, zmin=130, zmax=180).show()
+px.imshow(np.fliplr(scaled_data), color_continuous_scale=px.colors.sequential.gray, zmin=-1, zmax=3).show()
 
-# Get IPR cut
-if ipr_mode:
-    db_bpj = db(bpj_truedata).T
-    db_bpj -= np.max(db_bpj)
-    mx = np.where(db_bpj == db_bpj.max())
-    ipr_gridsz = min(db_bpj.shape[0] - mx[0][0], mx[0][0], db_bpj.shape[1] - mx[1][0], mx[1][0])
+# Get FFT output section
+slice_bpj = np.zeros_like(bpj_truedata)
+slice_bpj = bpj_truedata
+fft_bpj = np.fft.fftshift(np.fft.fft2(slice_bpj))
+plt.figure('Spatial FFT')
+plt.subplot(2, 1, 1)
+plt.imshow(db(fft_bpj))
+plt.axis('tight')
+plt.subplot(2, 1, 2)
+plt.imshow(db(slice_bpj))
+plt.clim(db(slice_bpj[slice_bpj > 0]).min(), db(slice_bpj).max())
+plt.axis('tight')
 
-    cutfig = make_subplots(rows=2, cols=2, subplot_titles=(f'Azimuth', 'Contour', 'Magnitude', 'Range'))
-    cutfig.append_trace(
-        go.Scatter(x=np.arange(ipr_gridsz * 2) * grid_width / nbpj_pts[0] - ipr_gridsz * grid_width / nbpj_pts[0],
-                   y=db_bpj[mx[0][0], mx[1][0] - ipr_gridsz:mx[1][0] + ipr_gridsz] - db_bpj[mx[0][0],
-                                                                                     mx[1][0] - ipr_gridsz:mx[1][
-                                                                                                               0] + ipr_gridsz].max(),
-                   mode='lines', showlegend=False), row=1, col=1)
-    cutfig.append_trace(
-        go.Scatter(x=np.arange(ipr_gridsz * 2) * grid_height / nbpj_pts[1] - ipr_gridsz * grid_height / nbpj_pts[1],
-                   y=db_bpj[mx[0][0] - ipr_gridsz:mx[0][0] + ipr_gridsz, mx[1][0]] - db_bpj[mx[0][0] - ipr_gridsz:mx[0][
-                                                                                                                      0] + ipr_gridsz,
-                                                                                     mx[1][0]].max(),
-                   mode='lines', showlegend=False), row=2, col=2)
-    cutfig.append_trace(
-        go.Heatmap(z=db_bpj, colorscale=px.colors.sequential.gray), row=2, col=1)
-    cutfig.append_trace(
-        go.Contour(z=db_bpj, contours_coloring='lines', line_width=2, contours=dict(
-            start=0,
-            end=-60,
-            size=10,
-            showlabels=True,
-        ), showscale=False), row=1, col=2)
-    cutfig.show()
+'''reader = SICDReader('/data5/SAR_DATA/2022/09262022/SAR_09262022_143509LVV_ch2_929500_58.ntf')
+structure = reader.sicd_meta
+lat, lon, hght = enu2llh(gx.flatten(), gy.flatten(), gz.flatten(), bg.ref)
+image_coords, _, _ = point_projection.ground_to_image_geo(np.array([lat, lon, hght]).T, structure)
+for x in range(0, image_coords.shape[0], 60000):
+    plt.figure(f'SICD image transform_{x}')
+    plt.subplot(2, 1, 1)
+    plt.title('SICD')
+    plt.scatter(image_coords[x:x+60000, 0], image_coords[x:x+60000, 1], c=scaled_data.flatten()[x:x+60000])
+    plt.subplot(2, 1, 2)
+    plt.title('Normal')
+    plt.scatter(lat[x:x + 60000], lon[x:x + 60000], c=scaled_data.flatten()[x:x + 60000])
+
+plt.figure()
+plt.scatter(lat[24000:], gy.flatten()[24000:], c=db(bpj_truedata).flatten()[24000:])'''
+
+'''sect = bpj_truedata
+fig = plt.figure()
+cam = Camera(fig)
+for n in range(0, sect.shape[0], 64):
+    test = subaperture_processing_array(sect, (n, n+128), 512)
+    # plt.figure(f'ap_{n}')
+    plt.imshow(db(test))
+    plt.axis('tight')
+    cam.snap()
+anim = cam.animate()'''
+
+xshift = 64
+xx, yy = np.meshgrid(np.linspace(0, 1, 128), np.linspace(0, 1, xshift))
+grangles = np.linspace(np.arcsin(ideal_path.mean(axis=0)[2] / np.linalg.norm(ideal_path.mean(axis=0) + np.array([-50, 0, 0]))),
+np.arcsin(ideal_path.mean(axis=0)[2] / np.linalg.norm(ideal_path.mean(axis=0) + np.array([50, 0, 0]))),
+                       bpj_truedata.shape[0])
+grangles = np.arccos(granges / ranges)
+sect = bpj_truedata
+'''fig, ax = plt.subplots(1, 2)
+cam = Camera(fig)
+for n in range(0, sect.shape[0], xshift):
+    test = np.fft.fftshift(np.fft.fft2(slice_bpj[n:min(n+xshift, sect.shape[0]), 200:328]))
+    shift_test = np.fft.fftshift(
+        np.fft.fft2(np.exp(1j * 2 * np.pi * grangles[n * 10] / (c0 / sdr[0].fc) * yy)))
+    ax[0].imshow(db(test))
+    plt.axis('tight')
+    ax[1].imshow(db(shift_test))
+    plt.axis('tight')
+    cam.snap()
+anim = cam.animate()'''
+
+plt.figure('STFT')
+plt.imshow(np.fft.fftshift(db(stft(sect[:, 15])[2]), axes=0))
+plt.axis('tight')
+
+
+'''fft_bpj = np.fft.fftshift(fft_bpj).T
+fig, ax = plt.subplots(2)
+cam = Camera(fig)
+for idx in tqdm(range(0, fft_bpj.shape[0], 64)):
+    fft_slice = np.zeros_like(fft_bpj)
+    fft_slice[idx:idx + 64, :] = fft_bpj[idx:idx + 64, :]
+    # fft_slice = np.fft.fftshift(fft_slice)
+    ifft_bpj = np.fft.ifft2(fft_slice)
+    ax[0].imshow(db(fft_slice))
+    plt.axis('tight')
+    ax[1].imshow(db(ifft_bpj))
+    plt.axis('tight')
+    cam.snap()
+anim = cam.animate()'''
+
 
 if gps_check:
-    re, rn, ru = llh2enu(rawGPS['lat'], rawGPS['lon'], rawGPS['alt'], rp.origin)
-    ge, gn, gu = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], rp.origin)
     plt.figure('Raw GPS data')
     plt.subplot(2, 2, 1)
-    plt.title('E')
-    plt.plot(rawGPS['gps_ms'], re)
-    plt.plot(sdr.gps_data.index, ge)
+    plt.title('Lat')
+    plt.plot(rawGPS['gps_ms'], rawGPS['lat'])
+    plt.plot(sdr.gps_data.index, sdr.gps_data['lat'])
     plt.subplot(2, 2, 2)
-    plt.title('N')
-    plt.plot(rawGPS['gps_ms'], rn)
-    plt.plot(sdr.gps_data.index, gn)
+    plt.title('Lon')
+    plt.plot(rawGPS['gps_ms'], rawGPS['lon'])
+    plt.plot(sdr.gps_data.index, sdr.gps_data['lon'])
     plt.subplot(2, 2, 3)
-    plt.title('U')
-    plt.plot(rawGPS['gps_ms'], ru)
-    plt.plot(sdr.gps_data.index, gu)
-
-    re, rn, ru = llh2enu(rawGPS['lat'], rawGPS['lon'], rawGPS['alt'], rp.origin)
-    ge, gn, gu = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], rp.origin)
-    plt.figure('Diff Raw GPS data')
-    plt.subplot(2, 2, 1)
-    plt.title('E')
-    plt.plot(rawGPS['gps_ms'], re - ge)
-    plt.subplot(2, 2, 2)
-    plt.title('N')
-    plt.plot(rawGPS['gps_ms'], rn - gn)
-    plt.subplot(2, 2, 3)
-    plt.title('U')
-    plt.plot(rawGPS['gps_ms'], ru - gu)
+    plt.title('Alt')
+    plt.plot(rawGPS['gps_ms'], rawGPS['alt'])
+    plt.plot(sdr.gps_data.index, sdr.gps_data['alt'])
 
     rerx = rp.rxpos(postCorr['sec'])[0, :]
     rnrx = rp.rxpos(postCorr['sec'])[1, :]
@@ -417,7 +519,6 @@ if gps_check:
     gntx = postCorr['tx_lat'] * postCorr['latConv'] - origin[0] * postCorr['latConv']
     getx = postCorr['tx_lon'] * postCorr['lonConv'] - origin[1] * postCorr['lonConv']
     gutx = postCorr['tx_alt'] - origin[2]
-    getx, gntx, gutx = llh2enu(postCorr['tx_lat'], postCorr['tx_lon'], postCorr['tx_alt'], origin)
     plt.figure('ENU diff')
     plt.subplot(2, 2, 1)
     plt.title('E')
@@ -449,7 +550,7 @@ if gps_check:
     plt.plot(rawGPS['gps_ms'], rawGPS['p'])
     plt.subplot(2, 2, 3)
     plt.title('y')
-    plt.plot(preCorr['sec'], rp_y)
+    plt.plot(preCorr['sec'], rp_y - 2 * np.pi)
     plt.plot(postCorr['sec'], postCorr['az'])
     plt.plot(preCorr['sec'], preCorr['az'])
     plt.legend(['sdr', 'interp_sdr', 'pre', 'raw'])
@@ -464,33 +565,4 @@ if gps_check:
     plt.title('Tilt')
     plt.plot(times, gimbal_data['tilt'])
     plt.plot(times, sdr.gimbal['tilt'])
-
-    gerx, gnrx, gurx = llh2enu(postCorr['rx_lat'], postCorr['rx_lon'], postCorr['rx_alt'], rp.origin)
-    gerx = np.interp(rawGPS['gps_ms'][rawGPS['gps_ms'] > postCorr['sec'][0]], postCorr['sec'], gerx)
-    gnrx = np.interp(rawGPS['gps_ms'][rawGPS['gps_ms'] > postCorr['sec'][0]], postCorr['sec'], gnrx)
-    gurx = np.interp(rawGPS['gps_ms'][rawGPS['gps_ms'] > postCorr['sec'][0]], postCorr['sec'], gurx)
-    re, rn, ru = llh2enu(rawGPS['lat'][rawGPS['gps_ms'] > postCorr['sec'][0]],
-                         rawGPS['lon'][rawGPS['gps_ms'] > postCorr['sec'][0]],
-                         rawGPS['alt'][rawGPS['gps_ms'] > postCorr['sec'][0]], rp.origin)
-    je, jn, ju = llh2enu(jumpCorrGPS['lat'][jumpCorrGPS['gps_ms'] > postCorr['sec'][0]],
-                         jumpCorrGPS['lon'][jumpCorrGPS['gps_ms'] > postCorr['sec'][0]],
-                         jumpCorrGPS['alt'][jumpCorrGPS['gps_ms'] > postCorr['sec'][0]], rp.origin)
-    plt.figure('Lever arm ENU diff')
-    plt.subplot(2, 2, 1)
-    plt.title('E')
-    plt.plot(rawGPS['gps_ms'][rawGPS['gps_ms'] > postCorr['sec'][0]], re - gerx)
-    plt.plot(jumpCorrGPS['gps_ms'][jumpCorrGPS['gps_ms'] > postCorr['sec'][0]], je - gerx)
-    plt.plot(rawGPS['gps_ms'], rp.pos(rawGPS['gps_ms'])[0, :] - rp.rxpos(rawGPS['gps_ms'])[0, :])
-    plt.subplot(2, 2, 2)
-    plt.title('N')
-    plt.plot(rawGPS['gps_ms'][rawGPS['gps_ms'] > postCorr['sec'][0]], rn - gnrx)
-    plt.plot(jumpCorrGPS['gps_ms'][jumpCorrGPS['gps_ms'] > postCorr['sec'][0]], jn - gnrx)
-    plt.plot(rawGPS['gps_ms'], rp.pos(rawGPS['gps_ms'])[1, :] - rp.rxpos(rawGPS['gps_ms'])[1, :])
-    plt.subplot(2, 2, 3)
-    plt.title('U')
-    plt.plot(rawGPS['gps_ms'][rawGPS['gps_ms'] > postCorr['sec'][0]], ru - gurx)
-    plt.plot(jumpCorrGPS['gps_ms'][jumpCorrGPS['gps_ms'] > postCorr['sec'][0]], ju - gurx)
-    plt.plot(rawGPS['gps_ms'], rp.pos(rawGPS['gps_ms'])[2, :] - rp.rxpos(rawGPS['gps_ms'])[2, :])
-    plt.legend(['APS output', 'APS jump corrected', 'SAR output'])
-
 plt.show()

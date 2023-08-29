@@ -1,10 +1,11 @@
 import sys
 
-sys.path.extend(['/home/jeff/repo/apache_mla', '/home/jeff/repo/data_converter', '/home/jeff/repo/simulib'])
+# sys.path.extend(['/home/jeff/repo/apache_mla', '/home/jeff/repo/data_converter', '/home/jeff/repo/simulib'])
 
 import numpy as np
 from simulation_functions import getElevation, llh2enu, genPulse, findPowerOf2, db, azelToVec, getElevationMap, enu2llh, \
-    loadPostCorrectionsGPSData, loadPreCorrectionsGPSData, loadGPSData, loadGimbalData, GetAdvMatchedFilter, loadMatchedFilter
+    loadPostCorrectionsGPSData, loadPreCorrectionsGPSData, loadGPSData, loadGimbalData, GetAdvMatchedFilter, \
+    loadMatchedFilter
 from cuda_kernels import genRangeWithoutIntersection, getMaxThreads, backproject
 from grid_helper import MapEnvironment, SDREnvironment
 from platform_helper import RadarPlatform, SDRPlatform
@@ -13,7 +14,6 @@ from scipy.signal import butter, sosfilt
 from PIL import Image
 from scipy.signal import medfilt2d
 import cupy as cupy
-import cupyx.scipy.signal
 from numba import cuda, njit
 from numba.cuda.random import create_xoroshiro128p_states, init_xoroshiro128p_states
 import matplotlib.pyplot as plt
@@ -27,55 +27,12 @@ from SDRParsing import SDRParse, load, getModeValues
 from SDRWriting import SDRWrite, SHRT_MAX
 import pickle
 import json
+from celluloid import Camera
 from itertools import product
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
 mempool = cupy.get_default_memory_pool()
-
-
-def compileWaveformData(sdr_f, fft_sz, l_sz, bandwidth, wf_fc, slant_min, slant_max, fs, bin_bw):
-    target_data = np.zeros((l_sz, fft_sz, 1))
-    for n in range(l_sz):
-        tpsd = db(genTargetPSD(bandwidth, wf_fc, slant_min, slant_max,
-                               fft_sz, fs)).reshape((fft_sz, 1))
-        tpsd /= np.linalg.norm(tpsd)
-        target_data[n, :, :] = tpsd
-
-    td_mu = np.mean(target_data)
-    td_std = np.std(target_data)
-    target_data = (np.fft.fftshift(target_data, axes=1)[:, fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2,
-                   :] - td_mu) / td_std
-
-    # Generate the Clutter PSDs from the SDR file
-    clutter_data = sdr_f.getPulses(sdr_f[0].frame_num[np.arange(0, l_sz)], 0)
-    cd_fftdata = np.fft.fft(clutter_data, fft_sz, axis=0)
-    clutter_data = np.real(cd_fftdata)
-    clutter_phase_data = np.imag(cd_fftdata)
-
-    cd_mu = np.mean(clutter_data)
-    cd_std = np.std(clutter_data)
-    cdp_mu = np.mean(clutter_phase_data)
-    cdp_std = np.std(clutter_phase_data)
-    clutter_data = (clutter_data - cd_mu) / cd_std
-    clutter_phase_data = (clutter_phase_data - cdp_mu) / cdp_std
-
-    clutter_data = np.fft.fftshift(clutter_data, axes=0)[fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2,
-                   :].reshape(target_data.shape)
-    clutter_phase_data = np.fft.fftshift(clutter_phase_data, axes=0)[
-                         fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2, :].reshape(target_data.shape)
-    return target_data, clutter_data, clutter_phase_data, cd_mu, cd_std
-
-
-def getWaveFromData(wfd_mdl, target_data, clutter_data, clutter_phase_data, cd_mu, cd_std, l_sz, n_ants, fft_sz,
-                    bin_bw):
-    wave_output = (wfd_mdl.predict((clutter_data, target_data, clutter_phase_data)) * cd_std) + cd_mu
-
-    waveforms = np.zeros((l_sz, n_ants, fft_sz), dtype=np.complex128)
-    waveforms[:, :, fft_sz // 2 - bin_bw // 2:fft_sz // 2 + bin_bw // 2] += \
-        wave_output[:, :, :bin_bw] + 1j * wave_output[:, :, -bin_bw:]
-    return waveforms
-
 
 c0 = 299792458.0
 TAC = 125e6
@@ -92,7 +49,7 @@ with open('./settings.json', 'r') as sf:
     nrx = len(settings['rx'])
     nants = len(settings['antennas'])
     fs = settings['sample_frequency']
-    band_frequency = settings['tx'][0]['center_frequency']
+    band_frequency = 9e9 if settings['tx'][0]['center_frequency'] < 31e9 else 32e9
 
 if len(command_line_args) > 1:
     bg_file = command_line_args[1]
@@ -115,12 +72,13 @@ if settings['use_sdr_waveform']:
     grid_center = bg.origin
     ants = []
     for idx, ant in enumerate(sdr.port):
-        ants.append({'offset': [ant.x, ant.y, ant.z], 'az_beamwidth': sdr.ant[ant.assoc_ant].az_bw / DTR,
-                     'el_beamwidth': sdr.ant[ant.assoc_ant].el_bw / DTR,
-                     'dopp_beamwidth': sdr.ant[ant.assoc_ant].az_bw / DTR})
+        if ant:
+            ants.append({'offset': [ant.x, ant.y, ant.z], 'az_beamwidth': sdr.ant[ant.assoc_ant].az_bw / DTR,
+                         'el_beamwidth': sdr.ant[ant.assoc_ant].el_bw / DTR,
+                         'dopp_beamwidth': sdr.ant[ant.assoc_ant].az_bw / DTR})
     settings['antennas'] = ants
     settings['tx'] = [{'pulse_length_percent': sdr[settings['channel']].xml['Pulse_Length_Percent'] / 100,
-                           'center_frequency': sdr[settings['channel']].fc,
+                       'center_frequency': sdr[settings['channel']].fc,
                        'bandwidth': sdr[settings['channel']].bw}]
     settings['prf'] = sdr[settings['channel']].prf
     nchan = 1
@@ -186,7 +144,7 @@ up_fft_len = fft_len * settings['upsample']
 up_nsam = settings['nsam'] * settings['upsample']
 sim_up_fft_len = fft_len * settings['sim_upsample']
 sim_up_nsam = settings['nsam'] * settings['sim_upsample']
-sim_bpj_decimation = settings['sim_upsample'] // settings['upsample']
+sim_bpj_decimation = 1
 print('Done.')
 
 if settings['write_file']:
@@ -236,7 +194,8 @@ if settings['write_file']:
                        'tx_port': rp.tx_num,  # Antenna port location for transmit
                        'polarization': 3,  # Polarization for this channel
                        'numconsmodes': 0,  # Number of simultaneous modes
-                       'awg_enable': 1 if settings['tx'][rp.tx_num]['custom_waveform'] else 0,  # True if the AWG is enabled
+                       'awg_enable': 1 if settings['tx'][rp.tx_num]['custom_waveform'] else 0,
+                       # True if the AWG is enabled
                        'rf_ref_wavenumber': rp.wavenumber}
             if band_frequency != settings['tx'][rp.tx_num]['center_frequency']:
                 offset_hz = settings['tx'][rp.tx_num]['center_frequency'] - band_frequency - \
@@ -294,7 +253,7 @@ if not settings['use_sdr_waveform']:
         from keras.models import load_model
         from keras.utils import custom_object_scope
         from tensorflow.keras.optimizers import Adam, Adadelta
-        from wave_train import genTargetPSD, genModel, opt_loss
+        from wave_train import genTargetPSD, genModel, opt_loss, compileWaveformData, getWaveFromData
 
         print('Using custom waveform from DNN model.')
         with open('/home/jeff/repo/apache_mla/model/model_params.pic', 'rb') as f:
@@ -302,7 +261,7 @@ if not settings['use_sdr_waveform']:
         mdl_fft = model_params['mdl_fft']
         n_conv_filters = model_params['n_conv_filters']
         kernel_sz = model_params['kernel_sz']
-        mdl_bin_bw = int(model_params['bandwidth'] / (fs / mdl_fft))
+        mdl_bin_bw = model_params['bin_bw']
         mdl = genModel(mdl_bin_bw, n_conv_filters, kernel_sz, mdl_fft)
         mdl.load_weights('/home/jeff/repo/apache_mla/model/model')
 
@@ -310,53 +269,81 @@ if not settings['use_sdr_waveform']:
         wfd = compileWaveformData(sdr, mdl_fft, settings['cpi_len'], settings['tx'][0]['bandwidth'],
                                   settings['tx'][0]['center_frequency'],
                                   settings['ranges'][0],
-                                  settings['ranges'][-1], fs, mdl_bin_bw)
+                                  settings['ranges'][-1], fs, mdl_bin_bw, target_signal=None)
 
         # Get waveforms
-        wf_data = np.fft.fftshift(getWaveFromData(mdl, *wfd, settings['cpi_len'], 2, mdl_fft, mdl_bin_bw), axes=2)
+        wf_data = getWaveFromData(mdl, *wfd[:4], settings['cpi_len'], 2, mdl_fft, mdl_bin_bw)
 
 # Model for waveform simulation
 for ch_num, ch in enumerate(settings['tx']):
     if settings['use_sdr_waveform']:
-        mchirp = np.mean(sdr.getPulses(sdr[ch_num].cal_num, 0, is_cal=True), axis=1)
-        ch['chirp'] = np.fft.fft(mchirp, sim_up_fft_len)
-        ch['mchirp'] = mchirp
-        waveform = sdr[ch_num].ref_chirp
+        ch['chirp'] = np.fft.fft(np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True), axis=1),
+                                 sim_up_fft_len)
+        ch['mchirp'] = np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True), axis=1)
+        mfilt = GetAdvMatchedFilter(sdr[ch_num], fft_len=sim_up_fft_len)
+        waveform = np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True), axis=1)
     else:
         if ch['custom_waveform']:
+            ch['bandwidth'] = model_params['bandwidth']
             mchirp = np.zeros(settings['nsam'], dtype=np.complex128)
             reflection_freq = -(c0 / ch['bpj_wavelength'] - fs * np.round(c0 / ch['bpj_wavelength'] / fs))
             mixup = np.fft.fft(np.exp(-1j * 2 * np.pi * ch['center_frequency'] *
-                                                        np.arange(sim_up_fft_len) / (fs / sim_up_fft_len)),
+                                      np.arange(sim_up_fft_len) / (fs / sim_up_fft_len)),
                                ch['nr']) / ch['nr']
-            wf_ifft = np.fft.fft(np.fft.ifft(wf_data[0, ch_num, :]), ch['nr'])
+            wf_ifft = np.fft.ifft(wf_data[0, ch_num, :])
             sp = np.sqrt(np.mean(abs(np.fft.ifft(wf_ifft)) ** 2) / ch['power'])
-            waveform = np.fft.ifft(wf_ifft) / sp
+            waveform = np.zeros(ch['nr'], dtype=np.complex128)
+            waveform[:len(wf_ifft)] = wf_ifft / sp
             mchirp[5:5 + ch['nr']] = waveform
-            '''plt.figure('wfdata'); plt.plot(np.fft.ifft(wf_ifft).real)
-            plt.figure('wfspectrum'); plt.plot(np.fft.fftfreq(len(wf_ifft), 1/fs),
-                                               db(wf_ifft)); plt.plot(np.fft.fftfreq(len(wf_ifft), 1/fs), db(mixup))
-            plt.figure(); plt.plot(db(np.fft.fft(mchirp)))
-            plt.show()'''
         else:
             mchirp = np.zeros(settings['nsam'], dtype=np.complex128)
             direction = np.linspace(0, 1, 10) if ch_num == 0 else np.linspace(1, 0, 10)
             waveform = genPulse(np.linspace(0, 1, 10), direction, ch['nr'], fs,
-                                              ch['center_frequency'], ch['bandwidth']) * np.sqrt(ch['power']) * 1000
+                                ch['center_frequency'], ch['bandwidth']) * np.sqrt(ch['power']) * 1000
             mchirp[5:5 + ch['nr']] = waveform
         ch['chirp'] = np.fft.fft(mchirp, sim_up_fft_len)
         ch['mchirp'] = mchirp
-    real_chirp = np.zeros(len(waveform) * 2, dtype=np.complex128)
-    real_chirp[:len(waveform) // 2] = np.fft.fft(waveform)[:len(waveform) // 2]
-    real_chirp[-len(waveform) // 2:] = np.fft.fft(waveform)[len(waveform) // 2:]
-    real_chirp = np.fft.ifft(real_chirp).real
-    if np.any(abs(real_chirp) > SHRT_MAX - 1):
-        real_chirp *= (SHRT_MAX - 2) / abs(real_chirp).max()
-    if settings['write_file']:
-        for rp in rps:
-            if rp.wavenumber == ch_num:
-                sdr_wr.writeWaveform(real_chirp, rp.wavenumber)
+        if settings['backproject'] or settings['rdmap']:
+            print('Calculating Taylor window.')
+            taywin = int(ch['bandwidth'] / fs * sim_up_fft_len)
+            taywin = taywin + 1 if taywin % 2 != 0 else taywin
+            taytay = taylor(taywin, sll=80)
+            tmp = np.zeros(sim_up_fft_len, dtype=np.complex128)
+            tmp[:taywin // 2] = taytay[-taywin // 2:]
+            tmp[-taywin // 2:] = taytay[:taywin // 2]
+            taytay = np.fft.ifft(tmp)
+            # tayd = np.fft.fftshift(taylor(cpi_len))
+            # taydopp = np.fft.fftshift(np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1)), axes=1)
 
+            print('Calculating matched filter.')
+            nco_lambda = c0 / band_frequency
+            reflection_freq = -(c0 / ch['bpj_wavelength'] - fs * np.round(c0 / ch['bpj_wavelength'] / fs))
+            if reflection_freq != 0:
+                overshot = int((abs(reflection_freq) - ch['bandwidth'] / 2) / (fs / sim_up_fft_len))
+                tayshifted = taytay * np.exp(-1j * 2 * np.pi * reflection_freq * np.arange(sim_up_fft_len) * 1 / fs)
+                mfilt = ch['chirp'].conj() * np.fft.fft(tayshifted, sim_up_fft_len)
+                if reflection_freq < 0:
+                    mfilt[sim_up_fft_len // 2 + overshot:] = 0
+                elif reflection_freq > 0:
+                    mfilt[:sim_up_fft_len // 2 - overshot] = 0
+            else:
+                mfilt = ch['chirp'].conj() * np.fft.fft(taytay, sim_up_fft_len)
+
+    ch['mfilt'] = cupy.array(np.tile(mfilt[::settings['sim_upsample']], (settings['cpi_len'], 1)).T,
+                             dtype=np.complex128)
+    ch['chirp'] = cupy.array(np.tile(ch['chirp'], (settings['cpi_len'], 1)).T, dtype=np.complex128)
+
+    if settings['write_file']:
+        real_chirp = np.zeros(len(waveform) * 2, dtype=np.complex128)
+        real_chirp[:len(waveform) // 2] = np.fft.fft(waveform)[:len(waveform) // 2]
+        real_chirp[-len(waveform) // 2:] = np.fft.fft(waveform)[len(waveform) // 2:]
+        real_chirp = np.fft.ifft(real_chirp).real
+        if np.any(abs(real_chirp) > SHRT_MAX - 1):
+            real_chirp *= (SHRT_MAX - 2) / abs(real_chirp).max()
+
+            for rp in rps:
+                if rp.wavenumber == ch_num:
+                    sdr_wr.writeWaveform(real_chirp, rp.wavenumber)
 
 # Write out cal pulses for .sar file
 sys_to_gps = np.poly1d(np.polyfit(sdr.timesync['systime'], sdr.timesync['secs'], 1))
@@ -376,39 +363,6 @@ if settings['write_file']:
                                   settings['tx'][rp.tx_num]['mchirp'],
                                   channel=ch_num, is_cal=True)
 
-# Chirp and matched filter calculations
-for ch_num, ch in enumerate(settings['tx']):
-    if not settings['no_backproject']:
-        print('Calculating Taylor window.')
-        taywin = int(ch['bandwidth'] / fs * sim_up_fft_len)
-        taywin = taywin + 1 if taywin % 2 != 0 else taywin
-        taytay = taylor(taywin, sll=80)
-        tmp = np.zeros(sim_up_fft_len, dtype=np.complex128)
-        tmp[:taywin // 2] = taytay[-taywin // 2:]
-        tmp[-taywin // 2:] = taytay[:taywin // 2]
-        taytay = np.fft.ifft(tmp)
-        # tayd = np.fft.fftshift(taylor(cpi_len))
-        # taydopp = np.fft.fftshift(np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1)), axes=1)
-
-        print('Calculating matched filter.')
-        nco_lambda = c0 / band_frequency
-        reflection_freq = -(c0 / ch['bpj_wavelength'] - fs * np.round(c0 / ch['bpj_wavelength'] / fs))
-        if reflection_freq != 0:
-            overshot = int((abs(reflection_freq) - ch['bandwidth'] / 2) / (fs / sim_up_fft_len))
-            tayshifted = taytay * np.exp(-1j * 2 * np.pi * reflection_freq * np.arange(sim_up_fft_len) * 1 / fs)
-            mfilt = ch['chirp'].conj() * np.fft.fft(tayshifted, sim_up_fft_len)
-            if reflection_freq < 0:
-                mfilt[sim_up_fft_len // 2 + overshot:] = 0
-            elif reflection_freq > 0:
-                mfilt[:sim_up_fft_len // 2 - overshot] = 0
-        else:
-            mfilt = ch['chirp'].conj() * np.fft.fft(taytay, sim_up_fft_len)
-
-        ch['mfilt'] = cupy.array(np.tile(mfilt[::settings['sim_upsample']], (settings['cpi_len'], 1)).T,
-                                 dtype=np.complex128)
-
-    ch['chirp'] = cupy.array(np.tile(ch['chirp'], (settings['cpi_len'], 1)).T, dtype=np.complex128)
-
 bg.resample(grid_center, settings['grid_width'], settings['grid_height'], (settings['nbpj_pts'], settings['nbpj_pts']))
 # gx, gy, gz = bg.getGrid(bg.origin, settings['grid_width'], settings['grid_height'], (settings['nbpj_pts'], settings['nbpj_pts']))
 gx, gy, gz = bg.getGrid()
@@ -427,9 +381,10 @@ ng[ng.shape[0] // 2, ng.shape[1] // 2] = 1e5
 # ng = np.linalg.norm(np.array(ng), axis=2)
 # bg._refgrid = ng
 
-bgx_gpu = cupy.array(gx, dtype=np.float64)
-bgy_gpu = cupy.array(gy, dtype=np.float64)
-bgz_gpu = cupy.array(gz, dtype=np.float64)
+if settings['backproject']:
+    bgx_gpu = cupy.array(gx, dtype=np.float64)
+    bgy_gpu = cupy.array(gy, dtype=np.float64)
+    bgz_gpu = cupy.array(gz, dtype=np.float64)
 ref_coef_gpu = cupy.array(bg.refgrid, dtype=np.float64)
 rbins_gpu = cupy.array(settings['ranges'], dtype=np.float64)
 rmat_gpu = cupy.array(bg.transforms[0], dtype=np.float64)
@@ -453,13 +408,13 @@ bpg_bpj = (gx.shape[0] // threads_per_block[0] + 1,
            gx.shape[1] // threads_per_block[1] + 1)
 
 # Data blocks for imaging
-if not settings['no_backproject']:
-    bpj_res = np.zeros((len(rps), *gx.shape), dtype=np.complex128)
-if settings['do_truth_backproject']:
-    bpj_truedata = np.zeros(gx.shape, dtype=np.complex128)
+if settings['backproject']:
+    bpj_res = np.zeros(gx.shape, dtype=np.complex128)
 
 rng_states = create_xoroshiro128p_states(bpg_ranges[0] * bpg_ranges[1] * threads_per_block[0] * threads_per_block[1],
                                          seed=10)
+
+atmos_effect = cupy.array(np.ones_like(settings['ranges']), dtype=np.float64)
 
 # Run through loop to get data simulated
 if settings['use_sdr_waveform']:
@@ -468,6 +423,23 @@ else:
     data_t = np.arange(rps[0].gpst[0], rps[0].gpst[0] + settings['collect_time'], 1 / settings['prf'])
 print('Simulating...')
 pulse_pos = 0
+
+# Get MIMO virtual array for processing
+ants = settings['antennas']
+tx_ant_loc = [np.array(ants[s['antenna']]['offset']) for s in settings['tx']]
+rx_ant_loc = [np.array(ants[r]['offset']) for r in settings['rx']]
+vx_array = np.concatenate([[rx + tx for tx in tx_ant_loc] for rx in rx_ant_loc])
+avec_gpu = cupy.array(np.exp(1j * 2 * np.pi *
+                             np.array([[s['center_frequency'] for s in settings['tx']]
+                                       for _ in settings['rx']]).flatten() / c0 * vx_array.dot(-azelToVec(0, 0))),
+                      dtype=np.complex128)
+if settings['rdmap']:
+    myDopWindow = taylor(settings['cpi_len'], 11, 70).astype(np.complex128)
+    slowTimeWindow = myDopWindow.reshape((settings['cpi_len'], 1)).dot(np.ones((1, up_nsam)))
+    slow_time_gpu = cupy.array(slowTimeWindow.T, dtype=np.complex128)
+    camfig = plt.figure()
+    cam = Camera(camfig)
+
 for tidx in tqdm(np.arange(0, len(data_t), settings['cpi_len'])):
     init_xoroshiro128p_states(rng_states, seed=10)
     ts = data_t[tidx + np.arange(min(settings['cpi_len'], len(data_t) - tidx))]
@@ -475,13 +447,16 @@ for tidx in tqdm(np.arange(0, len(data_t), settings['cpi_len'])):
     rtdata = cupy.zeros((sim_up_fft_len, tmp_len, nrx), dtype=np.complex128)
     debug_flag = False
     for rp in rps:
+        # Run through each tx/rx combination and get antenna values
         debug_flag = settings['debug'] if ts[0] < rp.gpst.mean() <= ts[-1] else False
         panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
         elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
         posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
         postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
-        data_r = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * settings['noise_level']
-        data_i = cupy.random.randn(sim_up_nsam, tmp_len, dtype=np.float64) * settings['noise_level']
+
+        # Generate range profiles for this channel
+        data_r = cupy.array(np.random.randn(sim_up_nsam, tmp_len) * settings['noise_level'], dtype=np.float64)
+        data_i = cupy.array(np.random.randn(sim_up_nsam, tmp_len) * settings['noise_level'], dtype=np.float64)
         genRangeWithoutIntersection[bpg_ranges, threads_per_block](rmat_gpu, shift_gpu, ngz_gpu, ref_coef_gpu,
                                                                    postx_gpu, posrx_gpu, panrx_gpu, elrx_gpu,
                                                                    panrx_gpu, elrx_gpu, data_r, data_i, rng_states,
@@ -493,24 +468,26 @@ for tidx in tqdm(np.arange(0, len(data_t), settings['cpi_len'])):
                                                                    rp.el_half_bw, settings['pts_per_tri'],
                                                                    debug_flag)
         cuda.synchronize()
+
+        # This fixes a weird thing where NaNs appear
         data_r[np.isnan(data_r)] = 0
         data_i[np.isnan(data_i)] = 0
 
-        # Create data using chirp
+        # Create data using chirp and range profile - this is in the frequency domain still
         rtdata[:, :, rx_to_chan[rp.rx_num]] += cupy.fft.fft(data_r + 1j * data_i, sim_up_fft_len, axis=0) * \
-                                   settings['tx'][rp.tx_num]['chirp'][:, :tmp_len]
+                                               settings['tx'][rp.tx_num]['chirp'][:, :tmp_len]
         cuda.synchronize()
 
         # Simulated data debug checks
-        if ts[0] < rp.gpst.mean() <= ts[-1] and not settings['no_backproject'] and settings['debug']:
+        if ts[0] < rp.gpst.mean() <= ts[-1] and settings['backproject'] and settings['debug']:
             print(f'Center of data at {tidx}')
             locp = rp.rxpos(ts[0])
-            test = cupy.fft.ifft(rtdata, axis=0).get()[:sim_up_nsam:sim_bpj_decimation, :]
+            test = cupy.fft.ifft(rtdata, axis=0).get()[:sim_up_nsam, :]
             angd = angs_debug.get()
             locd = pts_debug.get()
 
         if settings['write_file']:
-            wr_data = cupy.fft.ifft(rtdata, axis=0).get()[:sim_up_nsam:sim_bpj_decimation, :]
+            wr_data = cupy.fft.ifft(rtdata, axis=0).get()[:sim_up_nsam, :]
             for ch in range(wr_data.shape[2]):
                 for idx in range(wr_data.shape[1]):
                     att = 1
@@ -523,58 +500,59 @@ for tidx in tqdm(np.arange(0, len(data_t), settings['cpi_len'])):
 
         cuda.synchronize()
 
-    if not settings['no_backproject']:
+    posesrx = np.mean([rp.rxpos(ts) for rp in rps], axis=0)
+    posestx = np.mean([rp.txpos(ts) for rp in rps], axis=0)
+    rcdata = cupy.zeros((up_nsam, tmp_len, len(rps)), dtype=np.complex128)
+    for rp_idx, rp in enumerate(rps):
+        # Range compress the data, upsample it, and send to backprojection kernel
+        rcdata_tmp = rtdata[:, :, rx_to_chan[rp.rx_num]] * settings['tx'][rp.tx_num]['mfilt'][:, :tmp_len]
+        upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
+        upsample_data[:fft_len // 2, :] = rcdata_tmp[:fft_len // 2, :]
+        upsample_data[-fft_len // 2:, :] = rcdata_tmp[-fft_len // 2:, :]
+        rcdata[:, :, rp_idx] = cupy.fft.ifft(upsample_data, axis=0)[:up_nsam, :]
+    panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
+    elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
+    posrx_gpu = cupy.array(posesrx, dtype=np.float64)
+    postx_gpu = cupy.array(posestx, dtype=np.float64)
+
+    # eig_values, Uh = np.linalg.eigh(cupy.cov(cupy.mean(rcdata, axis=1).T).get())
+    # rcdata = rcdata.dot(cupy.array(Uh[:, 0].reshape((-1, 1)), dtype=np.complex128)).reshape((up_nsam, tmp_len))
+    rcdata = rcdata.dot(avec_gpu).reshape((up_nsam, tmp_len))
+    if settings['backproject']:
         if ts[0] < rp.gpst.mean() <= ts[-1]:
-            test_bj = np.zeros((sim_up_nsam, tmp_len, len(rps)), dtype=np.complex128)
-        for rp_idx, rp in enumerate(rps):
-            bpj_grid = cupy.zeros(gx.shape, dtype=np.complex128)
-            panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
-            elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
-            posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
-            postx_gpu = cupy.array(rp.txpos(ts), dtype=np.float64)
-            # Decimate to fit backprojection
-            rcdata = cupy.fft.ifft(rtdata[:, :, rx_to_chan[rp.rx_num]] *
-                                   settings['tx'][rp.tx_num]['mfilt'][:, :tmp_len],
-                                   axis=0)[:sim_up_nsam:sim_bpj_decimation, :]
-            backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu,
-                                                    panrx_gpu,
-                                                    elrx_gpu, panrx_gpu, elrx_gpu, rcdata, bpj_grid,
-                                                    settings['tx'][rp.tx_num]['bpj_wavelength'],
-                                                    settings['ranges'][0] / c0,
-                                                    rp.fs * settings['upsample'],
-                                                    settings['tx'][rp.tx_num]['bandwidth'],
-                                                    rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
-                                                    angs_debug, debug_flag)
+            test_bj = np.zeros((up_nsam, tmp_len), dtype=np.complex128)
+        bpj_grid = cupy.zeros(gx.shape, dtype=np.complex128)
+        backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu,
+                                                panrx_gpu,
+                                                elrx_gpu, panrx_gpu, elrx_gpu, rcdata, bpj_grid,
+                                                settings['tx'][rp.tx_num]['bpj_wavelength'],
+                                                settings['ranges'][0] / c0,
+                                                rp.fs * settings['upsample'],
+                                                settings['tx'][rp.tx_num]['bandwidth'],
+                                                rp.az_half_bw, rp.el_half_bw, 0, pts_debug,
+                                                angs_debug, debug_flag, atmos_effect)
 
-            cuda.synchronize()
-            if ts[0] < rp.gpst.mean() <= ts[-1]:
-                locp_bj = rp.rxpos(ts[-1])
-                test_bj[:, :, rp_idx] = rcdata.get()
-                angd_bj = angs_debug.get()
-                locd_bj = pts_debug.get()
-            cuda.synchronize()
-            bpj_res[rp_idx] += bpj_grid.get()
-
-    # Reset the grid for truth data
-    if settings['do_truth_backproject']:
-        trtdata = cupy.fft.fft(cupy.array(sdr.getPulses(frames, 0),
-                                          dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
-        tupsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
-        tupsample_data[:fft_len // 2, :] = trtdata[:fft_len // 2, :]
-        tupsample_data[-fft_len // 2:, :] = trtdata[-fft_len // 2:, :]
-        trtdata = cupy.fft.ifft(tupsample_data, axis=0)[:up_nsam, :]
-        cupy.cuda.Device().synchronize()
-        bpj_grid2 = cupy.zeros((settings['nbpj_pts'], settings['nbpj_pts']), dtype=np.complex128)
-
-        backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, bgx_gpu, bgy_gpu, bgz_gpu, rbins_gpu, panrx_gpu,
-                                                elrx_gpu,
-                                                panrx_gpu, elrx_gpu, trtdata, bpj_grid2,
-                                                settings['bpj_wavelength'], settings['ranges'][0] / c0,
-                                                rp.fs * settings['upsample'], bwidth, rp.az_half_bw, rp.el_half_bw, 0,
-                                                pts_debug,
-                                                angs_debug, False)
         cuda.synchronize()
-        bpj_truedata += bpj_grid2.get()
+        if ts[0] < rp.gpst.mean() <= ts[-1]:
+            locp_bj = rp.rxpos(ts[-1])
+            test_bj = rcdata.get()
+            angd_bj = angs_debug.get()
+            locd_bj = pts_debug.get()
+        cuda.synchronize()
+        bpj_res += bpj_grid.get()
+    if settings['rdmap']:
+        # get grazing angles over range bins
+        graze_angles = np.arcsin(rp.pos(ts[0])[2] / settings['ranges'])
+        rvec = azelToVec(rp.pan(ts[0]), graze_angles)
+        dopp_cen = (2 / settings['tx'][rp.tx_num]['bpj_wavelength']) * \
+                   rvec.T.dot(rp.vel(ts[0]).flatten()) % settings['prf']
+        slowtimes = np.arange(tmp_len).reshape((1, tmp_len)) / settings['prf']
+        slowtimePhases = np.exp(1j * 2 * np.pi * -dopp_cen.reshape(up_nsam, 1).dot(slowtimes))
+        phases_gpu = cupy.array(slowtimePhases, dtype=np.complex128)
+        doppdata = cupy.fft.fft(rcdata * phases_gpu * slow_time_gpu[:, :tmp_len], axis=1).get()
+        plt.imshow(db(doppdata))
+        plt.axis('tight')
+        cam.snap()
 
     del panrx_gpu
     del postx_gpu
@@ -583,37 +561,42 @@ for tidx in tqdm(np.arange(0, len(data_t), settings['cpi_len'])):
     del data_r
     del data_i
     del rtdata
-    if not settings['no_backproject']:
-        del rcdata
+    del rcdata
+    del rcdata_tmp
+    del upsample_data
+    if settings['backproject']:
         del bpj_grid
+    if settings['rdmap']:
+        del phases_gpu
     mempool.free_all_blocks()
-
-    if settings['do_truth_backproject']:
-        del trtdata
-        del tupsample_data
-        del bpj_grid2
 
 del rbins_gpu
 del rmat_gpu
 del shift_gpu
-del bgx_gpu
-del bgy_gpu
-del bgz_gpu
+if settings['backproject']:
+    del bgx_gpu
+    del bgy_gpu
+    del bgz_gpu
 del ngz_gpu
 for tx_it in settings['tx']:
     tx_it['chirp'] = tx_it['chirp'].get()
-    if not settings['no_backproject']:
+    if settings['backproject']:
         tx_it['mfilt'] = tx_it['mfilt'].get()
+if settings['rdmap']:
+    del slow_time_gpu
 mempool.free_all_blocks()
 
 if settings['write_file']:
-    sdr_wr.writeXML(settings['prf'])
+    sdr_wr.finalize(settings['prf'])
     print(f'File written as {sdr_wr.fnme}')
 
 # dfig = go.Figure(data=[go.Mesh3d(x=bg.grid[:, :, 0].ravel(), y=bg.grid[:, :, 1].ravel(), z=bg.grid[:, :, 2].ravel(),
 #                                  facecolor=bg.refgrid.ravel(), facecolorsrc='teal')])
 
-if settings['debug'] and not settings['no_backproject']:
+if settings['debug'] and settings['rdmap']:
+    anim = cam.animate()
+
+if settings['debug'] and settings['backproject']:
     print('Generating debug plots...')
     ngx, ngy, ngz = bg.getGrid()
     flight = rp.pos(rp.gpst)
@@ -633,7 +616,8 @@ if settings['debug'] and not settings['no_backproject']:
                            name='SimGrid Projected Positions')
         dfig.add_scatter3d(x=locd_bj[0, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[0],
                            y=locd_bj[1, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[1],
-                           z=locd_bj[2, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[2], mode='markers',
+                           z=locd_bj[2, :settings['nbpj_pts'], :settings['nbpj_pts']].flatten() + locp[2],
+                           mode='markers',
                            name='BPJ Grid Projected Positions')
         dfig.show()
     else:
@@ -646,16 +630,14 @@ if settings['debug'] and not settings['no_backproject']:
         fig.show()
 
     plt.figure('Doppler data')
-    tayd = taylor(settings['cpi_len'])
-    taydopp = np.ones((up_nsam, 1)).dot(tayd.reshape(1, -1))
     for t in range(nrx):
         plt.subplot(2, nrx, t * 2 + 1)
         plt.title('Generated')
-        plt.imshow(np.fft.fftshift(db(np.fft.fft(test[:, :, t] * taydopp, axis=1)), axes=1))
+        plt.imshow(np.fft.fftshift(db(np.fft.fft(test[:, :, t], axis=1)), axes=1))
         plt.axis('tight')
         plt.subplot(2, nrx, t * 2 + 2)
         plt.title('Post-BJ')
-        plt.imshow(np.fft.fftshift(db(np.fft.fft(test_bj[:, :, t] * taydopp, axis=1)), axes=1))
+        plt.imshow(np.fft.fftshift(db(np.fft.fft(test_bj, axis=1)), axes=1))
         plt.axis('tight')
 
     plt.figure('Time Data')
@@ -664,30 +646,13 @@ if settings['debug'] and not settings['no_backproject']:
         plt.imshow(db(test[:, :, t]))
         plt.axis('tight')
 
-    if settings['do_truth_backproject']:
-        bfig = px.scatter(x=gx.flatten(), y=gy.flatten(), color=db(bpj_truedata).flatten())
-        bfig.show()
-
-        plt.figure('IMSHOW truedata')
-        plt.imshow(db(bpj_truedata), origin='lower')
-        plt.axis('tight')
-
     plt.figure('BPJ Reference Grid')
     plt.imshow(db(bg.refgrid), origin='lower', cmap='gray')
     plt.axis('tight')
     plt.axis('off')
 
-    plt.figure('BPJ Grid')
-    gr_pl_sz = int(np.ceil(np.sqrt(bpj_res.shape[0])))
-    for idx in range(bpj_res.shape[0]):
-        plt.subplot(gr_pl_sz, gr_pl_sz, idx + 1)
-        plt.title(f'Channel {idx} - Tx {rps[idx].tx_num}, Rx {rps[idx].rx_num}')
-        plt.imshow(db(bpj_res[idx, ...]), origin='lower', cmap='gray')
-        plt.axis('tight')
-        plt.axis('off')
-
     plt.figure('BPJ Sum Grid')
-    plt.imshow(db(np.sum(bpj_res, axis=0)), origin='lower', cmap='gray')
+    plt.imshow(db(bpj_res), origin='lower', cmap='gray')
     plt.axis('tight')
     plt.axis('off')
 
@@ -696,188 +661,23 @@ if settings['debug'] and not settings['no_backproject']:
     plt.axis('tight')
 
     plt.figure('Waveforms')
-    freqs = np.fft.fftfreq(up_fft_len, 1 / fs)
     for t in range(nrx):
         plt.subplot(1, nrx, t + 1)
-        plt.plot(freqs, db(settings['tx'][t]['chirp']), c='blue')
-        plt.plot(freqs, db(settings['tx'][t]['mfilt']), c='orange')
+        plt.plot(np.fft.fftshift(np.fft.fftfreq(sim_up_fft_len, 1 / fs)),
+                 np.fft.fftshift(db(settings['tx'][t]['chirp'][:, 0])), c='blue')
+        plt.plot(np.fft.fftshift(np.fft.fftfreq(fft_len, 1 / fs)),
+                 np.fft.fftshift(db(settings['tx'][t]['mfilt'][:, 0])), c='orange')
 
     oval_times = rps[0].gpst[::len(rps[0].gpst) // 10]
     plat_height = 0 if settings['use_sdr_gps'] else rps[0].pos(oval_times)[2].mean()
     midrange = (rps[0].calcRanges(plat_height)[0] + rps[0].calcRanges(plat_height)[1]) / 2
-    swath = np.sqrt(rps[0].calcRanges(plat_height)[1]**2 - plat_height**2) - \
-        np.sqrt(rps[0].calcRanges(plat_height)[0]**2 - plat_height**2)
+    swath = np.sqrt(rps[0].calcRanges(plat_height)[1] ** 2 - plat_height ** 2) - \
+            np.sqrt(rps[0].calcRanges(plat_height)[0] ** 2 - plat_height ** 2)
 
     fig, ax = plt.subplots(1, 1)
     ax.scatter(locd[0, ...].ravel(), locd[1, ...].ravel(), c=angd[2, ...].ravel())
     for ot in oval_times:
         ax.add_patch(Ellipse((rps[0].boresight(ot).flatten() * midrange + rp.pos(ot))[:2],
                              midrange * rps[0].az_half_bw * 2, swath, angle=rps[0].pan(ot) / DTR, fill=False))
-
-    '''gps_written = loadPostCorrectionsGPSData(
-        '/home/jeff/repo/Debug/sim_write_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
-    gps_orig = loadPostCorrectionsGPSData(
-        '/home/jeff/repo/Debug/09202021/SAR_09202021_151245_Channel_1_X-Band_9_GHz_VV_postCorrectionsGPSData.dat')
-    ew, nw, uw = llh2enu(gps_written['rx_lat'], gps_written['rx_lon'], gps_written['rx_alt'], bg.ref)
-    ew = gps_written['rx_lat'] * gps_written['latConv']
-    nw = gps_written['rx_lon'] * gps_written['lonConv']
-    eo, no, uo = llh2enu(gps_orig['rx_lat'], gps_orig['rx_lon'], gps_orig['rx_alt'], bg.ref)
-    eo = gps_orig['rx_lat'] * gps_orig['latConv']
-    no = gps_orig['rx_lon'] * gps_orig['lonConv']
-    plt.figure('GPS datacheck')
-    plt.subplot(2, 2, 1)
-    plt.title('e')
-    plt.plot(gps_written['sec'], ew)
-    plt.plot(gps_orig['sec'], eo)
-    # plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[0])
-    plt.subplot(2, 2, 2)
-    plt.title('n')
-    plt.plot(gps_written['sec'], nw)
-    plt.plot(gps_orig['sec'], no)
-    # plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[1])
-    plt.subplot(2, 2, 3)
-    plt.title('u')
-    plt.plot(gps_written['sec'], uw)
-    plt.plot(gps_orig['sec'], uo)
-    # plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[2])
-    # plt.legend(['written', 'original', 'platform'])
-
-    plt.figure('GPS txdatacheck')
-    ew, nw, uw = llh2enu(gps_written['tx_lat'], gps_written['tx_lon'], gps_written['tx_alt'], bg.ref)
-    eo, no, uo = llh2enu(gps_orig['tx_lat'], gps_orig['tx_lon'], gps_orig['tx_alt'], bg.ref)
-    plt.subplot(2, 2, 1)
-    plt.title('e')
-    plt.plot(gps_written['sec'], ew)
-    plt.plot(gps_orig['sec'], eo)
-    plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[0])
-    plt.subplot(2, 2, 2)
-    plt.title('n')
-    plt.plot(gps_written['sec'], nw)
-    plt.plot(gps_orig['sec'], no)
-    plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[1])
-    plt.subplot(2, 2, 3)
-    plt.title('u')
-    plt.plot(gps_written['sec'], uw)
-    plt.plot(gps_orig['sec'], uo)
-    plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[2])
-    plt.legend(['written', 'original', 'platform'])
-
-    plt.figure('GPS timecheck')
-    plt.subplot(2, 2, 1)
-    plt.title('e')
-    plt.scatter(gps_orig['sec'], eo)
-    plt.scatter(gps_written['sec'], ew)
-    plt.scatter(rp.gpst, rp.pos(rp.gpst)[0])
-    plt.subplot(2, 2, 2)
-    plt.title('n')
-    plt.scatter(gps_orig['sec'], no)
-    plt.scatter(gps_written['sec'], nw)
-    plt.scatter(rp.gpst, rp.pos(rp.gpst)[1])
-    plt.subplot(2, 2, 3)
-    plt.title('u')
-    plt.scatter(gps_orig['sec'], uo)
-    plt.scatter(gps_written['sec'], uw)
-    plt.scatter(rp.gpst, rp.pos(rp.gpst)[2])
-    plt.legend(['original', 'written', 'platform'])
-
-    plt.figure('GPS az check')
-    plt.plot(gps_orig['sec'], gps_orig['az'])
-    plt.plot(gps_written['sec'], gps_written['az'])
-    plt.plot(rp.gpst, rp.att(rp.gpst)[2])
-
-    gps_written = loadPreCorrectionsGPSData(
-        '/home/jeff/repo/Debug/sim_write_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')
-    gps_orig = loadPreCorrectionsGPSData(
-        '/home/jeff/repo/Debug/09202021/SAR_09202021_151245_Channel_1_X-Band_9_GHz_VV_preCorrectionsGPSData.dat')
-    plt.figure('GPS precorrection datacheck')
-    ew, nw, uw = llh2enu(gps_written['lat'], gps_written['lon'], gps_written['alt'], bg.ref)
-    eo, no, uo = llh2enu(gps_orig['lat'], gps_orig['lon'], gps_orig['alt'], bg.ref)
-    plt.subplot(2, 2, 1)
-    plt.title('e')
-    plt.plot(gps_written['sec'], ew)
-    plt.plot(gps_orig['sec'], eo)
-    plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[0])
-    plt.subplot(2, 2, 2)
-    plt.title('n')
-    plt.plot(gps_written['sec'], nw)
-    plt.plot(gps_orig['sec'], no)
-    plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[1])
-    plt.subplot(2, 2, 3)
-    plt.title('u')
-    plt.plot(gps_written['sec'], uw)
-    plt.plot(gps_orig['sec'], uo)
-    plt.plot(gps_orig['sec'], rp.pos(gps_orig['sec'])[2])
-    plt.legend(['written', 'original', 'platform'])
-
-    plt.figure('GPSV check')
-    plt.subplot(2, 2, 1)
-    plt.title('e')
-    plt.plot(gps_written['sec'], gps_written['ve'])
-    plt.plot(gps_orig['sec'], gps_orig['ve'])
-    plt.plot(gps_orig['sec'], rp.vel(gps_orig['sec'])[0])
-    plt.subplot(2, 2, 2)
-    plt.title('n')
-    plt.plot(gps_written['sec'], gps_written['vn'])
-    plt.plot(gps_orig['sec'], gps_orig['vn'])
-    plt.plot(gps_orig['sec'], rp.vel(gps_orig['sec'])[1])
-    plt.subplot(2, 2, 3)
-    plt.title('u')
-    plt.plot(gps_written['sec'], gps_written['vu'])
-    plt.plot(gps_orig['sec'], gps_orig['vu'])
-    plt.plot(gps_orig['sec'], rp.vel(gps_orig['sec'])[2])
-    plt.legend(['written', 'original', 'platform'])
-
-    plt.figure('GPS attitude check')
-    plt.subplot(2, 2, 1)
-    plt.title('r')
-    plt.plot(gps_written['sec'], gps_written['r'])
-    plt.plot(gps_orig['sec'], gps_orig['r'])
-    plt.plot(gps_orig['sec'], rp.att(gps_orig['sec'])[0])
-    plt.subplot(2, 2, 2)
-    plt.title('p')
-    plt.plot(gps_written['sec'], gps_written['p'])
-    plt.plot(gps_orig['sec'], gps_orig['p'])
-    plt.plot(gps_orig['sec'], rp.att(gps_orig['sec'])[1])
-    plt.subplot(2, 2, 3)
-    plt.title('az')
-    plt.plot(gps_written['sec'], gps_written['az'])
-    plt.plot(gps_orig['sec'], gps_orig['az'])
-    plt.plot(gps_orig['sec'], rp.att(gps_orig['sec'])[2])
-    plt.legend(['written', 'original', 'platform'])
-
-    try:
-        sdr_written = SDRParse('/home/jeff/repo/Raw/sim_write.sar')
-        check_rp = SDRPlatform(sdr_written)
-
-        plt.figure('Gimbal pointing vectors')
-        plt.subplot(2, 1, 1)
-        plt.title('pan')
-        plt.plot(rp.gpst, rp.pan(rp.gpst))
-        plt.plot(check_rp.gpst, check_rp.pan(check_rp.gpst))
-        plt.subplot(2, 1, 2)
-        plt.title('tilt')
-        plt.plot(rp.gpst, rp.tilt(rp.gpst))
-        plt.plot(check_rp.gpst, check_rp.tilt(check_rp.gpst))
-        plt.legend(['original', 'written'])
-
-        wr_sys_to_gps = np.poly1d(np.polyfit(sdr_written.timesync['systime'], sdr_written.timesync['secs'], 1))
-        plt.figure('Raw gimbal')
-        plt.subplot(2, 1, 1)
-        plt.title('pan')
-        plt.plot(sys_to_gps(sdr.gimbal['systime']), sdr.gimbal['pan'])
-        plt.plot(wr_sys_to_gps(sdr_written.gimbal['systime']), sdr_written.gimbal['pan'])
-        plt.subplot(2, 1, 2)
-        plt.title('tilt')
-        plt.plot(sys_to_gps(sdr.gimbal['systime']), sdr.gimbal['tilt'])
-        plt.plot(wr_sys_to_gps(sdr_written.gimbal['systime']), sdr_written.gimbal['tilt'])
-        plt.legend(['original', 'written'])
-
-        debug_refchirp = loadMatchedFilter('/home/jeff/repo/Debug/sim_write_Channel_1_ReferenceChirp.dat')
-        debug_mfilt = loadMatchedFilter('/home/jeff/repo/Debug/sim_write_Channel_1_MatchedFilter.dat')
-        plt.figure('Debug RC/MF')
-        plt.plot(debug_refchirp.real)
-        plt.plot(debug_mfilt.real)
-    except KeyError:
-        print('Written file not found for debug.')'''
 
     plt.show()

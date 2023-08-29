@@ -90,7 +90,7 @@ def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     :param bw_el: float. elevation beamwidth of antenna in radians.
     :return: float. Value by which a point should be scaled.
     """
-    a = np.pi / bw_az 
+    a = np.pi / bw_az
     b = np.pi / bw_el
     eldiff = diff(el_c, el_tx)
     azdiff = diff(az_c, az_tx)
@@ -250,8 +250,8 @@ def getAngleBlock(sp, data, range_bin, az, el, rx, fc):
 
 @cuda.jit
 def calcBounceFromMesh(rot, shift, vgz, vert_reflectivity,
-                                source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts, calc_angs,
-                                wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
+                       source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts, calc_angs,
+                       wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
     px, py = cuda.grid(ndim=2)
     if px < vgz.shape[0] and py < vgz.shape[1]:
@@ -263,9 +263,9 @@ def calcBounceFromMesh(rot, shift, vgz, vert_reflectivity,
             # I'm not sure why but vgz and vert_reflectivity need their indexes swapped here
             if ntri != 0 and px < vgz.shape[0] - 1 and py < vgz.shape[1] - 1:
                 bx = px + .5 - \
-                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
+                     xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
                 by = py + .5 - \
-                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
+                     xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
 
                 # Apply barycentric interpolation to get random point height and power
                 x3 = py - 1 if bx < py else py + 1
@@ -337,7 +337,7 @@ def calcBounceFromMesh(rot, shift, vgz, vert_reflectivity,
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
-                    reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
+                    reflectivity = 1.  # math.pow((1. / -a + 1.) / 20, 10)
                     att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt],
                                                 pantx[tt], eltx[tt], bw_az, bw_el) / (two_way_rng * two_way_rng)
                     if debug_flag and tt == 0:
@@ -391,22 +391,23 @@ def genRangeProfileFromMesh(ret_xyz, bounce_xyz, receive_xyz, return_pow, is_blo
         if n_samples > but > 0:
             # Get bounce vector dot product
             a = bounce_xyz[pt_idx, tt, 0] * rx / r_rng + bounce_xyz[pt_idx, tt, 1] * ry / r_rng + \
-                         bounce_xyz[pt_idx, tt, 2] * rz / r_rng
+                bounce_xyz[pt_idx, tt, 2] * rz / r_rng
             # Run scattering coefficient through scaling to simulate real-world scattering
             P = return_pow[pt_idx, tt]
             sigma = .04 * P
-            reflectivity = 1 #math.exp(-math.pow((a * a / (2 * sigma)), P))
+            reflectivity = 1  # math.exp(-math.pow((a * a / (2 * sigma)), P))
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt], bw_az, bw_el) * \
                   1 / (two_way_rng * two_way_rng) * reflectivity
             debug_att[pt_idx, tt] = att
             acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
             cuda.atomic.add(pd_r, (but, np.uint64(tt)), acc_val.real)
             cuda.atomic.add(pd_i, (but, np.uint64(tt)), acc_val.imag)
-            
-            
+
+
 @cuda.jit()
 def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
-                                source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts, calc_angs,
+                                source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts,
+                                calc_angs,
                                 wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
     # sourcery no-metrics
     px, py = cuda.grid(ndim=2)
@@ -419,9 +420,9 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
             # I'm not sure why but vgz and vert_reflectivity need their indexes swapped here
             if ntri != 0 and px < vgz.shape[0] - 1 and py < vgz.shape[1] - 1:
                 bx = px + .5 - \
-                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
+                     xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
                 by = py + .5 - \
-                xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
+                     xoroshiro128p_uniform_float32(rng_states, py * vgz.shape[0] + px)
 
                 # Apply barycentric interpolation to get random point height and power
                 x3 = py - 1 if bx < py else py + 1
@@ -493,7 +494,7 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
 
                 if n_samples > but > 0:
                     # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
-                    reflectivity = 1. #math.pow((1. / -a + 1.) / 20, 10)
+                    reflectivity = 1.  # math.pow((1. / -a + 1.) / 20, 10)
                     att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt],
                                                 pantx[tt], eltx[tt], bw_az, bw_el) / \
                           (two_way_rng * two_way_rng * two_way_rng * two_way_rng)
@@ -505,9 +506,12 @@ def genRangeWithoutIntersection(rot, shift, vgz, vert_reflectivity,
                 cuda.syncthreads()
 
 
-@cuda.jit()
+@cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], float64[:], '
+          'float64[:], float64[:], float64[:], complex128[:, :], complex128[:, :], float64, float64, float64, float64, '
+          'float64, float64, int32, float64[:, :, :], float64[:, :, :], int32, float64[:])')
 def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, eltx, pulse_data, final_grid,
-                wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
+                wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag,
+                range_atmos):
     """
     Backprojection kernel.
     :param source_xyz: array. XYZ values of the source, usually Tx antenna, in meters.
@@ -521,7 +525,8 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
     :param pantx: array. Tx azimuth values, in radians.
     :param eltx: array. Tx elevation values, in radians.
     :param pulse_data: array. Complex pulse return data.
-    :param final_grid: array. 2D matrix that accumulates all the corrected phase values. This is the backprojected image.
+    :param final_grid: array. 2D matrix that accumulates all the corrected phase values.
+    This is the backprojected image.
     :param wavelength: float. Wavelength used for phase correction.
     :param near_range_s: float. Near range value in seconds.
     :param source_fs: float. Sampling frequency in Hz.
@@ -598,6 +603,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             else:
                 bi0 = but
                 bi1 = but + 1
+
             if poly == 0:
                 # This is how APS does it (for reference, I guess)
                 a = cp[bi1]
@@ -607,27 +613,73 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
                     / (rbins[bi1] - rbins[bi0])
             else:
                 # This is a lagrange polynomial interpolation of the specified order
-                a = 0
-                k = poly + 1
-                ks = bi0 - (k - (k % 2)) / 2
-                while ks < 0:
-                    ks += 1
-                ke = ks + k
-                while ke > n_samples:
-                    ke -= 1
-                    ks -= 1
-                for idx in range(ks, ke):
+                ar = ai = 0
+                kspan = (poly + 1 if poly % 2 != 0 else poly) // 2
+                ks = max(bi0 - kspan, 0)
+                ke = bi0 + kspan + 1 if bi0 + kspan < n_samples else n_samples
+                for jdx in range(ks, ke):
                     mm = 1
-                    for jdx in range(ke - ks):
-                        if jdx != idx - ks:
-                            mm *= (tx_rng - rbins[jdx]) / (rbins[idx] - rbins[jdx])
-                    a += mm * cp[idx]
+                    for kdx in range(ks, ke):
+                        if jdx != kdx:
+                            mm *= (tx_rng - rbins[kdx]) / (rbins[jdx] - rbins[kdx])
+                    ar += mm * cp[jdx].real
+                    ai += mm * cp[jdx].imag
+                a = ar + 1j * ai
 
             # Multiply by phase reference function, attenuation and azimuth window
             # if tt == 0:
             #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
-            exp_phase = k * two_way_rng
+            ra = range_atmos[tt] if range_atmos is not None else 1
+            exp_phase = k * two_way_rng * ra
             acc_val += a * cmath.exp(1j * exp_phase) * att * az_win
+        final_grid[px, py] = acc_val
+
+
+@cuda.jit()
+def backproject_gmti(source_hght, source_vel, grange, gvel, pantx, pulse_data, final_grid,
+                     wavelength, near_range_s, source_fs, pri):
+    """
+    Backprojection kernel.
+    :param source_hght: array. Altitude of platform in meters.
+    :param source_vel: array. ENU velocity values of platform in m/s.
+    :param grange: array. Range values to project to. Usually the range bins of a collect.
+    :param gvel: array. Radial velocity values in m/s.
+    :param pantx: array. Inertial azimuth angle of antenna in radians.
+    :param pulse_data: array. Complex pulse return data.
+    :param final_grid: array. 2D matrix that accumulates all the corrected phase values.
+    This is the backprojected image.
+    :param wavelength: float. Wavelength used for phase correction.
+    :param near_range_s: float. Near range value in seconds.
+    :param source_fs: float. Sampling frequency in Hz.
+    :param pri: float. PRI interval of pulses.
+    :return: Nothing, technically. final_grid is the returned product.
+    """
+    px, py = cuda.grid(ndim=2)
+    if px < grange.shape[0] and py < grange.shape[1]:
+        # Load in all the parameters that don't change
+        acc_val = 0
+        nPulses = pulse_data.shape[1]
+        n_samples = pulse_data.shape[0]
+        k = 2 * np.pi / wavelength
+
+        # Grab pulse data and sum up for this pixel
+        for tt in range(nPulses):
+            cp = pulse_data[:, tt]
+            delta_t = pri * (tt - nPulses / 2)
+
+            graze = math.asin(source_hght[tt] / grange[px, py])
+            clutter_vel = source_vel[0, tt] * math.cos(graze) * math.sin(pantx[tt]) + \
+                          source_vel[1, tt] * math.cos(graze) * math.cos(pantx[tt]) + \
+                          source_vel[2, tt] * -math.sin(graze)
+            eff_rng = grange[px, py] - (clutter_vel + gvel[px, py]) * delta_t
+            rng_bin = (2 * grange[px, py] / c0 - 2 * near_range_s) * source_fs
+            but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+            if but > n_samples:
+                continue
+
+            # Multiply by phase reference function, attenuation and azimuth window
+            exp_phase = k * eff_rng
+            acc_val += cp[but] * cmath.exp(2j * exp_phase)
         final_grid[px, py] = acc_val
 
 
@@ -648,5 +700,3 @@ def getMaxThreads():
     maxThreads = int(np.sqrt(gpuDevice.MAX_THREADS_PER_BLOCK))
     sqrtMaxThreads = maxThreads // 2
     return sqrtMaxThreads, sqrtMaxThreads
-
-
