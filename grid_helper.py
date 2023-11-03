@@ -1,12 +1,8 @@
-import contextlib
 import numpy as np
 from simulation_functions import getElevationMap, llh2enu, \
-    enu2llh, getElevation, db, resampleGrid
-from SDRParsing import SDRParse
-from scipy.spatial.transform import Rotation as rot
+    enu2llh, getElevation, db
 from scipy.spatial import Delaunay
-from scipy.signal import medfilt2d
-from scipy.interpolate import CubicSpline, interpn, NearestNDInterpolator, LinearNDInterpolator
+from scipy.interpolate import interpn
 import pickle
 
 fs = 2e9
@@ -122,9 +118,7 @@ class SDREnvironment(Environment):
     cps = 1
     heading = 0.
 
-    def __init__(self, sdr_file, local_grid=None, origin=None):
-        # Load in the SDR file
-        sdr = SDRParse(sdr_file) if isinstance(sdr_file, str) else sdr_file
+    def __init__(self, sdr, local_grid=None, origin=None):
         grid = None
         print('SDR loaded')
         try:

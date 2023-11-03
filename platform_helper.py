@@ -1,9 +1,8 @@
 import numpy as np
-from scipy.interpolate import CubicSpline, interp1d
+from scipy.interpolate import CubicSpline
 from scipy.signal import medfilt
-from SDRParsing import SDRParse, AntennaPort
-from simulation_functions import llh2enu, findPowerOf2, loadPostCorrectionsGPSData, loadRawData, loadGimbalData, \
-    loadMatchedFilter, loadReferenceChirp
+from simulation_functions import llh2enu, loadGimbalData
+import pandas as pd
 
 c0 = 299792458.0
 TAC = 125e6
@@ -194,9 +193,27 @@ provide these things.
 
 class RadarPlatform(Platform):
 
-    def __init__(self, e=None, n=None, u=None, r=None, p=None, y=None, t=None, tx_offset=None, rx_offset=None,
-                 gimbal=None, gimbal_offset=None, gimbal_rotations=None, dep_angle=45.,
-                 squint_angle=0., az_bw=10., el_bw=10., fs=2e9, gps_data=None, tx_num=0, rx_num=0, wavenumber=0):
+    def __init__(self, e: np.ndarray = None,
+                 n: np.ndarray = None,
+                 u: np.ndarray = None,
+                 r: np.ndarray = None,
+                 p: np.ndarray = None,
+                 y: np.ndarray = None,
+                 t: np.ndarray = None,
+                 tx_offset: np.ndarray = None,
+                 rx_offset: np.ndarray = None,
+                 gimbal: np.ndarray = None,
+                 gimbal_offset: np.ndarray = None,
+                 gimbal_rotations: np.ndarray = None,
+                 dep_angle: float = 45.,
+                 squint_angle: float = 0.,
+                 az_bw: float = 10.,
+                 el_bw: float = 10.,
+                 fs: float = 2e9,
+                 gps_data: pd.DataFrame = None,
+                 tx_num: int = 0,
+                 rx_num: int = 0,
+                 wavenumber: int = 0):
         """
         Init function.
         :param e: array. Eastings in meters used to generate position function.
@@ -307,8 +324,17 @@ SDRParse.
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr_file, origin=None, tx_offset=None, rx_offset=None, fs=None, channel=0, gps_debug=None,
-                 gimbal_debug=None, gimbal_offset=None, gps_replace=None, use_ecef=True):
+    def __init__(self, sdr: object,
+                 origin: np.ndarray = None,
+                 tx_offset: np.ndarray = None,
+                 rx_offset: np.ndarray = None,
+                 fs: float = 2e9,
+                 channel: int = 0,
+                 gps_debug: str = None,
+                 gimbal_debug: str =None,
+                 gimbal_offset: np.ndarray = None,
+                 gps_replace: pd.DataFrame = None,
+                 use_ecef: bool = True):
         """
         Init function.
         :param sdr_file: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
@@ -321,7 +347,6 @@ class SDRPlatform(RadarPlatform):
         :param gps_debug: str. Path to a file of GPS debug data from APS for this collect. Optional.
         :param gimbal_debug: str. Path to a file of Gimbal debug data from APS for this collect. Optional.
         """
-        sdr = SDRParse(sdr_file) if type(sdr_file) == str else sdr_file
         t = sdr.gps_data.index.values
         fs = fs if fs is not None else sdr[channel].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
@@ -389,7 +414,7 @@ class SDRPlatform(RadarPlatform):
         except KeyError:
             channel_dep = sdr.ant[0].dep_ang / DTR
         if sdr[channel].is_receive_only:
-            tx_num = np.where([isinstance(n, AntennaPort) for n in sdr.port])[0][0]
+            tx_num = np.where([n is not None for n in sdr.port])[0][0]
         else:
             tx_num = sdr[channel].trans_num
             tx_offset = np.array([sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset

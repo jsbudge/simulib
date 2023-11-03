@@ -48,33 +48,6 @@ def interp(x, y, bg):
            (1 - xdiff) * ydiff + bg[x0, y0] * (1 - xdiff) * (1 - ydiff)
 
 
-'''@cuda.jit(device=True)
-def applyRadiationPattern(s_tx, s_ty, s_tz, rngtx, s_rx, s_ry, s_rz, rngrx, az_rx, el_rx, az_tx, el_tx, k, a_k, b_k):
-    a = a_k / k * (2 * np.pi)
-    b = b_k / k * (2 * np.pi)
-    el_c = math.asin(-s_tz / rngtx)
-    az_c = math.atan2(s_ty, s_tx)
-    eldiff = diff(el_c, el_tx)
-    azdiff = diff(az_c, az_tx)
-    tx_pat = abs(math.sin(math.pi * a * k * math.cos(azdiff) * math.cos(eldiff) / (2 * np.pi)) /
-                 (np.pi * a * k * math.cos(azdiff) * math.cos(eldiff) / (2 * np.pi)) *
-                 math.sin(np.pi * b * k * math.cos(eldiff) * math.sin(azdiff) / (2 * np.pi)) /
-                 (np.pi * b * k * math.cos(eldiff) * math.sin(azdiff) / (2 * np.pi))) * \
-             math.sqrt(math.sin(eldiff) * math.sin(eldiff) * math.cos(azdiff) * math.cos(azdiff) +
-                       math.cos(eldiff) * math.cos(eldiff))
-    el_c = math.asin(-s_rz / rngrx)
-    az_c = math.atan2(s_rx, s_ry)
-    eldiff = diff(el_c, el_rx)
-    azdiff = diff(az_c, az_rx)
-    rx_pat = abs(math.sin(math.pi * a * k * math.cos(azdiff) * math.cos(eldiff) / (2 * np.pi)) /
-                 (np.pi * a * k * math.cos(azdiff) * math.cos(eldiff) / (2 * np.pi)) *
-                 math.sin(np.pi * b * k * math.cos(eldiff) * math.sin(azdiff) / (2 * np.pi)) /
-                 (np.pi * b * k * math.cos(eldiff) * math.sin(azdiff) / (2 * np.pi))) * \
-             math.sqrt(math.sin(eldiff) * math.sin(eldiff) * math.cos(azdiff) * math.cos(azdiff) +
-                       math.cos(eldiff) * math.cos(eldiff))
-    return tx_pat * rx_pat'''
-
-
 @cuda.jit(device=True)
 def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     """
