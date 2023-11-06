@@ -155,7 +155,7 @@ class SDREnvironment(Environment):
         else:
             if origin is None:
                 origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
-                          getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+                          getElevation(sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX']))
             ref_llh = (sdr.ash['geo']['refLat'], sdr.ash['geo']['refLon'],
                        sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']
