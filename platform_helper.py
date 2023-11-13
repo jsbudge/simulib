@@ -56,7 +56,7 @@ class Platform(object):
         rr = CubicSpline(t, r)
         pp = CubicSpline(t, p)
         yy = CubicSpline(t, y) if gps_data is None else CubicSpline(new_t, gps_data['az'] + 2 * np.pi)
-        self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)])
+        self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)]).T
 
         # Take into account the gimbal if necessary
         if gimbal is not None:
@@ -115,24 +115,24 @@ class Platform(object):
         ee = CubicSpline(t, e)
         nn = CubicSpline(t, n)
         uu = CubicSpline(t, u)
-        self._pos = lambda lam_t: np.array([ee(lam_t), nn(lam_t), uu(lam_t)])
+        self._pos = lambda lam_t: np.array([ee(lam_t), nn(lam_t), uu(lam_t)]).T
         tte = CubicSpline(new_t, te)
         ttn = CubicSpline(new_t, tn)
         ttu = CubicSpline(new_t, tu)
-        self._txpos = lambda lam_t: np.array([tte(lam_t), ttn(lam_t), ttu(lam_t)])
+        self._txpos = lambda lam_t: np.array([tte(lam_t), ttn(lam_t), ttu(lam_t)]).T
         rre = CubicSpline(new_t, re)
         rrn = CubicSpline(new_t, rn)
         rru = CubicSpline(new_t, ru)
-        self._rxpos = lambda lam_t: np.array([rre(lam_t), rrn(lam_t), rru(lam_t)])
+        self._rxpos = lambda lam_t: np.array([rre(lam_t), rrn(lam_t), rru(lam_t)]).T
 
         # Build a velocity spline
         ve = CubicSpline(t, medfilt(np.gradient(e), 15) * INS_REFRESH_HZ)
         vn = CubicSpline(t, medfilt(np.gradient(n), 15) * INS_REFRESH_HZ)
         vu = CubicSpline(t, medfilt(np.gradient(u), 15) * INS_REFRESH_HZ)
-        self._vel = lambda lam_t: np.array([ve(lam_t), vn(lam_t), vu(lam_t)])
+        self._vel = lambda lam_t: np.array([ve(lam_t), vn(lam_t), vu(lam_t)]).T
 
         # heading check
-        self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[0], self._vel(lam_t)[1])
+        self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
 
         # Beampattern stuff
         self.pan = CubicSpline(new_t, gphi)

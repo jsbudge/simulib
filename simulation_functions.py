@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import os
 from functools import reduce
 # from numba import jit, prange
-from dted import Tile
+from dted import Tile, LatLon
 
 pio.renderers.default = 'browser'
 
@@ -210,24 +210,6 @@ def ecef2enu(x, y, z, refllh):
     return enu[0], enu[1], enu[2]
 
 
-def getMapLocation(p1, extent, init_llh, npts_background=500, resample=True):
-    pt_enu = llh2enu(*p1, init_llh)
-    lats = np.linspace(p1[0] - extent[0] / 2 / 111111, p1[0] + extent[0] / 2 / 111111, npts_background)
-    lons = np.linspace(p1[1] - extent[1] / 2 / 111111, p1[1] + extent[1] / 2 / 111111, npts_background)
-    lt, ln = np.meshgrid(lats, lons)
-    ltp = lt.flatten()
-    lnp = ln.flatten()
-    e, n, u = llh2enu(ltp, lnp, getElevationMap(ltp, lnp), init_llh)
-    if resample:
-        nlat, nlon, nh = resampleGrid(u.reshape(lt.shape), lats, lons, int(len(u) * .8))
-        e, n, u = llh2enu(nlat, nlon, nh + init_llh[2], init_llh)
-    point_cloud = np.array([e, n, u]).T
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(point_cloud)
-    pcd = pcd.translate(pt_enu)
-    return pcd
-
-
 def resampleGrid(grid, x, y, npts):
     gxx, gyy = np.gradient(grid / grid.max())
     gx = RectBivariateSpline(np.arange(len(x)), np.arange(len(y)), gxx)
@@ -243,34 +225,6 @@ def resampleGrid(grid, x, y, npts):
         pty[pty > len(y) - 1] = np.random.uniform(0, len(y) - 1, sum(pty > len(y) - 1))
     finalgrid = RectBivariateSpline(np.arange(len(x)), np.arange(len(y)), grid)
     return np.interp(ptx, np.arange(len(x)), x), np.interp(pty, np.arange(len(y)), y), finalgrid(ptx, pty, grid=False)
-
-
-def createMeshFromPoints(pcd):
-    pcd = pcd.voxel_down_sample(voxel_size=np.mean(pcd.compute_nearest_neighbor_distance()) / 1.5)
-    its = 0
-    while np.std(pcd.compute_nearest_neighbor_distance()) > 2. and its < 30:
-        dists = pcd.compute_nearest_neighbor_distance()
-        pcd = pcd.voxel_down_sample(voxel_size=np.mean(dists) / 1.5)
-        its += 1
-
-    avg_dist = np.mean(pcd.compute_nearest_neighbor_distance())
-    radius = 3 * avg_dist
-    radii = [radius, radius * 2]
-    pcd.estimate_normals()
-    try:
-        pcd.orient_normals_consistent_tangent_plane(100)
-    except RuntimeError:
-        pass
-
-    rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-        pcd, o3d.utility.DoubleVector(radii))
-    # rec_mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
-
-    rec_mesh.remove_duplicated_vertices()
-    rec_mesh.remove_duplicated_triangles()
-    rec_mesh.remove_degenerate_triangles()
-    rec_mesh.remove_unreferenced_vertices()
-    return rec_mesh
 
 
 def genPulse(phase_x, phase_y, nnr, nfs, nfc, bandw):
@@ -802,7 +756,7 @@ def getRawSDRParams(filename):
 def createIFTMatrix(m, fs):
     D = np.ones((m, m), dtype='complex64')
     for i in range(1, m):
-        D[:, m] = np.exp(1j * 2 * pi * i * fs / m * np.arange(m) * 1 / (fs / m))
+        D[:, m] = np.exp(1j * 2 * np.pi * i * fs / m * np.arange(m) * 1 / (fs / m))
 
     return D
 
