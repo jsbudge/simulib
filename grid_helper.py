@@ -1,12 +1,8 @@
-import contextlib
 import numpy as np
 from simulation_functions import getElevationMap, llh2enu, \
-    enu2llh, getElevation, db, resampleGrid
-from SDRParsing import SDRParse
-from scipy.spatial.transform import Rotation as rot
+    enu2llh, getElevation, db
 from scipy.spatial import Delaunay
-from scipy.signal import medfilt2d
-from scipy.interpolate import CubicSpline, interpn, NearestNDInterpolator, LinearNDInterpolator
+from scipy.interpolate import interpn
 import pickle
 
 fs = 2e9
@@ -62,8 +58,9 @@ class Environment(object):
                     np.array([shift_x, shift_y])
             latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
             sh = gx.shape
+            # This map is transposed from gx and gy
             gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2])
-        return pos_r[:, 0].reshape(sh), pos_r[:, 1].reshape(sh), gz.reshape(sh)
+        return pos_r[:, 0].reshape(sh, order='C'), pos_r[:, 1].reshape(sh, order='C'), gz.reshape(sh, order='F')
 
     def setGrid(self, newgrid, rmat, shift):
         self._refgrid = newgrid
@@ -78,7 +75,7 @@ class Environment(object):
                 np.array([self.shape[0] / 2, self.shape[1] / 2])
         self.setGrid(interpn((np.arange(self.refgrid.shape[0]),
                               np.arange(self.refgrid.shape[1])), self.refgrid, pos_r, bounds_error=False,
-                             fill_value=0).reshape(x.shape), rmat, shift)
+                             fill_value=0).reshape(x.shape, order='C'), rmat, shift)
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
@@ -122,13 +119,12 @@ class SDREnvironment(Environment):
     cps = 1
     heading = 0.
 
-    def __init__(self, sdr_file, local_grid=None, origin=None):
-        # Load in the SDR file
-        sdr = SDRParse(sdr_file) if isinstance(sdr_file, str) else sdr_file
+    def __init__(self, sdr, local_grid=None, origin=None):
         grid = None
         print('SDR loaded')
         try:
             asi = sdr.loadASI(sdr.files['asi'])
+            grid = abs(asi)
         except KeyError:
             print('ASI not found.')
             asi = np.random.rand(2000, 2000)
@@ -161,7 +157,7 @@ class SDREnvironment(Environment):
         else:
             if origin is None:
                 origin = (sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'],
-                          getElevation((sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX'])))
+                          getElevation(sdr.ash['geo']['centerY'], sdr.ash['geo']['centerX']))
             ref_llh = (sdr.ash['geo']['refLat'], sdr.ash['geo']['refLon'],
                        sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']

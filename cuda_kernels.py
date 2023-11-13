@@ -552,15 +552,15 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             cp = pulse_data[:, tt]
             # Get LOS vector in XYZ and spherical coordinates at pulse time
             # Tx first
-            tx = gx[px, py] - source_xyz[0, tt]
-            ty = gy[px, py] - source_xyz[1, tt]
-            tz = gz[px, py] - source_xyz[2, tt]
+            tx = gx[px, py] - source_xyz[tt, 0]
+            ty = gy[px, py] - source_xyz[tt, 1]
+            tz = gz[px, py] - source_xyz[tt, 2]
             tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
             # Rx
-            rx = gx[px, py] - receive_xyz[0, tt]
-            ry = gy[px, py] - receive_xyz[1, tt]
-            rz = gz[px, py] - receive_xyz[2, tt]
+            rx = gx[px, py] - receive_xyz[tt, 0]
+            ry = gy[px, py] - receive_xyz[tt, 1]
+            rz = gz[px, py] - receive_xyz[tt, 2]
             rx_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
             r_el = -math.asin(rz / rx_rng)
             r_az = math.atan2(-ry, rx) + np.pi / 2
@@ -586,7 +586,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-                                        bw_az, bw_el) / two_way_rng
+                                        bw_az, bw_el)#  / two_way_rng
             if debug_flag and tt == 0:
                 calc_angs[2, px, py] = two_way_rng
 
@@ -594,7 +594,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
-            az_win = raisedCosine(az_diffrx, signal_bw, .5)
+            az_win = raisedCosine(az_diffrx, bw_az, .5)
             # az_win = 1.
 
             if rbins[but - 1] < tx_rng < rbins[but]:

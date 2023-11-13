@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import os
 from functools import reduce
 # from numba import jit, prange
-from dted import Tile
+from dted import Tile, LatLon
 
 pio.renderers.default = 'browser'
 

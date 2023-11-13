@@ -54,13 +54,13 @@ with open('./settings.json', 'r') as sf:
 if len(command_line_args) > 1:
     bg_file = command_line_args[1]
 else:
-    bg_file = '/data5/SAR_DATA/2022/03032022/SAR_03032022_155926.sar'
+    bg_file = '/data6/SAR_DATA/2023/08092023/SAR_08092023_112016.sar'
 # bg_file = '/data5/SAR_DATA/2022/03282022/SAR_03282022_082824.sar'
 
 print(f'Loading SAR file {bg_file}...')
 sdr = load(bg_file)
 
-grid_center[2] = getElevation((grid_center[0], grid_center[1]))
+grid_center[2] = getElevation(grid_center[0], grid_center[1])
 
 # Generate the background for simulation
 print('Generating environment...', end='')
@@ -277,11 +277,11 @@ if not settings['use_sdr_waveform']:
 # Model for waveform simulation
 for ch_num, ch in enumerate(settings['tx']):
     if settings['use_sdr_waveform']:
-        ch['chirp'] = np.fft.fft(np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True), axis=1),
+        ch['chirp'] = np.fft.fft(np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True)[1], axis=1),
                                  sim_up_fft_len)
-        ch['mchirp'] = np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True), axis=1)
+        ch['mchirp'] = np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True)[1], axis=1)
         mfilt = GetAdvMatchedFilter(sdr[ch_num], fft_len=sim_up_fft_len)
-        waveform = np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True), axis=1)
+        waveform = np.mean(sdr.getPulses(sdr[ch_num].cal_num, ch_num, is_cal=True)[1], axis=1)
     else:
         if ch['custom_waveform']:
             ch['bandwidth'] = model_params['bandwidth']

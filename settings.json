@@ -1,22 +1,22 @@
 {
     "sim_upsample": 1,
-    "upsample": 1,
+    "upsample": 4,
     "cpi_len": 128,
     "pts_per_tri": 4,
     "debug": true,
     "do_truth_backproject": false,
-    "use_sdr_gps": false,
-    "use_sdr_waveform": false,
+    "use_sdr_gps": true,
+    "use_sdr_waveform": true,
     "channel": 0,
-    "rdmap": true,
-    "backproject": false,
+    "rdmap": false,
+    "backproject": true,
     "nbpj_pts": 300,
     "grid_width": 300,
     "grid_height": 300,
     "grid_center": [
-        40.141209,
-        -111.699586,
-        1399
+        40.138538,
+        -111.662090,
+        1365.8849123907273
     ],
     "gimbal_offset": [
         -0.3791,

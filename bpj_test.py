@@ -52,30 +52,30 @@ inch_to_m = .0254
 # bg_file = '/data6/Tower_Redo_Again/tower_redo_SAR_03292023_120731.sar'
 # bg_file = '/data5/SAR_DATA/2022/09272022/SAR_09272022_103053.sar'
 # bg_file = '/data5/SAR_DATA/2019/08072019/SAR_08072019_100120.sar'
-bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_123311.sar'
+bg_file = '/data6/SAR_DATA/2023/08092023/SAR_08092023_112016.sar'
 # bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_122801.sar'
 # bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_123050.sar'
 upsample = 4
 poly_num = 1
 use_rcorr = False
-use_aps_debug = True
+use_aps_debug = False
 rotate_grid = True
 use_ecef = True
 ipr_mode = False
-cpi_len = 128
+cpi_len = 64
 plp = 0
 partial_pulse_percent = .2
 debug = True
-pts_per_m = 1
+pts_per_m = .25
 grid_width = 200
 grid_height = 200
 channel = 0
-fdelay = 6.3
-origin = (40.136013, -111.661530, 1382)
+fdelay = 1.5
+origin = (40.138538, -111.662090, 1365.8849123907273)
 
 nbpj_pts = (int(grid_width // pts_per_m), int(grid_height // pts_per_m))
 
-files = findAllFilenames(bg_file, use_debug=True, exact_matches=False)
+files = findAllFilenames(bg_file, exact_matches=False)
 
 print('Loading SDR file...')
 is_sar = False
@@ -95,7 +95,7 @@ if origin is None:
     except TypeError:
         heading = sdr.gim.initial_course_angle
         pt = (sdr.gps_data['lat'].values[0], sdr.gps_data['lon'].values[0])
-        alt = getElevation(pt)
+        alt = getElevation(*pt)
         nrange = ((sdr[channel].receive_on_TAC - sdr[channel].transmit_on_TAC) / TAC -
                   sdr[channel].pulse_length_S * partial_pulse_percent) * c0 / 2
         frange = ((sdr[channel].receive_off_TAC - sdr[channel].transmit_on_TAC) / TAC -
@@ -106,7 +106,7 @@ if origin is None:
 
 sdr.gimbal['systime'] += TAC * .01
 
-bg = SDREnvironment(sdr_file=sdr)
+bg = SDREnvironment(sdr)
 
 if ipr_mode:
     print('IPR mode...', end='')
@@ -160,8 +160,8 @@ else:
 Ns = 313
 Nb = 66.65
 hb = 12192
-if rp.pos(rp.gpst)[2, :].mean() > hb:
-    hb = rp.pos(rp.gpst)[2, :].mean() + 1000.
+if rp.pos(rp.gpst)[:, 2].mean() > hb:
+    hb = rp.pos(rp.gpst)[:, 2].mean() + 1000.
     Nb = 105 * np.exp(-(hb - 9000) / 7023)
 
 # Get reference data
@@ -232,9 +232,9 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
     ts = data_t[tidx * cpi_len + np.arange(len(frames))]
     tmp_len = len(ts)
 
-    if not np.all(cpudiff(np.arctan2(-rp.pos(ts)[1, :], rp.pos(ts)[0, :]), rp.pan(ts)) -
+    '''if not np.all(cpudiff(np.arctan2(-rp.pos(ts)[:, 0], rp.pos(ts)[:, 1]), rp.pan(ts)) -
                   rp.az_half_bw < 0):
-        continue
+        continue'''
     panrx_gpu = cupy.array(rp.pan(ts), dtype=np.float64)
     elrx_gpu = cupy.array(rp.tilt(ts), dtype=np.float64)
     posrx_gpu = cupy.array(rp.rxpos(ts), dtype=np.float64)
@@ -243,15 +243,15 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
 
     # Armin Doerry's corrections for atmospheric changes to the speed of light
     Hb = (hb - ref_llh[2]) / np.log(Ns / Nb)
-    rcatmos = (1 + (Hb * 10e-6 * Ns) / rp.pos(ts)[2, :] *
-               (1 - np.exp(-rp.pos(ts)[2, :] / Hb))) ** -1
+    rcatmos = (1 + (Hb * 10e-6 * Ns) / rp.pos(ts)[:, 2] *
+               (1 - np.exp(-rp.pos(ts)[:, 2] / Hb))) ** -1
     if use_rcorr:
         r_corr_gpu = cupy.array(rcatmos, dtype=np.float64)
     else:
         r_corr_gpu = cupy.array(np.ones_like(ts), dtype=np.float64)
 
     # Reset the grid for truth data
-    rtdata = cupy.fft.fft(cupy.array(sdr.getPulses(frames, channel),
+    rtdata = cupy.fft.fft(cupy.array(sdr.getPulses(frames, channel)[1],
                                      dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, :tmp_len]
     upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
     upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
@@ -266,7 +266,7 @@ for tidx, frames in tqdm(enumerate(idx_t[pos:pos + cpi_len] for pos in range(0, 
     cupy.cuda.Device().synchronize()
 
     if ts[0] < rp.gpst.mean() <= ts[-1]:
-        locp = rp.pos(ts[-1])
+        locp = rp.pos(ts[-1]).T
         test = rtdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
