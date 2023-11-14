@@ -108,7 +108,7 @@ def barycentric(bx, by, vgz, vert_reflectivity):
 @jax.jit
 def range_profile_vectorized(rot, shift, vgz, vert_reflectivity,
                              source_xyz, receive_xyz, panrx, elrx, pantx, eltx,
-                             wavelength, near_range_s, source_fs, bw_az, bw_el, rbins, pts_per_tri):
+                             wavelength, near_range_s, source_fs, bw_az, bw_el, rbins, pts_per_tri, power_scaling):
     # Load in all the parameters that don't change
     wavenumber = 2 * np.pi / wavelength
     ran_key = jax.random.PRNGKey(42)
@@ -122,7 +122,7 @@ def range_profile_vectorized(rot, shift, vgz, vert_reflectivity,
                                                         vert_reflectivity,
                                                         source_fs, wavenumber, panrx, elrx, pantx, eltx, bw_az, bw_el,
                                                         rot,
-                                                        shift, rbins, near_range_s),
+                                                        shift, rbins, near_range_s, power_scaling),
                               jnp.zeros((len(rbins),), dtype=jnp.complex128))
     return pdata
 
@@ -130,7 +130,7 @@ def range_profile_vectorized(rot, shift, vgz, vert_reflectivity,
 @jax.jit
 def gather_data_loop(pdata, ran_key, px, py, source_xyz, receive_xyz, vgz, vert_reflectivity, source_fs, wavenumber,
                      panrx,
-                     elrx, pantx, eltx, bw_az, bw_el, rot, shift, rbins, near_range_s):
+                     elrx, pantx, eltx, bw_az, bw_el, rot, shift, rbins, near_range_s, power_scaling):
     ran_key, *subkey = jax.random.split(ran_key, 3)
     bx = px + .5 - jax.random.uniform(subkey[0], shape=px.shape)
     by = py + .5 - jax.random.uniform(subkey[1], shape=py.shape)
@@ -168,12 +168,12 @@ def gather_data_loop(pdata, ran_key, px, py, source_xyz, receive_xyz, vgz, vert_
     att = jnp.place(att, jnp.logical_or(but < 0, but > len(rbins) - 1), 0, inplace=False)
     but = jnp.floor(but).astype(int)
     return pdata.at[but].add(att * jnp.exp(-1j * wavenumber * two_way_rng) *
-                             gpr * reflectivity) / (rbins - rbins[0] + 1) ** 4
+                             gpr * reflectivity) * power_scaling / (rbins - rbins[0] + 1) ** 4
 
 
 @jax.jit
 def gather_data_loop_det(pdata, ran_key, px, py, source_xyz, receive_xyz, vgz, gpr, source_fs, wavenumber, panrx,
-                         elrx, pantx, eltx, bw_az, bw_el, rot, shift, rbins, near_range_s):
+                         elrx, pantx, eltx, bw_az, bw_el, rot, shift, rbins, near_range_s, power_scaling):
     bx = px.flatten() - px.shape[0] / 2
     by = py.flatten() - py.shape[1] / 2
     bar_z = vgz.flatten()
@@ -204,4 +204,4 @@ def gather_data_loop_det(pdata, ran_key, px, py, source_xyz, receive_xyz, vgz, g
     # att = jnp.place(att, jnp.logical_or(but < 0, but > len(rbins) - 1), 0, inplace=False)
     but = jnp.floor(but).astype(int)
     return pdata.at[but].add(att * jnp.exp(-1j * wavenumber * two_way_rng) *
-                             gpr.flatten() * reflectivity) / (rbins - rbins[0] + 1) ** 4
+                             gpr.flatten() * reflectivity * power_scaling / two_way_rng ** 4)
