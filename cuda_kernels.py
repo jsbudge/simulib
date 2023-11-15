@@ -1,7 +1,6 @@
 import cmath
 import math
 from numba import cuda, njit
-from numba.cuda.random import xoroshiro128p_uniform_float32
 from simulation_functions import findPowerOf2
 import numpy as np
 

@@ -361,25 +361,20 @@ class APSDebugPlatform(RadarPlatform):
         :param rx_offset: 3-tuple. Offset of Rx antenna from body frame in meters.
         :param fs: float. Sampling frequency in Hz.
         :param channel: int. Channel of data for this object to represent in the SAR file.
-        :param gps_debug: str. Path to a file of GPS debug data from APS for this collect. Optional.
-        :param gimbal_debug: str. Path to a file of Gimbal debug data from APS for this collect. Optional.
+        :param gps_data: This is from postCorrectionGPSData. Loaded in via aps_io in data_converter.
+        :param gimbal_data: Gimbal data from aps_io in data_converter.
         """
         t = sdr.gps_data.index.values
         fs = fs if fs is not None else sdr[channel].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
-        t = gps_data['sec']
-        gps_data['te'], gps_data['tn'], gps_data['tu'] = llh2enu(gps_data['tx_lat'], gps_data['tx_lon'],
-                                                                 gps_data['tx_alt'], origin)
-        gps_data['re'], gps_data['rn'], gps_data['ru'] = llh2enu(gps_data['rx_lat'], gps_data['rx_lon'],
-                                                                 gps_data['rx_alt'], origin)
-        e, n, u = llh2enu(gps_replace['lat'], gps_replace['lon'], gps_replace['alt'], origin)
-        e = np.interp(t, gps_replace['gps_ms'], e)
-        n = np.interp(t, gps_replace['gps_ms'], n)
-        u = np.interp(t, gps_replace['gps_ms'], u)
+        e, n, u = llh2enu(gps_data['lat'], gps_data['lon'], gps_data['alt'], origin)
+        e = np.interp(t, gps_data['gps_ms'], e)
+        n = np.interp(t, gps_data['gps_ms'], n)
+        u = np.interp(t, gps_data['gps_ms'], u)
         r = sdr.gps_data['r'].values
         p = sdr.gps_data['p'].values
         y = sdr.gps_data['y'].values
-        if gimbal_debug is None:
+        if gimbal_data is None:
             try:
                 pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
                                 sdr.gimbal['pan'].values.astype(np.float64))
@@ -391,14 +386,13 @@ class APSDebugPlatform(RadarPlatform):
             pan = np.interp(t, sdr.gps_data.index.values, pan)
             tilt = np.interp(t, sdr.gps_data.index.values, tilt)
         else:
-            gim = loadGimbalData(gimbal_debug)
-            if len(gim['systime']) == 0:
+            if len(gimbal_data['systime']) == 0:
                 # This is for the weird interpolated to each channel data
-                times = sdr[channel].pulse_time[:len(gim['pan'])]
+                times = sdr[channel].pulse_time[:len(gimbal_data['pan'])]
             else:
-                times = np.interp(gim['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
-            pan = np.interp(t, times, gim['pan'])
-            tilt = np.interp(t, times, gim['tilt'])
+                times = np.interp(gimbal_data['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
+            pan = np.interp(t, times, gimbal_data['pan'])
+            tilt = np.interp(t, times, gimbal_data['tilt'])
         goff = np.array(
             [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
         grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
@@ -419,8 +413,9 @@ class APSDebugPlatform(RadarPlatform):
                          gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
                          dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
                          az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
-                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_data=gps_data, tx_num=tx_num,
-                         rx_num=rx_num)
+                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_t=gps_data['gps_ms'],
+                         tx_num=tx_num, rx_num=rx_num, gps_az=gps_data['az'], gps_rxpos=gps_data['rxpos'],
+                         gps_txpos=gps_data['txpos'])
         self._sdr = sdr
         self.origin = origin
         self._channel = channel
