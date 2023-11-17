@@ -21,6 +21,7 @@ class Environment(object):
     _transforms: tuple
     _refgrid: np.ndarray
     ref: np.ndarray
+    origin: np.ndarray
 
     def __init__(self, rmat=None, shift=None, reflectivity=None):
         if rmat is not None:
@@ -28,57 +29,61 @@ class Environment(object):
 
     def getGridParams(self, pos, width, height, npts, az=0.):
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
-        rmat = np.array([[np.cos(az), -np.sin(az)],
-                         [np.sin(az), np.cos(az)]]).dot(np.diag([width / npts[0], height / npts[1]]))
+        corr_az = np.pi / 2 - az
+        # Translation
+        rmat = np.array([[1, 0, shift_x],
+                         [0, 1, shift_y],
+                         [0, 0, 1]])
+        # Rotation
+        rmat = rmat.dot(np.array([[np.cos(corr_az), -np.sin(corr_az), 0],
+                                  [np.sin(corr_az), np.cos(corr_az), 0],
+                                  [0, 0, 1.]]))
+        # Scaling
+        # The -1 offsets the fact that the number of points is one more than the array element index
+        w_k = width / (npts[0] - 1)
+        h_k = height / (npts[1] - 1)
+        rmat = rmat.dot(np.diag([h_k, w_k, 1]))
 
         return rmat, np.array([shift_x, shift_y])
 
-    def getGrid(self, pos=None, width=None, height=None, npts=None, az=0):
-        if pos is None:
-            x, y = np.meshgrid(np.arange(self.shape[0]) - self.shape[0] / 2,
-                               np.arange(self.shape[1]) - self.shape[1] / 2)
-            pts = np.column_stack((x.flatten(), y.flatten()))
-            pos_r = np.squeeze(np.einsum('ji, mni -> jmn', self._transforms[0], [pts])).T + self._transforms[1]
-            latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
+    def getGrid(self, pos=None, width=None, height=None, npts=None, az=0, use_elevation=True):
+        # This grid is independent of the refgrid or stored transforms
+        pos = self.origin if pos is None else pos
+        width = self.shape[0] if width is None else width
+        height = self.shape[1] if height is None else height
+        npts = self.shape if npts is None else npts
+        rmat, (shift_x, shift_y) = self.getGridParams(pos, width, height, npts, az)
+        gxx = np.linspace(npts[0] / 2, -npts[0] / 2, npts[0])
+        gyy = np.linspace(-npts[1] / 2, npts[1] / 2, npts[1])
+        gy, gx = np.meshgrid(gxx, gyy)
+
+        px = rmat[0, 0] * gx + rmat[0, 1] * gy + rmat[0, 2]
+        py = rmat[1, 0] * gx + rmat[1, 1] * gy + rmat[1, 2]
+        latg, long, altg = enu2llh(px.ravel(), py.ravel(), np.zeros(px.shape[0] * px.shape[1]), self.ref)
+        sh = gx.shape
+        if use_elevation:
             try:
-                gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2])
+                gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
             except FileNotFoundError:
-                gz = np.zeros(pos_r.shape[0])
-            sh = self.shape
+                gz = np.zeros(px.shape)
         else:
-            shift_x, shift_y, _ = llh2enu(*pos, self.ref)
-            gxx = np.linspace(-width / 2, width / 2, npts[0])
-            gyy = np.linspace(-height / 2, height / 2, npts[1])
-            gx, gy = np.meshgrid(gxx, gyy)
-            pts = np.column_stack((gx.flatten(), gy.flatten()))
-            rmat = np.array([[np.cos(az), -np.sin(az)],
-                             [np.sin(az), np.cos(az)]])
-            pos_r = np.squeeze(np.einsum('ji, mni -> jmn',
-                                         rmat, [pts])).T + np.array([shift_x, shift_y])
-            latg, long, altg = enu2llh(pos_r[:, 0], pos_r[:, 1], np.zeros(pos_r.shape[0]), self.ref)
-            sh = gx.shape
-            # This map is transposed from gx and gy
-            try:
-                gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2])
-            except FileNotFoundError:
-                gz = np.zeros(pos_r.shape[0])
-        return pos_r[:, 0].reshape(sh, order='C'), pos_r[:, 1].reshape(sh, order='C'), gz.reshape(sh, order='F')
+            gz = np.zeros(px.shape)
+        return px, py, gz
 
     def setGrid(self, newgrid, rmat, shift):
         self._refgrid = newgrid
         self._transforms = (rmat, shift)
 
-    def resample(self, pos, width, height, npts, az=0):
-        rmat, shift = self.getGridParams(pos, width, height, npts, az)
+    def resampleGrid(self, pos, width, height, npts, az=0):
         x, y, _ = self.getGrid(pos, width, height, npts, az)
-        pts = np.column_stack((x.flatten(), y.flatten()))
         irmat = np.linalg.pinv(self._transforms[0])
-        pos_r = np.squeeze(np.einsum('ji, mni -> jmn',
-                                     irmat,
-                                     [pts - self._transforms[1]])).T + np.array([self.shape[0] / 2, self.shape[1] / 2])
-        self.setGrid(interpn((np.arange(self.refgrid.shape[0]),
-                              np.arange(self.refgrid.shape[1])), self.refgrid, pos_r, bounds_error=False,
-                             fill_value=0).reshape(x.shape, order='C'), rmat, shift)
+        px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
+        py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
+        pos_r = np.stack([px.ravel(), py.ravel()]).T
+        self.setGrid(interpn((np.arange(self.refgrid.shape[1]),
+                              np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
+                             fill_value=0).reshape(x.shape, order='C'),
+                     *self.getGridParams(pos, width, height, npts, az))
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
@@ -138,7 +143,7 @@ class SDREnvironment(Environment):
             grid = abs(asi)
         self._sdr = sdr
         self._asi = asi
-        self.heading = -np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+        self.heading = np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
         if sdr.ash is None:
             try:
                 hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
@@ -164,22 +169,22 @@ class SDREnvironment(Environment):
                        sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']
             self.cps = sdr.ash['geo']['colPixelSizeM']
-            self.heading = -sdr.ash['flight']['flnHdg'] * DTR
+            self.heading = sdr.ash['flight']['flnHdg'] * DTR
 
         self.origin = origin
         self.ref = ref_llh
 
         if local_grid is not None:
             grid = local_grid
-        else:
+        '''else:
             # Set grid to be one meter resolution
             rowup = int(1 / self.rps) if self.rps < 1 else 1
             colup = int(1 / self.cps) if self.cps < 1 else 1
             grid = grid[::rowup, ::colup]
             self.rps *= rowup
-            self.cps *= colup
+            self.cps *= colup'''
 
-        rmat, shift = self.getGridParams(self.origin, grid.shape[0] * self.rps, grid.shape[1] * self.cps, grid.shape,
+        rmat, shift = self.getGridParams(self.origin, grid.shape[0] * self.cps, grid.shape[1] * self.rps, grid.shape,
                                          self.heading)
 
         super().__init__(rmat=rmat, shift=shift, reflectivity=grid)
@@ -246,3 +251,30 @@ def getGridParams(ref, pos, width, height, npts, az=0):
                      [np.sin(az), np.cos(az)]]).dot(np.diag([width / npts[0], height / npts[1]]))
 
     return (shift_x, shift_y), rmat
+
+
+if __name__ == '__main__':
+    from SDRParsing import load
+    from simulation_functions import db
+    import matplotlib.pyplot as plt
+
+    sdr = load('/data6/SAR_DATA/2023/08092023/SAR_08092023_112016.sar')
+
+    bg = SDREnvironment(sdr)
+    plt.figure('Before')
+    plt.imshow(db(bg.refgrid), origin='lower', clim=[130, 160])
+    plt.show()
+    plane_x = np.arange(100) * np.exp(1j * bg.heading).imag
+    plane_y = np.arange(100) * np.exp(1j * bg.heading).real
+
+    x, y, _ = bg.getGrid(width=1225.7, height=1038.25, npts=(4902, 4153), az=bg.heading, use_elevation=False)
+    lx, ly, _ = bg.getGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, (600, 20), use_elevation=False)
+
+    plt.figure('Rel. Positions')
+    plt.scatter(plane_x, plane_y)
+    plt.scatter(x[::50, ::50].flatten(), y[::50, ::50].flatten())
+    plt.scatter(lx.flatten(), ly.flatten())
+
+    bg.resampleGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, (300, 400))
+    plt.figure('After')
+    plt.imshow(db(bg.refgrid), origin='lower', clim=[130, 160])

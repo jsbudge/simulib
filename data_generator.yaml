@@ -1,8 +1,8 @@
 bg_file: '/data6/SAR_DATA/2023/08092023/SAR_08092023_112016.sar'
 upsample: 4
 poly_num: 1
-use_aps_debug: True
-rotate_grid: False
+use_aps_debug: False
+rotate_grid: True
 use_ecef: True
 ipr_mode: False
 cpi_len: 32
@@ -10,13 +10,13 @@ plp: 0
 partial_pulse_percent: .2
 debug: True
 pts_per_m: 4
-grid_width: 150
-grid_height: 150
+grid_width: 50
+grid_height: 100
 channel: 0
 fdelay: 1.5
 origin: [40.138538, -111.662090, 1365.8849123907273]
-gen_data: True
-gps_check: False
+gen_data: False
+gps_check: True
 pts_per_tri: 1
 noise_level: -30
 

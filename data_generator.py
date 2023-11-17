@@ -6,7 +6,7 @@ from jax_kernels import range_profile_vectorized
 import jax.numpy as jnp
 import jax
 from grid_helper import SDREnvironment
-from platform_helper import SDRPlatform
+from platform_helper import SDRPlatform, APSDebugPlatform
 import cupy as cupy
 import matplotlib.pyplot as plt
 import plotly.express as px
@@ -99,12 +99,16 @@ except FileNotFoundError:
     print('Failed to find APS GPS debug outputs.')
 
 if settings['use_aps_debug']:
-    rp = SDRPlatform(sdr, ref_llh, channel=settings['channel'])
+    # rp = SDRPlatform(sdr, ref_llh, channel=settings['channel'])
+    rp = APSDebugPlatform(sdr, ref_llh, gps_data=postCorr, gimbal_data=gimbal_data)
     # rp = SDRPlatform(sdr, ref_llh, channel=settings['channel'], gps_debug=postCorr, gimbal_debug=gimbal_debug,
     #                  gps_replace=rawGPS)
     # rp = SDRPlatform(sdr, ref_llh, channel=channel, gimbal_debug=gimbal_debug)
 else:
     rp = SDRPlatform(sdr, ref_llh, channel=settings['channel'])
+
+# rp.az_half_bw *= .5
+# rp.el_half_bw *= .5
 
 # Get reference data
 fs = sdr[settings['channel']].fs
@@ -141,14 +145,14 @@ rbins_gpu = cupy.array(ranges, dtype=np.float64)
 # Calculate out points on the ground
 noise_level = 0
 if settings['gen_data']:
-    bg.resample(settings['origin'], settings['grid_width'], settings['grid_height'], nbpj_pts,
+    bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], nbpj_pts,
                 bg.heading if settings['rotate_grid'] else 0)
     '''bg_image = imageio.imread('/data6/Jeff_Backup/Pictures/josh.png').sum(axis=2)
     bg_image = RectBivariateSpline(np.arange(bg_image.shape[0]), np.arange(bg_image.shape[1]), bg_image)(
         np.linspace(0, bg_image.shape[0], nbpj_pts[0]), np.linspace(0, bg_image.shape[1], nbpj_pts[1])) / 750'''
-    bg_image = np.zeros_like(bg.refgrid)
-    bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10
-    bg._refgrid = bg_image
+    # bg_image = np.zeros_like(bg.refgrid)
+    # bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10
+    # bg._refgrid = bg_image
 
     # Constant part of the radar equation
     receive_power_scale = (settings['antenna_params']['transmit_power'] / .01 *
@@ -252,12 +256,12 @@ del gz_gpu
 
 # Apply range roll-off compensation to final image
 mag_data = np.sqrt(abs(bpj_truedata))
-brightness_raw = np.median(np.sqrt(abs(bpj_truedata)), axis=0)
+brightness_raw = np.median(np.sqrt(abs(bpj_truedata)), axis=1)
 brightness_curve = np.polyval(np.polyfit(np.arange(bpj_truedata.shape[0]), brightness_raw, 4),
-                              np.arange(bpj_truedata.shape[0]))
+                              np.arange(bpj_truedata.shape[1]))
 brightness_curve /= brightness_curve.max()
 brightness_curve = 1. / brightness_curve
-mag_data *= np.outer(np.ones(mag_data.shape[1]), brightness_curve)
+mag_data *= np.outer(np.ones(mag_data.shape[0]), brightness_curve)
 
 """
 ----------------------------PLOTS-------------------------------
@@ -275,7 +279,7 @@ plt.axis('tight')
 
 try:
     if (nbpj_pts[0] * nbpj_pts[1]) < 400 ** 2:
-        cx, cy, cz = bg.getGrid(settings['origin'], settings['grid_width'], settings['grid_height'], nbpj_pts)
+        cx, cy, cz = bg.getGrid(settings['origin'], width=settings['grid_width'], height=settings['grid_height'], npts=nbpj_pts, az=0)
 
         fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
         fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten(), mode='markers')
@@ -302,7 +306,7 @@ while hist_counts[-1] == 0:
 scaled_data = np.digitize(plot_data_init, hist_bins)
 
 # px.imshow(db(mag_data), color_continuous_scale=px.colors.sequential.gray).show()
-px.imshow(np.fliplr(scaled_data), color_continuous_scale=px.colors.sequential.gray, zmin=0, zmax=nbits).show()
+px.imshow(np.fliplr(np.flipud(scaled_data)), color_continuous_scale=px.colors.sequential.gray, zmin=0, zmax=nbits, origin='lower').show()
 plt.figure('Image Histogram')
 plt.plot(hist_bins[1:], hist_counts)
 
@@ -369,20 +373,24 @@ if gps_check:
     plt.title('U')
     plt.plot(rawGPS['gps_ms'], ru - gu)
 
+    rp = SDRPlatform(sdr, origin=(*sdr.gps_data.loc[321637.03, ['lat', 'lon']].values, 0))
+
     postCorr_t = np.interp(postCorr['systime'], sdr.gps_data['systime'], sdr.gps_data.index.values)
 
     rerx = rp.rxpos(postCorr_t)[:, 0]
     rnrx = rp.rxpos(postCorr_t)[:, 1]
     rurx = rp.rxpos(postCorr_t)[:, 2]
-    gnrx = postCorr['rx_pos'][:, 0]
-    gerx = postCorr['rx_pos'][:, 1]
+    gnrx = postCorr['rx_pos'][:, 1]
+    gerx = postCorr['rx_pos'][:, 0]
     gurx = postCorr['rx_pos'][:, 2]
     retx = rp.txpos(postCorr_t)[:, 0]
     rntx = rp.txpos(postCorr_t)[:, 1]
     rutx = rp.txpos(postCorr_t)[:, 2]
-    gntx = postCorr['tx_pos'][:, 0]
-    getx = postCorr['tx_pos'][:, 1]
+    gntx = postCorr['tx_pos'][:, 1]
+    getx = postCorr['tx_pos'][:, 0]
     gutx = postCorr['tx_pos'][:, 2]
+    raz = np.arctan2(postCorr['point_vec'].real, postCorr['point_vec'].imag) / DTR
+    gaz = np.arctan2(rp.boresight(postCorr_t)[:, 0].flatten(), rp.boresight(postCorr_t)[:, 1].flatten()) / DTR
     plt.figure('ENU diff')
     plt.subplot(2, 2, 1)
     plt.title('E')
@@ -396,6 +404,9 @@ if gps_check:
     plt.title('U')
     plt.plot(postCorr_t, rurx - gurx)
     plt.plot(postCorr_t, rutx - gutx)
+    plt.subplot(2, 2, 4)
+    plt.title('Az')
+    plt.plot(postCorr_t, raz - gaz)
     plt.legend(['Rx', 'Tx'])
 
     '''rp_r = rp.att(preCorr['sec'])[0, :]
@@ -423,11 +434,17 @@ if gps_check:
     plt.figure('Gimbal')
     plt.subplot(2, 1, 1)
     plt.title('Pan')
-    plt.plot(times, gimbal_data['pan'])
+    plt.plot(times, gimbal_data['pan'] * DTR)
     plt.plot(times, sdr.gimbal['pan'])
     plt.subplot(2, 1, 2)
     plt.title('Tilt')
-    plt.plot(times, gimbal_data['tilt'])
+    plt.plot(times, gimbal_data['tilt'] * DTR)
     plt.plot(times, sdr.gimbal['tilt'])
 
 plt.show()
+
+'''plt.figure()
+e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], (rawGPS['lat'][0], rawGPS['lon'][0], 0))
+plt.subplot(1, 3, 1)
+plt.plot(postCorr['tx_pos'][:, 1])
+plt.plot(rp.txpos(sdr.gps_data.index.values)[:126, 1])'''

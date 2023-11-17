@@ -156,8 +156,13 @@ class Platform(object):
 
     def boresight(self, t):
         # Get a boresight angle from the pan/tilt values
-        r, p, y = self._att(t)
-        return getBoresightVector(self._gimbal_offset_mat, self._gimbal_pan(t), self._gimbal_tilt(t), y, p, r)
+        r, p, y = self._att(t).T
+        if isinstance(t, float):
+            return getBoresightVector(self._gimbal_offset_mat, self._gimbal_pan(t), self._gimbal_tilt(t), y, p, r)
+        else:
+            return np.array([getBoresightVector(
+                self._gimbal_offset_mat, self._gimbal_pan(t[i]), self._gimbal_tilt(t[i]), y[i], p[i], r[i])
+                for i in range(len(t))]).squeeze(2)
 
     @property
     def pos(self):
