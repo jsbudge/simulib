@@ -102,8 +102,8 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
     :param debug_flag: bool. If True, populates the calc_pts and calc_angs arrays.
     :return: Nothing, technically. final_grid is the returned product.
     """
-    px, py = cuda.grid(ndim=2)
-    if px < gx.shape[0] and py < gx.shape[1]:
+    pcol, prow = cuda.grid(ndim=2)
+    if pcol < gx.shape[0] and prow < gx.shape[1]:
         # Load in all the parameters that don't change
         acc_val = 0
         nPulses = pulse_data.shape[1]
@@ -115,24 +115,24 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             cp = pulse_data[:, tt]
             # Get LOS vector in XYZ and spherical coordinates at pulse time
             # Tx first
-            tx = gx[px, py] - source_xyz[tt, 0]
-            ty = gy[px, py] - source_xyz[tt, 1]
-            tz = gz[px, py] - source_xyz[tt, 2]
+            tx = gx[pcol, prow] - source_xyz[tt, 0]
+            ty = gy[pcol, prow] - source_xyz[tt, 1]
+            tz = gz[pcol, prow] - source_xyz[tt, 2]
             tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
             # Rx
-            rx = gx[px, py] - receive_xyz[tt, 0]
-            ry = gy[px, py] - receive_xyz[tt, 1]
-            rz = gz[px, py] - receive_xyz[tt, 2]
+            rx = gx[pcol, prow] - receive_xyz[tt, 0]
+            ry = gy[pcol, prow] - receive_xyz[tt, 1]
+            rz = gz[pcol, prow] - receive_xyz[tt, 2]
             rx_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
             r_el = -math.asin(rz / rx_rng)
             r_az = math.atan2(-ry, rx) + np.pi / 2
             if debug_flag and tt == 0:
-                calc_pts[0, px, py] = rx
-                calc_pts[1, px, py] = ry
-                calc_pts[2, px, py] = rz
-                calc_angs[0, px, py] = r_el
-                calc_angs[1, px, py] = r_az
+                calc_pts[0, pcol, prow] = rx
+                calc_pts[1, pcol, prow] = ry
+                calc_pts[2, pcol, prow] = rz
+                calc_angs[0, pcol, prow] = r_el
+                calc_angs[1, pcol, prow] = r_az
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
@@ -149,9 +149,9 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-                                        bw_az, bw_el)#  / two_way_rng
+                                       bw_az, bw_el)
             if debug_flag and tt == 0:
-                calc_angs[2, px, py] = two_way_rng
+                calc_angs[2, pcol, prow] = two_way_rng
 
             # Azimuth window to reduce sidelobes
             # Gaussian window
@@ -194,7 +194,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
             exp_phase = k * two_way_rng
             acc_val += a * cmath.exp(1j * exp_phase) * att * az_win
-        final_grid[px, py] = acc_val
+        final_grid[pcol, prow] = acc_val
 
 
 @cuda.jit()

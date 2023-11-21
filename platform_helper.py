@@ -25,7 +25,8 @@ class Platform(object):
     _att = None
     _heading = None
 
-    def __init__(self, e: np.ndarray = None,
+    def __init__(self,
+                 e: np.ndarray = None,
                  n: np.ndarray = None,
                  u: np.ndarray = None,
                  r: np.ndarray = None,
@@ -214,7 +215,8 @@ provide these things.
 
 class RadarPlatform(Platform):
 
-    def __init__(self, e: np.ndarray = None,
+    def __init__(self,
+                 e: np.ndarray = None,
                  n: np.ndarray = None,
                  u: np.ndarray = None,
                  r: np.ndarray = None,
@@ -346,9 +348,10 @@ SDRParse.
 
 
 class APSDebugPlatform(RadarPlatform):
-    _sdr = None
+    _sdr: object
 
-    def __init__(self, sdr: object,
+    def __init__(self,
+                 sdr: object,
                  origin: np.ndarray = None,
                  tx_offset: np.ndarray = None,
                  rx_offset: np.ndarray = None,

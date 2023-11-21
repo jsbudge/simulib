@@ -46,12 +46,12 @@ class Environment(object):
 
         return rmat, np.array([shift_x, shift_y])
 
-    def getGrid(self, pos=None, width=None, height=None, npts=None, az=0, use_elevation=True):
+    def getGrid(self, pos=None, width=None, height=None, nrows=0, ncols=0, az=0, use_elevation=True):
         # This grid is independent of the refgrid or stored transforms
         pos = self.origin if pos is None else pos
         width = self.shape[0] if width is None else width
         height = self.shape[1] if height is None else height
-        npts = self.shape if npts is None else npts
+        npts = self.shape if nrows == 0 else (ncols, nrows)
         rmat, (shift_x, shift_y) = self.getGridParams(pos, width, height, npts, az)
         gxx = np.linspace(npts[0] / 2, -npts[0] / 2, npts[0])
         gyy = np.linspace(-npts[1] / 2, npts[1] / 2, npts[1])
@@ -74,8 +74,8 @@ class Environment(object):
         self._refgrid = newgrid
         self._transforms = (rmat, shift)
 
-    def resampleGrid(self, pos, width, height, npts, az=0):
-        x, y, _ = self.getGrid(pos, width, height, npts, az)
+    def resampleGrid(self, pos, width, height, nrows, ncols, az=0):
+        x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az)
         irmat = np.linalg.pinv(self._transforms[0])
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
@@ -83,7 +83,7 @@ class Environment(object):
         self.setGrid(interpn((np.arange(self.refgrid.shape[1]),
                               np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
                              fill_value=0).reshape(x.shape, order='C'),
-                     *self.getGridParams(pos, width, height, npts, az))
+                     *self.getGridParams(pos, width, height, (nrows, ncols), az))
 
     def save(self, fnme):
         with open(fnme, 'wb') as f:
@@ -94,7 +94,7 @@ class Environment(object):
 
     def getIndex(self, x, y):
         irmat = np.linalg.pinv(self._transforms[0])
-        return irmat.dot(np.array([x, y]) - self._transforms[1]) + np.array([self.shape[0] / 2, self.shape[1] / 2])
+        return irmat.dot(np.array([x, y, 1])) + np.array([self.shape[0] / 2, self.shape[1] / 2])
 
     def interp(self, x, y):
         return interpn((np.arange(self.refgrid.shape[0]),
@@ -267,14 +267,15 @@ if __name__ == '__main__':
     plane_x = np.arange(100) * np.exp(1j * bg.heading).imag
     plane_y = np.arange(100) * np.exp(1j * bg.heading).real
 
-    x, y, _ = bg.getGrid(width=1225.7, height=1038.25, npts=(4902, 4153), az=bg.heading, use_elevation=False)
-    lx, ly, _ = bg.getGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, (600, 20), use_elevation=False)
+    x, y, _ = bg.getGrid(width=1225.7, height=1038.25, nrows=4902, ncols=4153, az=bg.heading, use_elevation=False)
+    lx, ly, _ = bg.getGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, 20, 600, use_elevation=False)
 
     plt.figure('Rel. Positions')
     plt.scatter(plane_x, plane_y)
     plt.scatter(x[::50, ::50].flatten(), y[::50, ::50].flatten())
     plt.scatter(lx.flatten(), ly.flatten())
 
-    bg.resampleGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, (300, 400))
+    bg.resampleGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, 200, 600)
     plt.figure('After')
     plt.imshow(db(bg.refgrid), origin='lower', clim=[130, 160])
+    plt.axis('tight')

@@ -31,10 +31,10 @@ inch_to_m = .0254
 with open('./data_generator.yaml') as y:
     settings = yaml.safe_load(y.read())
 
-nbpj_pts = (int(settings['grid_width'] * settings['pts_per_m']), int(settings['grid_height'] * settings['pts_per_m']))
+nbpj_pts = (int(settings['grid_height'] * settings['pts_per_m']), int(settings['grid_width'] * settings['pts_per_m']))
 
 print('Loading SDR file...')
-sdr = load(settings['bg_file'])
+sdr = load(settings['bg_file'], import_pickle=False, use_jump_correction=False)
 
 if settings['origin'] is None:
     try:
@@ -137,7 +137,7 @@ except KeyError as e:
     bpj_wavelength = c0 / (fc - bwidth / 2 - 5e6)
 
 chirp = jnp.tile(jnp.fft.fft(sdr[settings['channel']].cal_chirp, fft_len), (settings['cpi_len'], 1)).T
-mfilt = GetAdvMatchedFilter(sdr[settings['channel']], fft_len=fft_len)
+mfilt = sdr.genMatchedFilter(settings['channel'], fft_len=fft_len)
 mfilt_gpu = cupy.array(np.tile(mfilt, (settings['cpi_len'], 1)).T, dtype=np.complex128)
 mfilt_jax = np.tile(mfilt, (settings['cpi_len'], 1)).T
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
@@ -145,21 +145,21 @@ rbins_gpu = cupy.array(ranges, dtype=np.float64)
 # Calculate out points on the ground
 noise_level = 0
 if settings['gen_data']:
-    bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], nbpj_pts,
-                bg.heading if settings['rotate_grid'] else 0)
+    bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
+                    bg.heading if settings['rotate_grid'] else 0)
     '''bg_image = imageio.imread('/data6/Jeff_Backup/Pictures/josh.png').sum(axis=2)
     bg_image = RectBivariateSpline(np.arange(bg_image.shape[0]), np.arange(bg_image.shape[1]), bg_image)(
         np.linspace(0, bg_image.shape[0], nbpj_pts[0]), np.linspace(0, bg_image.shape[1], nbpj_pts[1])) / 750'''
-    # bg_image = np.zeros_like(bg.refgrid)
-    # bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10
-    # bg._refgrid = bg_image
+    bg_image = np.zeros_like(bg.refgrid)
+    bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10
+    bg._refgrid = bg_image
 
     # Constant part of the radar equation
     receive_power_scale = (settings['antenna_params']['transmit_power'] / .01 *
-                           (10**(settings['antenna_params']['gain'] / 20))**2
-                           * bpj_wavelength**2 / (4 * np.pi)**3)
-    noise_level = 10**(settings['noise_level'] / 20) / np.sqrt(2)
-gx, gy, gz = bg.getGrid(settings['origin'], settings['grid_width'], settings['grid_height'], nbpj_pts,
+                           (10 ** (settings['antenna_params']['gain'] / 20)) ** 2
+                           * bpj_wavelength ** 2 / (4 * np.pi) ** 3)
+    noise_level = 10 ** (settings['noise_level'] / 20) / np.sqrt(2)
+gx, gy, gz = bg.getGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
                         bg.heading if settings['rotate_grid'] else 0)
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
@@ -174,10 +174,11 @@ else:
 
 # GPU device calculations
 threads_per_block = getMaxThreads()
-bpg_bpj = (max(1, nbpj_pts[0] // threads_per_block[0] + 1), nbpj_pts[1] // threads_per_block[1] + 1)
+bpg_bpj = (max(1, (nbpj_pts[0]) // threads_per_block[0] + 1), (nbpj_pts[1]) // threads_per_block[1] + 1)
 
 mapped_rpg = jax.vmap(range_profile_vectorized,
-                      in_axes=[None, None, None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None, None, None, None])
+                      in_axes=[None, None, None, None, 0, 0, 0, 0, 0, 0,
+                               None, None, None, None, None, None, None, None])
 
 # Run through loop to get data simulated
 data_t = sdr[settings['channel']].pulse_time
@@ -279,7 +280,8 @@ plt.axis('tight')
 
 try:
     if (nbpj_pts[0] * nbpj_pts[1]) < 400 ** 2:
-        cx, cy, cz = bg.getGrid(settings['origin'], width=settings['grid_width'], height=settings['grid_height'], npts=nbpj_pts, az=0)
+        cx, cy, cz = bg.getGrid(settings['origin'], width=settings['grid_width'], height=settings['grid_height'],
+                                nrows=nbpj_pts[0], ncols=nbpj_pts[1], az=0)
 
         fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
         fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten(), mode='markers')
@@ -306,13 +308,14 @@ while hist_counts[-1] == 0:
 scaled_data = np.digitize(plot_data_init, hist_bins)
 
 # px.imshow(db(mag_data), color_continuous_scale=px.colors.sequential.gray).show()
-px.imshow(np.fliplr(np.flipud(scaled_data)), color_continuous_scale=px.colors.sequential.gray, zmin=0, zmax=nbits, origin='lower').show()
+px.imshow(scaled_data, color_continuous_scale=px.colors.sequential.gray, zmin=0, zmax=nbits,
+          origin='lower').show()
 plt.figure('Image Histogram')
 plt.plot(hist_bins[1:], hist_counts)
 
 # Get IPR cut
 if settings['ipr_mode']:
-    db_bpj = db(bpj_truedata).T
+    db_bpj = db(bpj_truedata)
     db_bpj -= np.max(db_bpj)
     mx = np.where(db_bpj == db_bpj.max())
     ipr_gridsz = min(db_bpj.shape[0] - mx[0][0], mx[0][0], db_bpj.shape[1] - mx[1][0], mx[1][0])
@@ -409,26 +412,27 @@ if gps_check:
     plt.plot(postCorr_t, raz - gaz)
     plt.legend(['Rx', 'Tx'])
 
-    '''rp_r = rp.att(preCorr['sec'])[0, :]
-    rp_p = rp.att(preCorr['sec'])[1, :]
-    rp_y = rp.att(preCorr['sec'])[2, :]
-    plt.figure('rpy')
+    rve, rvn, rvu = rp.vel(preCorr['gps_ms']).T
+    plt.figure('EN vel diff')
+    plt.subplot(2, 1, 1)
+    plt.title('E')
+    plt.plot(preCorr['gps_ms'], rve - preCorr['ve'])
+    plt.subplot(2, 1, 2)
+    plt.title('N')
+    plt.plot(preCorr['gps_ms'], rvn - preCorr['vn'])
+
+    plt.figure('ENU preCorr diff')
+    rve, rvn, rvu = rp.pos(preCorr['gps_ms']).T
+    gve, gvn, gvu = llh2enu(preCorr['lat'], preCorr['lon'], preCorr['alt'], rp.origin)
     plt.subplot(2, 2, 1)
-    plt.title('r')
-    plt.plot(preCorr['sec'], rp_r)
-    plt.plot(preCorr['sec'], preCorr['r'])
-    plt.plot(rawGPS['gps_ms'], rawGPS['r'])
+    plt.title('E')
+    plt.plot(preCorr['gps_ms'], rve - gve)
     plt.subplot(2, 2, 2)
-    plt.title('p')
-    plt.plot(preCorr['sec'], rp_p)
-    plt.plot(preCorr['sec'], preCorr['p'])
-    plt.plot(rawGPS['gps_ms'], rawGPS['p'])
+    plt.title('N')
+    plt.plot(preCorr['gps_ms'], rvn - gvn)
     plt.subplot(2, 2, 3)
-    plt.title('y')
-    plt.plot(preCorr['sec'], rp_y)
-    plt.plot(postCorr['sec'], postCorr['az'])
-    plt.plot(preCorr['sec'], preCorr['az'])
-    plt.legend(['sdr', 'interp_sdr', 'pre', 'raw'])'''
+    plt.title('U')
+    plt.plot(preCorr['gps_ms'], rvu - gvu)
 
     times = np.interp(gimbal_data['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
     plt.figure('Gimbal')

@@ -1,8 +1,8 @@
-bg_file: '/data6/SAR_DATA/2023/08092023/SAR_08092023_112016.sar'
+bg_file: '/home/jeff/SDR_DATA/RAW/08092023/SAR_08092023_112016.sar'
 upsample: 4
 poly_num: 1
 use_aps_debug: False
-rotate_grid: True
+rotate_grid: False
 use_ecef: True
 ipr_mode: False
 cpi_len: 32
@@ -10,8 +10,8 @@ plp: 0
 partial_pulse_percent: .2
 debug: True
 pts_per_m: 4
-grid_width: 50
-grid_height: 100
+grid_width: 100
+grid_height: 120
 channel: 0
 fdelay: 1.5
 origin: [40.138538, -111.662090, 1365.8849123907273]

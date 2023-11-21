@@ -550,3 +550,87 @@ def computeGrazingAngle(effAzIR, grazeIR, antPos, theRange, origin):
         numIterations += 1
 
     return newGrazeR, Rvec, surfaceHeight, numIterations
+
+
+def complexMixDown(signalData, mixDownFrequency, srateHz):
+    # Get the number of samples
+    numSamples = len(signalData)
+    # Create the time array
+    timeS = np.arange(numSamples) / srateHz
+    # Create the mix down signal
+    mixDownSignal = np.exp(1j * 2 * np.pi * mixDownFrequency * timeS)
+
+    return signalData * mixDownSignal
+
+
+def getTimeDelayS(
+        refDat, secDat, pulseLengthS, chirpRateHzPerS, srateHz, offset):
+    # Compute the pulse length in samples
+    pulseLengthN = int(pulseLengthS * srateHz)
+    cutStart = offset
+    cutEnd = cutStart + pulseLengthN - offset * 2
+    choppedRef = refDat[cutStart: cutEnd].copy() + 0.0
+    choppedSec = secDat[cutStart: cutEnd].copy() + 0.0
+    # Look at phase difference between reference and secondary channels
+    unwrappedPhaseDif = np.unwrap(np.angle(choppedRef / choppedSec))
+    # Get a least squares order 1 polynomial fit of the phase difference
+    times = np.arange(choppedRef.shape[0]) / srateHz
+    polynomials = np.polyfit(times, unwrappedPhaseDif, 1)
+    # Attempt to calculate the time delay based on the delta phase per delta
+    #   freq
+    tau = polynomials[0] / (2 * np.pi * chirpRateHzPerS)
+    print("Time delay tau: %0.3f ps" % (tau / 1e-12))
+
+    """ Now we need to apply the time shift, then compute residual phase. """
+    # Prepare for the FFT of the pulses by computing the next power of 2
+    fftLength = int(2 ** np.ceil(np.log2(choppedRef.shape[0])))
+    # Also estimate the residual remaining phase and return the amplitude bias
+    secondaryFreq = np.fft.fftshift(np.fft.fft(choppedSec, fftLength))
+    # Generate frequencies for the spectrum
+    frequenciesHz = np.arange(fftLength) / fftLength * srateHz
+    omegaK = 2 * np.pi * frequenciesHz
+    # Apply time shift to the secondary pulse in the frequency domain
+    secShiftFreq = secondaryFreq * np.exp(1j * omegaK * tau)
+    # IFFT back to the time domain
+    secShift = np.fft.ifft(
+        np.fft.ifftshift(secShiftFreq))[:choppedRef.shape[0]]
+    # Compute the number of sample shifts from the time delay
+    shiftSamplesN = int(tau * srateHz)
+    chopLopRef = secShift[:shiftSamplesN]
+    chopLopSec = secShift[:shiftSamplesN]
+    # Compute the new unwrapped phase difference
+    unwrappedPhaseDifC = np.unwrap(np.angle(chopLopRef / chopLopSec))
+    meanPhaseOffset = unwrappedPhaseDifC.mean()
+    print("Residual phase offset: %0.3f deg" % (
+            meanPhaseOffset * 180 / np.pi))
+    # Apply the mean phase offset and IFFT
+    secShiftFreq = \
+        secondaryFreq * np.exp(1j * (omegaK * tau + meanPhaseOffset))
+    secShift = np.fft.ifft(
+        np.fft.ifftshift(secShiftFreq))[:choppedRef.shape[0]]
+    # Get the mean amplitutde bias
+    amplitudeBias = abs(choppedRef).mean() / abs(secShift).mean()
+    print("Amplitude bias: %0.5f" % amplitudeBias)
+
+    return tau, meanPhaseOffset, amplitudeBias
+
+
+def applyPulseCorrections(
+        refPulse, timeDelayS, residualPhase, ampBias, fftLength, numSamples,
+        srateHz):
+    # Compute the FFT of the ref pulse
+    freqRefPulse = np.fft.fftshift(
+        np.fft.fft(refPulse * ampBias, fftLength))
+    frequenciesHz = np.arange(fftLength) / fftLength * srateHz
+    omegaK = 2 * np.pi * frequenciesHz
+    freqFixedRef = \
+        freqRefPulse * np.exp(1j * (omegaK * timeDelayS + residualPhase))
+    fixedRef = np.fft.ifft(
+        np.fft.ifftshift(freqFixedRef))[:numSamples]
+    corrections = \
+        ampBias * np.exp(1j * (omegaK * timeDelayS + residualPhase))
+
+    return fixedRef, corrections
+
+
+
