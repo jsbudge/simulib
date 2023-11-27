@@ -150,7 +150,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
                                        bw_az, bw_el)
-            att = 1.
+            # att = 1.
             if debug_flag:
                 calc_angs[2, pcol, prow] += 1
 

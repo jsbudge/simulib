@@ -97,6 +97,10 @@ except FileNotFoundError:
     gps_check = False
     settings['use_aps_debug'] = False
     print('Failed to find APS GPS debug outputs.')
+except KeyError:
+    gps_check = False
+    settings['use_aps_debug'] = False
+    print('Failed to find APS GPS debug outputs.')
 
 if settings['use_aps_debug']:
     # rp = SDRPlatform(sdr, ref_llh, channel=settings['channel'])
@@ -136,22 +140,26 @@ except KeyError as e:
     f'Could not find {e}'
     bpj_wavelength = c0 / (fc - bwidth / 2 - 5e6)
 
-chirp = jnp.tile(jnp.fft.fft(sdr[settings['channel']].cal_chirp, fft_len), (settings['cpi_len'], 1)).T
+
 mfilt = sdr.genMatchedFilter(settings['channel'], fft_len=fft_len)
 mfilt_gpu = cupy.array(np.tile(mfilt, (settings['cpi_len'], 1)).T, dtype=np.complex128)
-mfilt_jax = np.tile(mfilt, (settings['cpi_len'], 1)).T
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
 # Calculate out points on the ground
 noise_level = 0
 if settings['gen_data']:
+    chirp = jnp.tile(jnp.fft.fft(sdr[settings['channel']].cal_chirp, fft_len), (settings['cpi_len'], 1)).T
+    mfilt_jax = np.tile(mfilt, (settings['cpi_len'], 1)).T
+    mapped_rpg = jax.vmap(range_profile_vectorized,
+                          in_axes=[None, None, None, None, 0, 0, 0, 0, 0, 0,
+                                   None, None, None, None, None, None, None, None])
     bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
                     bg.heading if settings['rotate_grid'] else 0)
-    '''bg_image = imageio.imread('/data6/Jeff_Backup/Pictures/josh.png').sum(axis=2)
+    bg_image = imageio.imread('/data6/Jeff_Backup/Pictures/josh.png').sum(axis=2)
     bg_image = RectBivariateSpline(np.arange(bg_image.shape[0]), np.arange(bg_image.shape[1]), bg_image)(
-        np.linspace(0, bg_image.shape[0], nbpj_pts[0]), np.linspace(0, bg_image.shape[1], nbpj_pts[1])) / 750'''
-    bg_image = np.zeros_like(bg.refgrid)
-    bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10
+        np.linspace(0, bg_image.shape[0], nbpj_pts[0]), np.linspace(0, bg_image.shape[1], nbpj_pts[1])) / 750
+    '''bg_image = np.zeros_like(bg.refgrid)
+    bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10'''
     bg._refgrid = bg_image
 
     # Constant part of the radar equation
@@ -176,9 +184,6 @@ else:
 threads_per_block = getMaxThreads()
 bpg_bpj = (max(1, (nbpj_pts[0]) // threads_per_block[0] + 1), (nbpj_pts[1]) // threads_per_block[1] + 1)
 
-mapped_rpg = jax.vmap(range_profile_vectorized,
-                      in_axes=[None, None, None, None, 0, 0, 0, 0, 0, 0,
-                               None, None, None, None, None, None, None, None])
 
 # Run through loop to get data simulated
 data_t = sdr[settings['channel']].pulse_time
@@ -241,7 +246,7 @@ for tidx, frames in tqdm(
     # bpj_traces.append(go.Heatmap(z=db(bpj_grid.get())))
     bpj_truedata += bpj_grid.get()
 
-locp = rp.pos(ts[-1]).T
+locp = rp.rxpos(ts[0]).T
 test = rtdata.get()
 angd = angs_debug.get()
 locd = pts_debug.get()
@@ -276,7 +281,7 @@ mag_data *= np.outer(np.ones(mag_data.shape[0]), brightness_curve)
 if test is not None:
     plt.figure('Doppler data')
     plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1),
-               extent=[-sdr[settings['channel']].prf / 2, sdr[settings['channel']].prf / 2, ranges[-1], ranges[0]])
+               extent=(-sdr[settings['channel']].prf / 2, sdr[settings['channel']].prf / 2, ranges[-1], ranges[0]))
     plt.axis('tight')
 
 plt.figure('IMSHOW backprojected data')
@@ -290,6 +295,10 @@ try:
 
         fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
         fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten(), mode='markers')
+        fig.show()
+
+        fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
+        fig.add_scatter3d(x=locd[0, ...].flatten() + locp[0], y=locd[1, ...].flatten() + locp[1], z=locd[2, ...].flatten() + locp[2], mode='markers')
         fig.show()
 
     plt.figure('IMSHOW truth data')
