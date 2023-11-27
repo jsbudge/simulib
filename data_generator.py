@@ -241,6 +241,11 @@ for tidx, frames in tqdm(
     # bpj_traces.append(go.Heatmap(z=db(bpj_grid.get())))
     bpj_truedata += bpj_grid.get()
 
+locp = rp.pos(ts[-1]).T
+test = rtdata.get()
+angd = angs_debug.get()
+locd = pts_debug.get()
+
 del panrx_gpu
 del postx_gpu
 del posrx_gpu
@@ -376,7 +381,7 @@ if gps_check:
     plt.title('U')
     plt.plot(rawGPS['gps_ms'], ru - gu)
 
-    rp = SDRPlatform(sdr, origin=(*sdr.gps_data.loc[321637.03, ['lat', 'lon']].values, 0))
+    rp = SDRPlatform(sdr, origin=(40.13450256718918, -111.68294067343528, 2368.2744673499838))
 
     postCorr_t = np.interp(postCorr['systime'], sdr.gps_data['systime'], sdr.gps_data.index.values)
 

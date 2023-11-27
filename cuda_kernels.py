@@ -150,8 +150,9 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
                                        bw_az, bw_el)
-            if debug_flag and tt == 0:
-                calc_angs[2, pcol, prow] = two_way_rng
+            att = 1.
+            if debug_flag:
+                calc_angs[2, pcol, prow] += 1
 
             # Azimuth window to reduce sidelobes
             # Gaussian window
