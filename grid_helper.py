@@ -174,15 +174,7 @@ class SDREnvironment(Environment):
         self.origin = origin
         self.ref = ref_llh
 
-        if local_grid is not None:
-            grid = local_grid
-        '''else:
-            # Set grid to be one meter resolution
-            rowup = int(1 / self.rps) if self.rps < 1 else 1
-            colup = int(1 / self.cps) if self.cps < 1 else 1
-            grid = grid[::rowup, ::colup]
-            self.rps *= rowup
-            self.cps *= colup'''
+        grid = local_grid if local_grid is not None else grid
 
         rmat, shift = self.getGridParams(self.origin, grid.shape[0] * self.cps, grid.shape[1] * self.rps, grid.shape,
                                          self.heading)

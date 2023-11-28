@@ -28,7 +28,7 @@ def getDTEDName(lat, lon):
     if os.name == 'nt':
         return 'Z:\\dted\\%s%03d\\%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
     else:
-        return '/data5/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+        return '/data1/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
 
 
 def detect_local_extrema(arr):
@@ -57,7 +57,7 @@ def undulationEGM96(lat, lon, egmdatfile=None):
         if os.name == 'nt':
             egmdatfile = "Z:\\dted\\EGM96.DAT"
         else:
-            egmdatfile = "/data5/dted/EGM96.DAT"
+            egmdatfile = "/data1/dted/EGM96.DAT"
     with open(egmdatfile, "rb") as f:
         emg96 = np.fromfile(f, 'double', 1441 * 721, '')
         eg_n = np.ceil(lat / .25) * .25

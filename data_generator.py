@@ -1,5 +1,5 @@
 import numpy as np
-from simulation_functions import getElevation, llh2enu, findPowerOf2, db, enu2llh, GetAdvMatchedFilter
+from simulation_functions import getElevation, llh2enu, findPowerOf2, db, enu2llh, azelToVec
 from aps_io import loadCorrectionGPSData, loadGPSData, loadGimbalData
 from cuda_kernels import getMaxThreads, backproject
 from jax_kernels import range_profile_vectorized
@@ -34,7 +34,7 @@ with open('./data_generator.yaml') as y:
 nbpj_pts = (int(settings['grid_height'] * settings['pts_per_m']), int(settings['grid_width'] * settings['pts_per_m']))
 
 print('Loading SDR file...')
-sdr = load(settings['bg_file'], import_pickle=False, use_jump_correction=False)
+sdr = load(settings['bg_file'], import_pickle=False, do_exact_matches=False, use_jump_correction=False)
 
 if settings['origin'] is None:
     try:
@@ -53,7 +53,7 @@ if settings['origin'] is None:
         settings['origin'] = enu2llh(mrange * np.sin(heading), mrange * np.cos(heading), 0.,
                                      (pt[0], pt[1], alt))
 
-sdr.gimbal['systime'] += TAC * .01
+# sdr.gimbal['systime'] += TAC * .01
 
 bg = SDREnvironment(sdr)
 
@@ -135,7 +135,7 @@ up_fft_len = fft_len * settings['upsample']
 # Chirp and matched filter calculations
 try:
     bpj_wavelength = c0 / (fc - bwidth / 2 - sdr[settings['channel']].xml['DC_Offset_MHz'] * 1e6) \
-        if sdr[settings['channel']].xml['Offset_Video_Enabled'] == 'True' else c0 / fc
+        if sdr[settings['channel']].xml['Offset_Video_Enabled'].lower() == 'true' else c0 / fc
 except KeyError as e:
     f'Could not find {e}'
     bpj_wavelength = c0 / (fc - bwidth / 2 - 5e6)
@@ -145,9 +145,10 @@ mfilt = sdr.genMatchedFilter(settings['channel'], fft_len=fft_len)
 mfilt_gpu = cupy.array(np.tile(mfilt, (settings['cpi_len'], 1)).T, dtype=np.complex128)
 rbins_gpu = cupy.array(ranges, dtype=np.float64)
 
-# Calculate out points on the ground
+
 noise_level = 0
 if settings['gen_data']:
+    # Get all the JAX info ready for random point generation
     chirp = jnp.tile(jnp.fft.fft(sdr[settings['channel']].cal_chirp, fft_len), (settings['cpi_len'], 1)).T
     mfilt_jax = np.tile(mfilt, (settings['cpi_len'], 1)).T
     mapped_rpg = jax.vmap(range_profile_vectorized,
@@ -155,6 +156,8 @@ if settings['gen_data']:
                                    None, None, None, None, None, None, None, None])
     bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
                     bg.heading if settings['rotate_grid'] else 0)
+
+    # This replaces the ASI background with a custom image
     bg_image = imageio.imread('/data6/Jeff_Backup/Pictures/josh.png').sum(axis=2)
     bg_image = RectBivariateSpline(np.arange(bg_image.shape[0]), np.arange(bg_image.shape[1]), bg_image)(
         np.linspace(0, bg_image.shape[0], nbpj_pts[0]), np.linspace(0, bg_image.shape[1], nbpj_pts[1])) / 750
@@ -167,6 +170,8 @@ if settings['gen_data']:
                            (10 ** (settings['antenna_params']['gain'] / 20)) ** 2
                            * bpj_wavelength ** 2 / (4 * np.pi) ** 3)
     noise_level = 10 ** (settings['noise_level'] / 20) / np.sqrt(2)
+
+# Calculate out points on the ground
 gx, gy, gz = bg.getGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
                         bg.heading if settings['rotate_grid'] else 0)
 gx_gpu = cupy.array(gx, dtype=np.float64)
@@ -297,8 +302,12 @@ try:
         fig.add_scatter3d(x=cx.flatten(), y=cy.flatten(), z=cz.flatten(), mode='markers')
         fig.show()
 
+        pvecs = azelToVec(angd[1, ...].flatten(), angd[0, ...].flatten()) * angd[2, ...].flatten()
         fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten())
-        fig.add_scatter3d(x=locd[0, ...].flatten() + locp[0], y=locd[1, ...].flatten() + locp[1], z=locd[2, ...].flatten() + locp[2], mode='markers')
+        fig.add_scatter3d(x=locd[0, ...].flatten() + locp[0], y=locd[1, ...].flatten() + locp[1],
+                          z=locd[2, ...].flatten() + locp[2], mode='markers')
+        fig.add_scatter3d(x=pvecs[0, ...] + locp[0], y=pvecs[1, ...].flatten() + locp[1],
+                          z=pvecs[2, ...].flatten() + locp[2], mode='markers')
         fig.show()
 
     plt.figure('IMSHOW truth data')
