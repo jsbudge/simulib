@@ -242,19 +242,15 @@ for tidx, frames in tqdm(
                                             settings['debug'])
     cupy.cuda.Device().synchronize()
 
-    if ts[0] < rp.gpst.mean() <= ts[-1]:
+    # If we're halfway through the collect, grab debug data
+    postoorig = llh2enu(*settings['origin'], bg.ref) - rp.pos(ts)
+    angtoorig = np.arctan2(-postoorig[:, 1], postoorig[:, 0]) + np.pi / 2 - panrx
+    if np.any(abs(angtoorig) < .1 * DTR):
         locp = rp.pos(ts[-1]).T
         test = rtdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
-
-    # bpj_traces.append(go.Heatmap(z=db(bpj_grid.get())))
     bpj_truedata += bpj_grid.get()
-
-locp = rp.rxpos(ts[0]).T
-test = rtdata.get()
-angd = angs_debug.get()
-locd = pts_debug.get()
 
 del panrx_gpu
 del postx_gpu
@@ -475,3 +471,11 @@ e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'],
 plt.subplot(1, 3, 1)
 plt.plot(postCorr['tx_pos'][:, 1])
 plt.plot(rp.txpos(sdr.gps_data.index.values)[:126, 1])'''
+
+plt.figure()
+freqs = np.fft.fftshift(np.fft.fftfreq(nsam, 1 / fs))
+plt.plot(freqs, np.fft.fftshift(db(np.fft.fft(test[::settings['upsample'], 5]))))
+plt.plot(freqs, np.fft.fftshift(db(np.fft.fft(sdr.getPulse(sdr[0].idx(1000), 0)[1]))))
+plt.ylabel('Power (dB)')
+plt.xlabel('Freq (GHz)')
+plt.legend(['Target', 'Clutter'])
