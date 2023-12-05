@@ -17,6 +17,8 @@ WGS_B = 6356752.314245179
 WGS_E2 = 6.69437999014e-3
 c0 = 299792458.0
 DTR = np.pi / 180
+DAC_FREQ_HZ = 4e9
+BASE_COMPLEX_SRATE_HZ = DAC_FREQ_HZ / 2
 
 
 def getDTEDName(lat, lon):
@@ -329,7 +331,7 @@ def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20, fft_len=No
     #   downsampled
     decimationRate = 1
     if chan.is_lpf:
-        decimationRate = int(np.floor(chan.BASE_COMPLEX_SRATE_HZ / samplingFreqHz))
+        decimationRate = int(np.floor(BASE_COMPLEX_SRATE_HZ / samplingFreqHz))
 
     # Grab the waveform
     waveformData = chan.ref_chirp
@@ -338,7 +340,7 @@ def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20, fft_len=No
     waveformLen = len(waveformData)
 
     # Compute the mixdown signal
-    mixDown = np.exp(1j * (2 * np.pi * chan.NCO_freq_Hz * np.arange(waveformLen) / chan.BASE_COMPLEX_SRATE_HZ))
+    mixDown = np.exp(1j * (2 * np.pi * chan.NCO_freq_Hz * np.arange(waveformLen) / BASE_COMPLEX_SRATE_HZ))
     basebandWaveform = mixDown * waveformData
 
     # Decimate the waveform if applicable
