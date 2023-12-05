@@ -38,7 +38,6 @@ def raisedCosine(x, bw, a0):
 def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     """
     Applies a very simple sinc radiation pattern.
-    :param txonly:
     :param el_c: float. Center of beam in elevation, radians.
     :param az_c: float. Azimuth center of beam in radians.
     :param az_rx: float. Azimuth value of Rx antenna in radians.
@@ -133,6 +132,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
                 calc_pts[2, pcol, prow] = rz
                 calc_angs[0, pcol, prow] = r_el
                 calc_angs[1, pcol, prow] = r_az
+                calc_angs[2, pcol, prow] = rx_rng
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
@@ -149,11 +149,8 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
 
             # Attenuation of beam in elevation and azimuth
             att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-                                       bw_az, bw_el)
+                                        bw_az, bw_el)
             # att = 1.
-            if debug_flag:
-                calc_angs[2, pcol, prow] += 1
-
             # Azimuth window to reduce sidelobes
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
