@@ -1,0 +1,42 @@
+tx_weight_type: ones
+rx_weight_type: ones
+el_weight_type: ones
+doppler_broadening_factor: 2.5
+scan_extent: 360.
+az_scan_range: 360.
+squint: 0.
+monopulse_phase_noise: 10.
+dtedErrorM: 4.0
+beam_edge_loss: 1.0  # Edge loss in dB
+Ncpi: 512  # Number of samples per CPI
+SINRLossdB: -5.0
+doSTAP: False
+
+radar_params:
+  fc: 9000000000.  # Center frequency (Ka-Band)
+  BW: 18000000.  # Bandwidth
+  pulse_length_percent: .7
+  OFFSET_VIDEO: False  # Offset video flag
+  Nchan: 1  # number of channels (# of STAP array elements)
+  Vel: 2.0  # platform velocity knots
+  hAgl: 5000.  # platform height above ground level (feet)
+  maxSlantRange: 275000.  # the maximum target range (meters)
+  Pt: 2500.0  # transmit power (watts)
+  Ls: 3.0  # system losses (dB)
+  T0: 290.0  # the reference temperature (in Kelvin)
+  F: 5.0  # typical noise figure for our system
+  maxDutyCycle: 0.10  # the maximum duty cycle for the radar
+  TAC: 125000000.  # the TAC for the radar
+  unambVelDesired: 80  # (mph) desired unambiguous velocity
+  Kexo: 5.0  # Multiplication factor for exo-clutter boundary
+  desiredProbDet: 0.85  # Desired probability of detection
+  tx_array_n: 200
+  el_array_n: 48
+  aperture_factor: 1.0
+  az_bw: .55
+  el_bw: 2.15
+
+target_params:
+  RCS: 1.2589254117941673  # Target RCS in dBsm
+  speed: 5.0
+  maxSpeed: 30.  # max target speed in knots

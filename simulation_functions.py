@@ -4,6 +4,7 @@ from scipy.spatial.transform import Rotation as rot
 from itertools import product
 import scipy.ndimage.filters as filters
 import scipy.ndimage.morphology as morphology
+from scipy.special import i0
 import plotly.io as pio
 import os
 from functools import reduce
@@ -436,6 +437,104 @@ def window_taylor(N, nbar=4, sll=-30):
     scale = W((N - 1) / 2)
     w /= scale
     return w
+
+
+def antennaGain(N, wN, Nsub, wNsub, Nel, wNel, a, b, d, lamda):
+    """
+    Inputs are x, y, and z components of the intertial Range vector, which
+    points from the aircraft to the point target (full magnitude, not normalized),
+    as well as the rotation matrices from inertial-to-body,
+    body-to-perpindicular body, and perpindicular body-to-antenna frames.
+    As well as the weights for the Tx array, Rx array, and elevation array and
+    the number of elements in the Tx, Rx, and Elevation arrays, and
+    width (a) and height (b) of a single element, and the wavenumber.
+    """
+    k = 2*np.pi/lamda
+    thetat = 0.0
+    thetar = 0.0
+    phit = 0.0
+    phir = 0.0
+    cttx = np.cos(thetat)
+    sttx = np.sin(thetat)
+    ctrx = np.cos(thetar)
+    strx = np.sin(thetar)
+    cptx = np.cos(phit)
+    sptx = np.sin(phit)
+    cprx = np.cos(phir)
+    sprx = np.sin(phir)
+    E_i = np.sinc(a*k*sttx*cptx/(2*np.pi))*np.sinc(b*k*sttx*sptx/(2*np.pi))
+    # compute the Tx array factor
+    AFtx = 0.0
+    AFtx2 = 0.0
+    for i in range(int(N/2)):
+        AFtx += 2*wN[i]
+        AFtx2 += 2*(wN[i]**2)
+    # compute the Rx array factor for the sub-array
+    AFsub = 0.0
+    AFsub2 = 0.0
+    for i in range(int(Nsub/2)):
+        AFsub += 2*wNsub[i]
+        AFsub2 += 2*(wNsub[i]**2)
+    # compute the Elevation array factor
+    AFel = 0.0
+    AFel2 = 0.0
+    for i in range(int(Nel/2)):
+        AFel += 2*wNel[i]
+        AFel2 += 2*(wNel[i]**2)
+
+    # let's try the solution from the other PDF from online
+    DFtx = 0.0
+    DFel = 0.0
+    DFde = 0.0
+    for i in range(int(N/2)):
+        for j in range(int(Nel/2)):
+            DFtx += 2 * (wN[i]*wNel[j])*(((i*2+1)/2.0)**2)
+            DFel += 2 * (wN[i]*wNel[j])*(((j*2+1)/2.0)**2)
+            DFde += 2 * wN[i]*wNel[j]
+    DFtx = np.sqrt(DFtx)
+    DFel = np.sqrt(DFel)
+
+    MTI_DF = 8*np.pi**2*d*d*DFtx*DFel/(DFde*lamda**2)
+
+    # let's try the solution from the other PDF from online
+    DFsub = 0.0
+    DFel = 0.0
+    DFde = 0.0
+    for i in range(int(Nsub/2)):
+        for j in range(int(Nel/2)):
+            DFsub += 2* (wNsub[i]*wNel[j]) * ((i*2+1)/2.0)**2
+            DFel += 2* (wNsub[i]*wNel[j])*((j*2+1)/2.0)**2
+            DFde += 2* wNsub[i]*wNel[j]
+
+    DFsub = np.sqrt(DFsub)
+    DFel = np.sqrt(DFel)
+
+    SAR_DF = 8*np.pi**2*d*d*DFsub*DFel/(DFde*lamda**2)
+
+    # combine the element electric field with all of the array factors to obtain
+    # the two way normalized radiation pattern
+    MTI_D = AFtx**2 * AFel**2 / (AFtx2*AFel2)
+    SAR_D = AFsub**2 * AFel**2 / (AFsub2*AFel2)
+    return MTI_D, SAR_D, MTI_DF, SAR_DF
+
+
+def marcumq(alpha, T, end, numSamples):
+    """My implimentation of the Marcum-Q function"""
+    t = np.linspace(T, end, numSamples)
+    dt = t[1] - t[0]
+    alpha_2 = alpha**2
+    ret = sum(t * np.exp(-.5 * (t**2 + alpha_2)) * i0(alpha * t) * dt)
+    return 1.0 if np.isnan(ret) else ret
+
+
+def getDoppResolution(broad_factor, PRF, lamda, Ncpi):
+    DopplerResolutionHz = broad_factor * PRF / Ncpi
+    radialVelocityResolutionMPerS = DopplerResolutionHz * lamda / 2.0
+    # 3) Velocity uncertainty is dominated by the velocity sample spacing, but our
+    #   ability to know the pointing direction of the antenna and estimate the
+    #   azimuth angle of the target also comes into play.
+    radialVelocityUncertaintyMPerS = PRF * lamda / (2.0 * Ncpi) / 2
+    return DopplerResolutionHz, radialVelocityUncertaintyMPerS, radialVelocityResolutionMPerS
 
 
 def sinc_interp(x, s, u):
