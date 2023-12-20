@@ -15,8 +15,8 @@ grid_height: 100
 channel: 0
 fdelay: 1.5
 origin: [40.138044, -111.660027, 1365.8849123907273]
-gen_data: True
-gps_check: True
+gen_data: False
+gps_check: False
 pts_per_tri: 2
 noise_level: -10
 

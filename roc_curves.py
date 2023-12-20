@@ -9,6 +9,7 @@ going to make someday.
 """
 from numpy import *
 from scipy.signal.windows import chebwin, exponential, blackman, hann
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 from simulation_functions import window_taylor, antennaGain, marcumq, getDoppResolution
 import yaml
@@ -124,8 +125,12 @@ if __name__ == '__main__':
     # attempt to calculate the gain of the MTI and SAR mode antennas
     MTI_D, SAR_D, MTI_DF, SAR_DF = antennaGain(settings['radar_params']['tx_array_n'], tW, Nsub, subW,
                                                settings['radar_params']['el_array_n'], elW, width, height, d, lamda)
-    TxGain = MTI_DF * eta_rad
-    RxGain = SAR_DF * eta_rad
+    if settings['radar_params']['calc_antenna']:
+        TxGain = MTI_D * eta_rad
+        RxGain = SAR_D * eta_rad
+    else:
+        TxGain = dbtonat(settings['radar_params']['ant_gain_db'])
+        RxGain = dbtonat(settings['radar_params']['ant_gain_db'])
     # RxGain = TxGain
 
     # Define the antenna azimuth and elevation 3dB beamwidth in radians
@@ -174,6 +179,11 @@ if __name__ == '__main__':
     adcOn = round(nearRange * 2.0 / c0 * settings['radar_params']['TAC']) / settings['radar_params']['TAC']
     # Calculate the pulse length first
     tp = nearRange * 2.0 / c0 * settings['radar_params']['pulse_length_percent']
+    if tp > settings['radar_params']['max_pulse_length']:
+        warnings.warn(f"Possible pulse time is greater than max_pulse_length. "
+                      f"Being reset to {settings['radar_params']['max_pulse_length']}.",
+                      RuntimeWarning)
+        tp = settings['radar_params']['max_pulse_length']
 
     # Calculate the PRI for our desired unambiguous velocity
     PRF = 2 * settings['radar_params']['unambVelDesired'] * mph2mps * cos(farGraze) * 2 / lamda
@@ -219,17 +229,18 @@ if __name__ == '__main__':
     # When the clutter slope is greater than 1.0, then we have Doppler aliasing
     #   which significantly increases the rank of the clutter matrix
     LOSVelocityAtSquintMPerS = plat_vel * cos(settings['squint'] * DTR) * cos(farGraze)
-    achievedClutterSlope = PRI * 2.0 * LOSVelocityAtSquintMPerS / Lsub
-    print("The STAP clutter slope for the achievable PRF: %0.3f" % (
-        achievedClutterSlope))
-    # Compute the required Doppler sampling for clutter slope less than 1.0
-    # desired slope of clutter ridge line
-    beta = 1.0 / 1.0
-    # This is based on the inter-channel spacing and velocity (I believe it
-    #   also assumes a broadside geometry)
-    unambiguousPRI = beta * Lsub / (2 * LOSVelocityAtSquintMPerS)
-    print("PRF required for STAP clutter slope less than 1.0: %0.3f Hz" % (
-            1 / unambiguousPRI))
+    if settings['radar_params']['calc_antenna']:
+        achievedClutterSlope = PRI * 2.0 * LOSVelocityAtSquintMPerS / Lsub
+        print("The STAP clutter slope for the achievable PRF: %0.3f" % (
+            achievedClutterSlope))
+        # Compute the required Doppler sampling for clutter slope less than 1.0
+        # desired slope of clutter ridge line
+        beta = 1.0 / 1.0
+        # This is based on the inter-channel spacing and velocity (I believe it
+        #   also assumes a broadside geometry)
+        unambiguousPRI = beta * Lsub / (2 * LOSVelocityAtSquintMPerS)
+        print("PRF required for STAP clutter slope less than 1.0: %0.3f Hz" % (
+                1 / unambiguousPRI))
 
     # Compute the first blind velocity
     blindVelocityMPerS = PRF * lamda / 2 - MDV
@@ -424,7 +435,7 @@ if __name__ == '__main__':
     #   for target range from above
     ################################################################################
     # required FA rate in FA/min
-    req_fa_rate = array([0.01, 0.1, 1.0])
+    req_fa_rate = array([0.01, 0.1, 1.0, 6.0])
     req_fa = req_fa_rate / 60.0 * Tcpi / (settings['Ncpi'] * nominalNumRangeBins)
     # req_fa = array([1e-6])
     # uncomment if employing consecutive CPI's to mitigate false alarms
@@ -467,14 +478,16 @@ if __name__ == '__main__':
                    'beam_edge_loss'] * atmosphericLosses *
                 NoisePow * target_range ** 4))
     CPIGain_req_snr = SNR_lin * settings['Ncpi'] * STAPGain
-    P_dreq_0 = genPdreq0(sqrt(2 * CPIGain_req_snr), req_fa[0], SNR_lin.size)
+    P_dreqs = [genPdreq0(sqrt(2 * CPIGain_req_snr), r, SNR_lin.size) for r in req_fa]
 
     plt.figure('Pd vs. Slant Range')
-    plt.plot(target_range / 1e3, P_dreq_0, 'b', linewidth=1)
+    for pdreq in P_dreqs:
+        plt.plot(target_range / 1e3, pdreq, linewidth=1)
     plt.hlines(Pd, target_range[0] / 1e3, target_range[-1] / 1e3, 'k', 'dashed')
     plt.vlines(R0 / 1e3, 0, 1, 'k', 'dashdot')
     plt.xlabel('Target Slant Range (km)')
     plt.ylabel('Probability of Detection')
+    plt.legend([f'{r} FA/min' for r in req_fa_rate], loc='best')
     plt.title(r'%0.1f dBsm target from %0.1f ft AGL' % (settings['target_params']['RCS'], hAgl / ft2m))
     plt.xlim([target_range[0] / 1e3, target_range[-1] / 1e3])
     plt.ylim([0, 1.05])
@@ -515,7 +528,7 @@ if __name__ == '__main__':
     #   for the target RCS define above
     ################################################################################
     # required FA rate in FA/min
-    req_fa_rate_dB = linspace(-50, 50, 200)
+    req_fa_rate_dB = linspace(-500, 10, 200)
     req_fa_rate = 10 ** (req_fa_rate_dB / 10.0)
     req_fa = req_fa_rate / 60.0 * Tcpi / (settings['Ncpi'] * nominalNumRangeBins)
     SNR_lin = settings['radar_params']['Pt'] * TxGain * RxGain * lamda ** 2 * target_RCS * compression_gain \
@@ -563,7 +576,7 @@ if __name__ == '__main__':
     P_dreq_2 = [genPdreq0([alpha_req_snr], req_fa[1, i], 1) for i in range(slantRangeSwaths.size)]
     P_dreq_0 = [genPdreq0([alpha_req_snr], req_fa[0, i], 1) for i in range(slantRangeSwaths.size)]
 
-    plt.figure()
+    plt.figure('Pd vs. Swath Size')
     plt.plot(slantRangeSwaths / 1e3, P_dreq_0, 'r', linewidth=1)
     plt.plot(slantRangeSwaths / 1e3, P_dreq_2, 'b', linewidth=1)
     plt.plot(slantRangeSwaths / 1e3, P_dreq_4, 'g', linewidth=1)
@@ -577,5 +590,37 @@ if __name__ == '__main__':
     plt.ylim([0, 1.05])
 
     ################################################################################
+    ################################################################################
+    # Generate the ROC curves for RCS vs slant range for a given Pd and FAR
+    ################################################################################
+    # This involves reversing the Marcum-Q, so we're just going to least squares the points
+    npts = 200
+    target_range = linspace(R0 * 0.75, R0 * 1.5, npts)
+    atmosphericLosses = 10 ** ((twoWayFreeAirdBPerkm * target_range / 1e3) / 10.0)
+    req_fa_rate = 6.0
+    req_fa = req_fa_rate / 60.0 * Tcpi / (settings['Ncpi'] * nominalNumRangeBins)
+
+    rcs_pd = zeros(npts)
+    x0 = 1e-2
+    for tidx, tr in enumerate(target_range):
+        def minRCS(x):
+            SNR_lin = (settings['radar_params']['Pt'] * TxGain * RxGain * lamda ** 2 * x[0] * compression_gain /
+                       ((4 * pi) ** 3 * dbtonat(settings['radar_params']['Ls']) * settings[
+                           'beam_edge_loss'] * atmosphericLosses[tidx] *
+                        NoisePow * tr ** 4))
+            CPIGain_req_snr = SNR_lin * settings['Ncpi'] * STAPGain
+            P_dreqs = genPdreq0([sqrt(2 * CPIGain_req_snr)], req_fa, 1)
+            return abs(P_dreqs[0] - settings['desiredPd'])
+        rcs_pd[tidx] = minimize(minRCS, array([x0]), bounds=[(0, None)])['x'][0]
+        x0 = rcs_pd[tidx]
+    rcs_pd = 10 * log(rcs_pd)
+
+    plt.figure('RCS vs. Slant Range')
+    plt.plot(target_range / 1e3, rcs_pd, 'r', linewidth=1)
+    plt.xlabel('Slant Range (km)')
+    plt.ylabel('RCS (dBsm)')
+    plt.title(f"{settings['desiredPd']} Pd and {req_fa_rate} FA/min FAR")
+    plt.xlim([target_range[0] / 1e3, target_range[-1] / 1e3])
+    plt.ylim([min(rcs_pd), max(rcs_pd)])
 
     plt.show()
