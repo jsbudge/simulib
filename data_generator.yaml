@@ -9,9 +9,9 @@ cpi_len: 32
 plp: 0
 partial_pulse_percent: .2
 debug: True
-pts_per_m: 4
-grid_width: 100
-grid_height: 100
+pts_per_m: 20
+grid_width: 10
+grid_height: 10
 channel: 0
 fdelay: 1.5
 origin: [40.138044, -111.660027, 1365.8849123907273]
@@ -19,6 +19,7 @@ gen_data: False
 gps_check: False
 pts_per_tri: 2
 noise_level: -10
+save_as_target: False
 
 simulation_params:
   use_sdr_gps: True

@@ -193,7 +193,7 @@ bpg_bpj = (max(1, (nbpj_pts[0]) // threads_per_block[0] + 1), (nbpj_pts[1]) // t
 # Run through loop to get data simulated
 data_t = sdr[settings['channel']].pulse_time
 idx_t = sdr[settings['channel']].frame_num
-test = None
+data_check = None
 print('Backprojecting...')
 pulse_pos = 0
 # Data blocks for imaging
@@ -247,9 +247,14 @@ for tidx, frames in tqdm(
     angtoorig = np.arctan2(-postoorig[:, 1], postoorig[:, 0]) + np.pi / 2 - panrx
     if np.any(abs(angtoorig) < .1 * DTR):
         locp = rp.pos(ts[-1]).T
-        test = rtdata.get()
+        data_check = rtdata.get()
         angd = angs_debug.get()
         locd = pts_debug.get()
+    if settings['save_as_target']:
+        data_check = rtdata.get()[:32, :]
+        tc = data_check / np.sqrt(np.sum(abs(data_check * data_check.conj()), axis=0))
+        tc = np.cov(tc.T)
+
     bpj_truedata += bpj_grid.get()
 
 del panrx_gpu
@@ -279,9 +284,9 @@ mag_data *= np.outer(np.ones(mag_data.shape[0]), brightness_curve)
 ----------------------------PLOTS-------------------------------
 """
 
-if test is not None:
+if data_check is not None:
     plt.figure('Doppler data')
-    plt.imshow(np.fft.fftshift(db(np.fft.fft(test, axis=1)), axes=1),
+    plt.imshow(np.fft.fftshift(db(np.fft.fft(data_check, axis=1)), axes=1),
                extent=(-sdr[settings['channel']].prf / 2, sdr[settings['channel']].prf / 2, ranges[-1], ranges[0]))
     plt.axis('tight')
 
@@ -474,8 +479,9 @@ plt.plot(rp.txpos(sdr.gps_data.index.values)[:126, 1])'''
 
 plt.figure()
 freqs = np.fft.fftshift(np.fft.fftfreq(nsam, 1 / fs))
-plt.plot(freqs, np.fft.fftshift(db(np.fft.fft(test[::settings['upsample'], 5]))))
+plt.plot(freqs, np.fft.fftshift(db(np.fft.fft(data_check[::settings['upsample'], 5]))))
 plt.plot(freqs, np.fft.fftshift(db(np.fft.fft(sdr.getPulse(sdr[0].idx(1000), 0)[1]))))
 plt.ylabel('Power (dB)')
 plt.xlabel('Freq (GHz)')
 plt.legend(['Target', 'Clutter'])
+
