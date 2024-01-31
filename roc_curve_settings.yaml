@@ -8,7 +8,7 @@ squint: 0.
 monopulse_phase_noise: 10.
 dtedErrorM: 4.0
 beam_edge_loss: 1.0  # Edge loss in dB
-Ncpi: 256  # Number of samples per CPI
+Ncpi: 512  # Number of samples per CPI
 SINRLossdB: -5.0
 doSTAP: False
 desiredPd: .85
@@ -21,26 +21,26 @@ radar_params:
   Nchan: 1  # number of channels (# of STAP array elements)
   Vel: 2.0  # platform velocity knots
   hAgl: 5000.  # platform height above ground level (feet)
-  maxSlantRange: 250000.  # the maximum target range (meters)
-  Pt: 4000.0  # transmit power (watts)
+  maxSlantRange: 180000.  # the maximum target range (meters)
+  Pt: 2000.0  # transmit power (watts)
   Ls: 3.0  # system losses (dB)
   T0: 290.0  # the reference temperature (in Kelvin)
   F: 5.0  # typical noise figure for our system
-  maxDutyCycle: 0.10  # the maximum duty cycle for the radar
+  maxDutyCycle: 0.20  # the maximum duty cycle for the radar
   TAC: 125000000.  # the TAC for the radar
   unambVelDesired: 80  # (mph) desired unambiguous velocity
   Kexo: 5.0  # Multiplication factor for exo-clutter boundary
   desiredProbDet: 0.85  # Desired probability of detection
   max_pulse_length: .0001
-  tx_array_n: 200
-  el_array_n: 100
+  tx_array_n: 300
+  el_array_n: 300
   aperture_factor: 1.0
-  az_bw: 1.214
-  el_bw: 1.214
+  az_bw: 1.793
+  el_bw: 1.793
   calc_antenna: False
-  ant_gain_db: 41
+  ant_gain_db: 37.69
 
 target_params:
-  RCS: -6.931471805599453  # Target RCS in dBsm
+  RCS: 20.  # Target RCS in dBsm
   speed: 5.0
   maxSpeed: 30.  # max target speed in knots

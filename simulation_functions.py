@@ -9,6 +9,8 @@ import plotly.io as pio
 import os
 from functools import reduce
 from dted import Tile, LatLon
+import urllib
+from PIL import Image
 
 pio.renderers.default = 'browser'
 
@@ -732,3 +734,61 @@ def applyPulseCorrections(
         ampBias * np.exp(1j * (omegaK * timeDelayS + residualPhase))
 
     return fixedRef, corrections
+
+
+GECOEFF = 156543.03392
+TILE_SIZE = 256
+
+
+def getGoogleMap(lat, lon, mpp, im_width=10, im_height=10):
+    zoomlevel = int(np.log2(GECOEFF * np.cos(lat * np.pi / 180.) / mpp))
+    gmpp = GECOEFF * np.cos(lat * np.pi / 180.) / (2 ** zoomlevel)
+
+    # Use a left shift to get the power of 2
+    # i.e. a zoom level of 2 will have 2^2 = 4 tiles
+    scale = 1 << zoomlevel
+
+    # Convert the latitude to radians and take the sine
+    sy = np.sin(lat * np.pi / 180.0)
+    world_x = TILE_SIZE * (.5 + lon / 360.)
+    world_y = TILE_SIZE * (.5 - np.log((1 + sy) / (1 - sy)) / (4 * np.pi))
+
+    pixel_x = np.floor(world_x * scale)
+    pixel_y = np.floor(world_y * scale)
+
+    corner_x = np.floor(pixel_x - (im_height / 2) / gmpp)
+    corner_y = np.floor(pixel_y - (im_height / 2) / gmpp)
+
+    tile_x = corner_x // TILE_SIZE
+    tile_y = corner_y // TILE_SIZE
+
+    start_x = int(tile_x)
+    start_y = int(tile_y)
+    pix_shift_x = int((corner_x / TILE_SIZE - start_x) * TILE_SIZE)
+    pix_shift_y = int((corner_y / TILE_SIZE - start_y) * TILE_SIZE)
+
+    tile_width = int(np.ceil((im_width / gmpp) / TILE_SIZE)) + 1
+    tile_height = int(np.ceil((im_height / gmpp) / TILE_SIZE)) + 1
+    im_shift_x = int(im_width / gmpp)
+    im_shift_y = int(im_height / gmpp)
+
+    # Determine the size of the image in pixels
+    width, height = TILE_SIZE * tile_width, TILE_SIZE * tile_height
+
+    # Create a new image of the size required
+    map_img = Image.new('RGB', (width, height))
+
+    for x, y in product(range(tile_width), range(tile_height)):
+        url = f'https://mt1.google.com/vt?lyrs=s&x={start_x + x}&y={start_y + y}&z={zoomlevel}'
+
+        current_tile = f'{x}-{y}'
+        urllib.request.urlretrieve(url, current_tile)
+
+        im = Image.open(current_tile)
+        map_img.paste(im, (x * TILE_SIZE, y * TILE_SIZE))
+
+        os.remove(current_tile)
+
+    map_img = map_img.crop((pix_shift_x, pix_shift_y, pix_shift_x + im_shift_x, pix_shift_y + im_shift_y))
+
+    return map_img
