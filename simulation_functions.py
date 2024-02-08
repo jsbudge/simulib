@@ -1,4 +1,7 @@
+from io import BytesIO
+
 import numpy as np
+import requests
 from scipy.interpolate import interpn
 from scipy.spatial.transform import Rotation as rot
 from itertools import product
@@ -781,10 +784,9 @@ def getGoogleMap(lat, lon, mpp, im_width=10, im_height=10):
     for x, y in product(range(tile_width), range(tile_height)):
         url = f'https://mt1.google.com/vt?lyrs=s&x={start_x + x}&y={start_y + y}&z={zoomlevel}'
 
-        req = Request(url=url, headers={'User-Agent': 'Mozilla/5.0'})
-        page = urlopen(req, timeout=10).read()
+        response = requests.get(url=url, headers={'User-Agent': 'Mozilla/5.0'})
 
-        im = Image.open(page)
+        im = Image.open(BytesIO(response.content))
         map_img.paste(im, (x * TILE_SIZE, y * TILE_SIZE))
 
     map_img = map_img.crop((pix_shift_x, pix_shift_y, pix_shift_x + im_shift_x, pix_shift_y + im_shift_y))
@@ -824,10 +826,9 @@ def resampleGoogleMap(lats, lons, mpp):
 
     for x, y in product(range(tile_width), range(tile_height)):
         url = f'https://mt1.google.com/vt?lyrs=s&x={start_x + x}&y={start_y + y}&z={zoomlevel}'
-        req = Request(url=url, headers={'User-Agent': 'Mozilla/5.0'})
-        page = urlopen(req, timeout=10).read()
+        response = requests.get(url=url, headers={'User-Agent': 'Mozilla/5.0'})
 
-        im = Image.open(page)
+        im = Image.open(BytesIO(response.content))
         map_img.paste(im, (x * TILE_SIZE, y * TILE_SIZE))
 
     # Get interpolated values from image for lat/lons
