@@ -128,6 +128,39 @@ def range_profile_vectorized(rot, shift, vgz, vert_reflectivity,
 
 
 @jax.jit
+def real_beam_image(pdata, px, py, vgz, source_xyz, receive_xyz, panrx, near_range_s, source_fs, wavenumber):
+
+    # Load in all the parameters that don't change
+    grid = jnp.zeros(px.shape, dtype=jnp.complex128)
+    gx, gy = jnp.meshgrid(jnp.arange(vgz.shape[0]), jnp.arange(vgz.shape[1]))
+    gx = gx.flatten()
+    gy = gy.flatten()
+    bar_x = px.flatten()
+    bar_y = py.flatten()
+    bar_z = vgz.flatten()
+
+    # Calculate out the angles in azimuth and elevation for the bounce
+    tx = bar_x - source_xyz[0]
+    ty = bar_y - source_xyz[1]
+    tz = bar_z - source_xyz[2]
+    rng = jnp.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+
+    rx = bar_x - receive_xyz[0]
+    ry = bar_y - receive_xyz[1]
+    rz = bar_z - receive_xyz[2]
+    r_rng = jnp.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
+    r_az = jnp.arctan2(rx, ry)
+
+    two_way_rng = rng + r_rng
+
+    but_rng = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+    but_rng = jnp.floor(but_rng).astype(int)
+    add_data = pdata.at[but_rng].get()
+    add_data = jnp.where(abs(diff(r_az, panrx)) > .01, 0, add_data)
+    return grid.at[gx, gy].add(add_data)
+
+
+@jax.jit
 def gather_data_loop(pdata, ran_key, px, py, source_xyz, receive_xyz, vgz, vert_reflectivity, source_fs, wavenumber,
                      panrx,
                      elrx, pantx, eltx, bw_az, bw_el, rot, shift, rbins, near_range_s, power_scaling):
