@@ -1,6 +1,3 @@
-import cmath
-import math
-from simulation_functions import findPowerOf2, db
 import numpy as np
 from jax import numpy as jnp
 import jax

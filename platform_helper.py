@@ -1,9 +1,7 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import medfilt
-from simulation_functions import llh2enu
-from aps_io import loadGimbalData
-import pandas as pd
+from .simulation_functions import llh2enu
 
 c0 = 299792458.0
 TAC = 125e6

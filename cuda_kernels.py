@@ -1,7 +1,7 @@
 import cmath
 import math
 from numba import cuda, njit
-from simulation_functions import findPowerOf2
+from .simulation_functions import findPowerOf2
 import numpy as np
 
 c0 = 299792458.0
