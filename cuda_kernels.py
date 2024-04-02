@@ -71,6 +71,40 @@ def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     return tx_pat * tx_pat * rx_pat * rx_pat
 
 
+def applyRadiationPatternCPU(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
+    """
+    Applies a very simple sinc radiation pattern.
+    :param el_c: float. Center of beam in elevation, radians.
+    :param az_c: float. Azimuth center of beam in radians.
+    :param az_rx: float. Azimuth value of Rx antenna in radians.
+    :param el_rx: float. Elevation value of Rx antenna in radians.
+    :param az_tx: float. Azimuth value of Tx antenna in radians.
+    :param el_tx: float. Elevation value of Tx antenna in radians.
+    :param bw_az: float. Azimuth beamwidth of antenna in radians.
+    :param bw_el: float. elevation beamwidth of antenna in radians.
+    :return: float. Value by which a point should be scaled.
+    """
+    a = np.pi / bw_az
+    b = np.pi / bw_el
+    eldiff = cpudiff(el_c, el_tx)
+    azdiff = cpudiff(az_c, az_tx)
+    txaz = abs(np.sin(a * azdiff) / (a * azdiff))
+    txaz = txaz if azdiff <= bw_az * 2 else 0.
+    txel = abs(np.sin(b * eldiff) / (b * eldiff))
+    txel = txel if eldiff <= bw_el * 2 else 0.
+    tx_pat = txaz * txel
+    # tx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
+    eldiff = cpudiff(el_c, el_rx)
+    azdiff = cpudiff(az_c, az_rx)
+    rxaz = abs(np.sin(a * azdiff) / (a * azdiff))
+    rxaz = rxaz if azdiff <= bw_az * 2 else 0.
+    rxel = abs(np.sin(b * eldiff) / (b * eldiff))
+    rxel = rxel if eldiff <= bw_el * 2 else 0.
+    rx_pat = rxaz * rxel
+    # rx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
+    return tx_pat * tx_pat * rx_pat * rx_pat
+
+
 @cuda.jit()
 def genRangeProfile(gx, gy, vgz, vert_reflectivity,
                     source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts,

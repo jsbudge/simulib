@@ -28,10 +28,12 @@ simulation_params:
   use_sdr_fc: True
 
 antenna_params:
-  n_ants: 1
+  n_tx: 1
+  n_rx: 1
   gain: [25, 25]
   transmit_power: [100, 100]
-  rel_pos: [[0., 0., 0.], [-1., 0., 0.]]
+  tx_pos: [ [ -0.015614190520833333, 0., 0. ], [ 0.015614190520833333, 0, 0 ] ]
+  rx_pos: [ [ 0., -0.015614190520833333, 0. ], [ 0., 0.015614190520833333, 0 ] ]
 
 waveform_params:
   use_model: False

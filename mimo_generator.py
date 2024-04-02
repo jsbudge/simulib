@@ -30,16 +30,14 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 
-def genChannels(n_ants, ant_pos, plat_e, plat_n, plat_u, plat_r, plat_p, plat_y,
+def genChannels(n_tx, n_rx, tx_pos, rx_pos, plat_e, plat_n, plat_u, plat_r, plat_p, plat_y,
                 gpst, dep_ang, az_half_bw, el_half_bw, fs):
     rps = []
     rx_array = []
-    vx_perm = list(permutations(np.arange(n_ants), 2)) + [
-        (a, a) for a in np.arange(n_ants)
-    ]
+    vx_perm = [(n, q) for q in range(n_tx) for n in range(n_rx)]
     for tx, rx in vx_perm:
-        txpos = np.array(ant_pos[tx])
-        rxpos = np.array(ant_pos[rx])
+        txpos = np.array(tx_pos[tx])
+        rxpos = np.array(rx_pos[rx])
         vx_pos = rxpos + txpos
         if not np.any([sum(vx_pos - r) == 0 for r in rx_array]):
             rps.append(
@@ -53,7 +51,7 @@ def genChannels(n_ants, ant_pos, plat_e, plat_n, plat_u, plat_r, plat_p, plat_y,
     return rpref, rps, np.array(rx_array)
 
 
-def genChirpAndMatchedFilters(waves, bwidth, fs, fc, fft_len, cpi_len):
+def genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len, cpi_len):
     # Get Taylor window of appropriate length and shift it to the aliased frequency of fc
     taywin = int(bwidth / fs * fft_len)
     taywin = taywin + 1 if taywin % 2 != 0 else taywin
@@ -132,7 +130,8 @@ if __name__ == '__main__':
         [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset])
     grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
 
-    rpref, rps, rx_array = genChannels(settings['antenna_params']['n_ants'], settings['antenna_params']['rel_pos'],
+    rpref, rps, rx_array = genChannels(settings['antenna_params']['n_tx'], settings['antenna_params']['n_rx'],
+                                       settings['antenna_params']['tx_pos'], settings['antenna_params']['rx_pos'],
                                        plat_e, plat_n, plat_u, plat_r, plat_p, plat_y, rpi.gpst, rpi.dep_ang,
                                        rpi.az_half_bw, rpi.el_half_bw, rpi.fs)
 
@@ -156,7 +155,7 @@ if __name__ == '__main__':
     endpoints = [(1, 0) if rp.tx_num == 0 else (0, 1) for rp in rps]
     waves = np.array([np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(*e, 10), nr, fs, fc,
                                bwidth), fft_len) for e in endpoints])
-    taytay, chirps, mfilt = genChirpAndMatchedFilters(waves, bwidth, fs, fc, fft_len, settings['cpi_len'])
+    taytay, chirps, mfilt = genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len, settings['cpi_len'])
 
     bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
                     bg.heading if settings['rotate_grid'] else 0)
