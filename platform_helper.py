@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import medfilt
-from simulation_functions import llh2enu
+from simulation_functions import llh2enu, findPowerOf2
 
 c0 = 299792458.0
 TAC = 125e6
@@ -336,6 +336,35 @@ class RadarPlatform(Platform):
                     np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
         MPP = c0 / self.fs / upsample / 2
         return nrange + np.arange(nsam * upsample) * MPP + c0 / self.fs
+
+    def getRadarParams(self, fdelay, plp, upsample=1):
+        """
+        A function to get many relevant radar parameters gathered in one spot.
+
+        Args:
+            fdelay: The fdelay value.
+            plp: The plp value.
+            upsample: The upsample value (default: 1).
+
+        Returns:
+            nsam: The calculated number of samples.
+            nr: The calculated pulse length.
+            ranges: The calculated range bins.
+            ranges_sampled: The calculated range bins with upsample value of 1.
+            near_range_s: The calculated near range in seconds.
+            granges: The calculated range bins multiplied by the cosine of the dep_ang.
+            fft_len: The calculated FFT length.
+            up_fft_len: The calculated upsampled FFT length.
+        """
+        nsam = self.calcNumSamples(fdelay, plp)
+        nr = self.calcPulseLength(fdelay, plp, True)
+        ranges = self.calcRangeBins(fdelay, upsample, plp)
+        ranges_sampled = self.calcRangeBins(fdelay, 1, plp)
+        near_range_s = ranges[0] / c0
+        granges = ranges * np.cos(self.dep_ang)
+        fft_len = findPowerOf2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True))
+        up_fft_len = fft_len * upsample
+        return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
 
 
 """
