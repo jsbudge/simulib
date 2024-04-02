@@ -1,11 +1,9 @@
 import numpy as np
 from numba.cuda.random import create_xoroshiro128p_states
-
-from simulation_functions import getElevation, llh2enu, findPowerOf2, db, enu2llh, azelToVec, genPulse
-from aps_io import loadCorrectionGPSData, loadGPSData, loadGimbalData
+from simulation_functions import getElevation, llh2enu, db, enu2llh, azelToVec, genPulse
 from cuda_kernels import getMaxThreads, backproject, genRangeProfile
 from grid_helper import SDREnvironment
-from platform_helper import SDRPlatform, APSDebugPlatform, RadarPlatform
+from platform_helper import SDRPlatform, RadarPlatform
 import cupy as cupy
 import matplotlib.pyplot as plt
 import plotly.express as px
@@ -13,15 +11,10 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 from tqdm import tqdm
-from SDRParsing import load, findAllFilenames, findDebugFilenames
 import yaml
 from scipy.signal.windows import taylor
-from scipy.interpolate import RectBivariateSpline
 from sklearn.preprocessing import QuantileTransformer
-from itertools import permutations
-import imageio.v2 as imageio
 
-# pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
 
 c0 = 299792458.0
@@ -31,7 +24,7 @@ inch_to_m = .0254
 
 
 def genChannels(n_tx, n_rx, tx_pos, rx_pos, plat_e, plat_n, plat_u, plat_r, plat_p, plat_y,
-                gpst, dep_ang, az_half_bw, el_half_bw, fs):
+                gpst, gimbal, goff, grot, dep_ang, az_half_bw, el_half_bw, fs):
     rps = []
     rx_array = []
     vx_perm = [(n, q) for q in range(n_tx) for n in range(n_rx)]
@@ -72,7 +65,19 @@ def genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len, cpi_len):
     return taytay, chirps, mfilt
 
 
+def applyRangeRolloff(bpj_truedata):
+    mag_data = np.sqrt(abs(bpj_truedata))
+    brightness_raw = np.median(np.sqrt(abs(bpj_truedata)), axis=1)
+    brightness_curve = np.polyval(np.polyfit(np.arange(bpj_truedata.shape[0]), brightness_raw, 4),
+                                  np.arange(bpj_truedata.shape[1]))
+    brightness_curve /= brightness_curve.max()
+    brightness_curve = 1. / brightness_curve
+    mag_data *= np.outer(np.ones(mag_data.shape[0]), brightness_curve)
+    return mag_data
+
+
 if __name__ == '__main__':
+    from SDRParsing import load
     with open('./data_generator.yaml') as y:
         settings = yaml.safe_load(y.read())
 
@@ -132,7 +137,8 @@ if __name__ == '__main__':
 
     rpref, rps, rx_array = genChannels(settings['antenna_params']['n_tx'], settings['antenna_params']['n_rx'],
                                        settings['antenna_params']['tx_pos'], settings['antenna_params']['rx_pos'],
-                                       plat_e, plat_n, plat_u, plat_r, plat_p, plat_y, rpi.gpst, rpi.dep_ang,
+                                       plat_e, plat_n, plat_u, plat_r, plat_p, plat_y, rpi.gpst, gimbal, goff, grot,
+                                       rpi.dep_ang,
                                        rpi.az_half_bw, rpi.el_half_bw, rpi.fs)
 
     # Get reference data
@@ -290,13 +296,7 @@ if __name__ == '__main__':
     del gz_gpu
 
     # Apply range roll-off compensation to final image
-    mag_data = np.sqrt(abs(bpj_truedata))
-    brightness_raw = np.median(np.sqrt(abs(bpj_truedata)), axis=1)
-    brightness_curve = np.polyval(np.polyfit(np.arange(bpj_truedata.shape[0]), brightness_raw, 4),
-                                  np.arange(bpj_truedata.shape[1]))
-    brightness_curve /= brightness_curve.max()
-    brightness_curve = 1. / brightness_curve
-    mag_data *= np.outer(np.ones(mag_data.shape[0]), brightness_curve)
+    mag_data = applyRangeRolloff(bpj_truedata)
 
     """
     ----------------------------PLOTS-------------------------------
@@ -410,9 +410,3 @@ if __name__ == '__main__':
         cutfig.show()
 
     plt.show()
-
-    '''plt.figure()
-    e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], (rawGPS['lat'][0], rawGPS['lon'][0], 0))
-    plt.subplot(1, 3, 1)
-    plt.plot(postCorr['tx_pos'][:, 1])
-    plt.plot(rp.txpos(sdr.gps_data.index.values)[:126, 1])'''
