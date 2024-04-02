@@ -1,5 +1,5 @@
 import numpy as np
-from simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
+from simulib.simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
 from scipy.spatial import Delaunay
 from scipy.interpolate import interpn
 import pickle

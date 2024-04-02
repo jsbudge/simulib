@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import medfilt
-from simulation_functions import llh2enu, findPowerOf2
+from simulib.simulation_functions import llh2enu, findPowerOf2
 
 c0 = 299792458.0
 TAC = 125e6
