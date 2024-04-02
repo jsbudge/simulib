@@ -1,7 +1,9 @@
 import cmath
 import math
 from numba import cuda, njit
-from .simulation_functions import findPowerOf2
+from numba.cuda.random import xoroshiro128p_uniform_float64
+
+from simulation_functions import findPowerOf2
 import numpy as np
 
 c0 = 299792458.0
@@ -67,6 +69,111 @@ def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     rx_pat = rxaz * rxel
     # rx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
     return tx_pat * tx_pat * rx_pat * rx_pat
+
+
+@cuda.jit()
+def genRangeProfile(gx, gy, vgz, vert_reflectivity,
+                    source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, rng_states, calc_pts,
+                    calc_angs, wavelength, near_range_s, source_fs, bw_az, bw_el, pts_per_tri, debug_flag):
+    # sourcery no-metrics
+    px, py = cuda.grid(ndim=2)
+    if px < vgz.shape[0] and py < vgz.shape[1]:
+        # Load in all the parameters that don't change
+        n_samples = pd_r.shape[0]
+        wavenumber = 2 * np.pi / wavelength
+
+        for ntri in range(pts_per_tri):
+            # I'm not sure why but vgz and vert_reflectivity need their indexes swapped here
+            if ntri != 0 and px < vgz.shape[0] - 1 and py < vgz.shape[1] - 1:
+                rand_x = xoroshiro128p_uniform_float64(rng_states, py * vgz.shape[0] + px)
+                rand_y = xoroshiro128p_uniform_float64(rng_states, py * vgz.shape[0] + px)
+                if 0 < px < vgz.shape[0]:
+                    bx = px + .5 - rand_x
+                elif px == 0:
+                    bx = .5 * rand_x
+                else:
+                    bx = px - .5 * rand_x
+                if 0 < py < vgz.shape[1]:
+                    by = py + .5 - rand_y
+                elif py == 0:
+                    by = .5 * rand_y
+                else:
+                    by = py - .5 * rand_y
+
+                # Apply barycentric interpolation to get random point height and power
+                z1 = vgz[px, py]
+                r1 = vert_reflectivity[px, py]
+                px3 = px + 1 if bx > px else px - 1
+                py3 = py
+                z3 = vgz[px3, py3]
+                r3 = vert_reflectivity[px3, py3]
+                px2 = px
+                py2 = py - 1 if by < py else py + 1
+                z2 = vgz[px2, py2]
+                r2 = vert_reflectivity[px2, py2]
+
+                det = 1. / (py2 - py3) * (px - px3) + (px3 - px2) * (py - py3)
+
+                lam1 = ((py2 - py3) * (bx - px3) + (px3 - px2) * (by - py3)) * det
+                lam2 = ((py3 - py) * (bx - px3) + (px - px3) * (by - py3)) * det
+                lam3 = 1 - lam1 - lam2
+
+                # Quick check to see if something's out of whack with the interpolation
+                # lam3 + lam1 + lam2 should always be one
+                if lam3 < 0.:
+                    continue
+                bar_x = lam1 * gx[px, py] + lam2 * gx[px2, py2] + lam3 * gx[px3, py3]
+                bar_y = lam1 * gy[px, py] + lam2 * gy[px2, py2] + lam3 * gy[px3, py3]
+                bar_z = lam1 * z1 + lam2 * z2 + lam3 * z3
+                gpr = lam1 * r1 + lam2 * r2 + lam3 * r3
+            elif ntri != 0:
+                continue
+            else:
+                bar_z = vgz[px, py]
+                gpr = vert_reflectivity[px, py]
+                bar_x = gx[px, py]
+                bar_y = gy[px, py]
+
+            for tt in range(source_xyz.shape[1]):
+
+                # Calculate out the angles in azimuth and elevation for the bounce
+                tx = bar_x - source_xyz[tt, 0]
+                ty = bar_y - source_xyz[tt, 1]
+                tz = bar_z - source_xyz[tt, 2]
+                rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+
+                rx = bar_x - receive_xyz[tt, 0]
+                ry = bar_y - receive_xyz[tt, 1]
+                rz = bar_z - receive_xyz[tt, 2]
+                r_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
+                r_el = -math.asin(rz / r_rng)
+                r_az = math.atan2(rx, ry)
+                if debug_flag and tt == 0:
+                    calc_pts[0, px, py] = rx
+                    calc_pts[1, px, py] = ry
+                    calc_pts[2, px, py] = rz
+                    calc_angs[0, px, py] = r_el
+                    calc_angs[1, px, py] = r_az
+
+                two_way_rng = rng + r_rng
+                rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+                but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+
+                # if debug_flag and tt == 0:
+                #     calc_angs[2, px, py] = gpr
+
+                if n_samples > but > 0:
+                    # a = abs(b_x * rx / r_rng + b_y * ry / r_rng + b_z * rz / r_rng)
+                    reflectivity = 1.  # math.pow((1. / -a + 1.) / 20, 10)
+                    att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt],
+                                                pantx[tt], eltx[tt], bw_az, bw_el)#  / \
+                          # (two_way_rng * two_way_rng)
+                    if debug_flag and tt == 0:
+                        calc_angs[2, px, py] = att
+                    acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gpr * reflectivity
+                    cuda.atomic.add(pd_r, (but, np.uint16(tt)), acc_val.real)
+                    cuda.atomic.add(pd_i, (but, np.uint16(tt)), acc_val.imag)
+                cuda.syncthreads()
 
 
 @cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], float64[:], '

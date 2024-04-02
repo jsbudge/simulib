@@ -1,10 +1,9 @@
 import numpy as np
+from numba.cuda.random import create_xoroshiro128p_states
+
 from simulation_functions import getElevation, llh2enu, findPowerOf2, db, enu2llh, azelToVec, genPulse
 from aps_io import loadCorrectionGPSData, loadGPSData, loadGimbalData
-from cuda_kernels import getMaxThreads, backproject
-from jax_kernels import range_profile_vectorized
-import jax.numpy as jnp
-import jax
+from cuda_kernels import getMaxThreads, backproject, genRangeProfile
 from grid_helper import SDREnvironment
 from platform_helper import SDRPlatform, APSDebugPlatform, RadarPlatform
 import cupy as cupy
@@ -138,19 +137,15 @@ taytay = np.roll(taytay, alias_shift).astype(np.complex128)
 
 # Chirps and Mfilts for each channel
 chirps = []
-mfilt_jax = []
+mfilt = []
 for rp in rps:
     endpoints = (1, 0) if rp.tx_num == 0 else (0, 1)
-    chirp = jnp.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(*endpoints, 10), nr, fs, fc,
-                                 bwidth), fft_len)
-    mfilt = chirp.conj() * taytay
-    chirps.append(jnp.tile(chirp, (settings['cpi_len'], 1)).T)
-    mfilt_jax.append(np.tile(mfilt, (settings['cpi_len'], 1)).T)
+    chirp = np.fft.fft(genPulse(np.linspace(0, 1, 10), np.linspace(*endpoints, 10), nr, fs, fc,
+                                bwidth), fft_len)
+    mf = chirp.conj() * taytay
+    chirps.append(cupy.array(np.tile(chirp, (settings['cpi_len'], 1)).T, dtype=np.complex128))
+    mfilt.append(cupy.array(np.tile(mf, (settings['cpi_len'], 1)).T, dtype=np.complex128))
 
-# Get all the JAX info ready for random point generation
-mapped_rpg = jax.vmap(range_profile_vectorized,
-                      in_axes=[None, None, None, None, 0, 0, 0, 0, 0, 0,
-                               None, None, None, None, None, None, None, None])
 bg.resampleGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
                 bg.heading if settings['rotate_grid'] else 0)
 
@@ -166,7 +161,7 @@ bg_image[bg_image.shape[0] // 2, bg_image.shape[1] // 2] = 10'''
 receive_power_scale = (settings['antenna_params']['transmit_power'][0] / .01 *
                        (10 ** (settings['antenna_params']['gain'][0] / 20)) ** 2
                        * bpj_wavelength ** 2 / (4 * np.pi) ** 3)
-noise_level = 10 ** (settings['noise_level'] / 20) / np.sqrt(2)
+noise_level = 10 ** (settings['noise_level'] / 20) / np.sqrt(2) / settings['upsample']
 
 # Calculate out points on the ground
 gx, gy, gz = bg.getGrid(settings['origin'], settings['grid_width'], settings['grid_height'], *nbpj_pts,
@@ -174,6 +169,7 @@ gx, gy, gz = bg.getGrid(settings['origin'], settings['grid_width'], settings['gr
 gx_gpu = cupy.array(gx, dtype=np.float64)
 gy_gpu = cupy.array(gy, dtype=np.float64)
 gz_gpu = cupy.array(gz, dtype=np.float64)
+refgrid_gpu = cupy.array(bg.refgrid, dtype=np.float64)
 
 if settings['debug']:
     pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
@@ -185,6 +181,8 @@ else:
 # GPU device calculations
 threads_per_block = getMaxThreads()
 bpg_bpj = (max(1, (nbpj_pts[0]) // threads_per_block[0] + 1), (nbpj_pts[1]) // threads_per_block[1] + 1)
+
+rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_bpj[0], seed=1)
 
 # Get pointing vector for MIMO consolidation
 ublock = -azelToVec(np.pi / 2, 0)
@@ -218,12 +216,17 @@ for tidx, frames in tqdm(
         posrx_gpu = cupy.array(posrx, dtype=np.float64)
         postx_gpu = cupy.array(postx, dtype=np.float64)
 
-        pdata = mapped_rpg(bg.transforms[0], bg.transforms[1], gz, bg.refgrid,
-                           postx, posrx, panrx, elrx, panrx, elrx,
-                           bpj_wavelength, near_range_s, rp.fs, rp.az_half_bw, rp.el_half_bw,
-                           ranges_sampled, settings['pts_per_tri'], receive_power_scale)
-        rtdata = cupy.array(np.array(jnp.fft.fft(pdata, fft_len, axis=1).T *
-                                     chirps[ch_idx][:, :tmp_len] * mfilt_jax[ch_idx][:, :tmp_len]), dtype=np.complex128)
+        pd_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
+        pd_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
+
+        genRangeProfile[bpg_bpj, threads_per_block](gx_gpu, gy_gpu, gz_gpu, refgrid_gpu,
+                                                    posrx_gpu, postx_gpu, panrx_gpu, elrx_gpu, panrx_gpu, elrx_gpu,
+                                                    pd_r, pd_i, rng_states, pts_debug,
+                                                    angs_debug, bpj_wavelength, near_range_s, rpref.fs,
+                                                    rpref.az_half_bw, rpref.el_half_bw, 1, settings['debug'])
+
+        pdata = pd_r + 1j * pd_i
+        rtdata = cupy.fft.fft(pdata, fft_len, axis=0) * chirps[ch_idx][:, :tmp_len] * mfilt[ch_idx][:, :tmp_len]
         upsample_data = cupy.array(np.random.normal(0, noise_level, (up_fft_len, tmp_len)) +
                                    1j * np.random.normal(0, noise_level, (up_fft_len, tmp_len)),
                                    dtype=np.complex128)
@@ -234,6 +237,8 @@ for tidx, frames in tqdm(
 
         # This is equivalent to a dot product
         beamform_data += rtdata * fine_ucavec[ch_idx]
+        del pd_r
+        del pd_i
     posrx_gpu = cupy.array(rpref.rxpos(ts), dtype=np.float64)
     postx_gpu = cupy.array(rpref.txpos(ts), dtype=np.float64)
 
@@ -266,8 +271,8 @@ del rtdata
 del beamform_data
 del upsample_data
 del bpj_grid
-# del shift
-
+del refgrid_gpu
+del rng_states
 del rbins_gpu
 del gx_gpu
 del gy_gpu
