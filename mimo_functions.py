@@ -1,5 +1,5 @@
 import numpy as np
-from platform_helper import RadarPlatform
+from simulib.platform_helper import RadarPlatform
 import cupy as cupy
 from scipy.signal.windows import taylor
 
@@ -46,8 +46,8 @@ def genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len, cpi_len):
     mfilt = []
     for rp in rps:
         mf = waves[rp.tx_num].conj() * taytay
-        chirps.append(cupy.array(np.tile(waves[rp.tx_num], (cpi_len, 1)).T, dtype=np.complex128))
-        mfilt.append(cupy.array(np.tile(mf, (cpi_len, 1)).T, dtype=np.complex128))
+        chirps.append(cupy.array(waves[rp.tx_num], dtype=np.complex128))
+        mfilt.append(cupy.array(mf, dtype=np.complex128))
     return taytay, chirps, mfilt
 
 

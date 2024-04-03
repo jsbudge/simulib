@@ -70,6 +70,16 @@ class Environment(object):
             gz = np.zeros(px.shape)
         return px, py, gz
 
+    def getRefGrid(self, pos=None, width=None, height=None, nrows=0, ncols=0, az=0):
+        x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az)
+        irmat = np.linalg.pinv(self._transforms[0])
+        px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
+        py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
+        pos_r = np.stack([px.ravel(), py.ravel()]).T
+        return interpn((np.arange(self.refgrid.shape[1]),
+                        np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
+                       fill_value=0).reshape(x.shape, order='C')
+
     def setGrid(self, newgrid, rmat, shift):
         self._refgrid = newgrid
         self._transforms = (rmat, shift)

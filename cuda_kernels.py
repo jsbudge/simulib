@@ -88,20 +88,21 @@ def applyRadiationPatternCPU(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_e
     eldiff = cpudiff(el_c, el_tx)
     azdiff = cpudiff(az_c, az_tx)
     txaz = abs(np.sin(a * azdiff) / (a * azdiff))
-    txaz = txaz if azdiff <= bw_az * 2 else 0.
+    txaz[a * azdiff == 0] = 1
     txel = abs(np.sin(b * eldiff) / (b * eldiff))
-    txel = txel if eldiff <= bw_el * 2 else 0.
+    txel[b * eldiff == 0] = 1
     tx_pat = txaz * txel
     # tx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
     eldiff = cpudiff(el_c, el_rx)
     azdiff = cpudiff(az_c, az_rx)
     rxaz = abs(np.sin(a * azdiff) / (a * azdiff))
-    rxaz = rxaz if azdiff <= bw_az * 2 else 0.
+    rxaz[a * azdiff == 0] = 1
     rxel = abs(np.sin(b * eldiff) / (b * eldiff))
-    rxel = rxel if eldiff <= bw_el * 2 else 0.
+    rxel[b * eldiff == 0] = 1
     rx_pat = rxaz * rxel
     # rx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
     return tx_pat * tx_pat * rx_pat * rx_pat
+
 
 
 @cuda.jit()
