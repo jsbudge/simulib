@@ -85,8 +85,7 @@ if __name__ == '__main__':
     rpref, rps, rx_array = genChannels(settings['antenna_params']['n_tx'], settings['antenna_params']['n_rx'],
                                        settings['antenna_params']['tx_pos'], settings['antenna_params']['rx_pos'],
                                        plat_e, plat_n, plat_u, plat_r, plat_p, plat_y, rpi.gpst, gimbal, goff, grot,
-                                       rpi.dep_ang,
-                                       rpi.az_half_bw, rpi.el_half_bw, rpi.fs)
+                                       rpi.dep_ang, rpi.az_half_bw, rpi.el_half_bw, rpi.fs)
 
     # Get reference data
     fs = sdr[settings['channel']].fs
@@ -143,8 +142,9 @@ if __name__ == '__main__':
         angs_debug = cupy.zeros((1, 1), dtype=np.float64)
 
     # GPU device calculations
-    threads_per_block = getMaxThreads()
-    bpg_bpj = (max(1, (nbpj_pts[0]) // threads_per_block[0] + 1), (nbpj_pts[1]) // threads_per_block[1] + 1)
+    threads_per_block = getMaxThreads(settings['pts_per_tri'])
+    bpg_bpj = (max(1, (nbpj_pts[0]) // threads_per_block[0] + 1), (nbpj_pts[1]) // threads_per_block[1] + 1,
+               settings['pts_per_tri'])
 
     rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_bpj[0], seed=1)
 
@@ -183,14 +183,14 @@ if __name__ == '__main__':
             pd_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
             pd_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
 
-            genRangeProfile[bpg_bpj, threads_per_block](gx_gpu, gy_gpu, gz_gpu, refgrid_gpu,
-                                                        posrx_gpu, postx_gpu, panrx_gpu, elrx_gpu, panrx_gpu, elrx_gpu,
-                                                        pd_r, pd_i, rng_states, pts_debug,
-                                                        angs_debug, bpj_wavelength, near_range_s, rpref.fs,
-                                                        rpref.az_half_bw, rpref.el_half_bw, 1, settings['debug'])
+            genRangeProfile[bpg_bpj, threads_per_block](gx_gpu, gy_gpu, gz_gpu, refgrid_gpu, postx_gpu, posrx_gpu,
+                                                        panrx_gpu, elrx_gpu, panrx_gpu, elrx_gpu, pd_r, pd_i,
+                                                        rng_states, pts_debug, angs_debug, bpj_wavelength,
+                                                        near_range_s, rpref.fs, rpref.az_half_bw, rpref.el_half_bw,
+                                                        receive_power_scale, 1, settings['debug'])
 
             pdata = pd_r + 1j * pd_i
-            rtdata = cupy.fft.fft(pdata, fft_len, axis=0) * chirps[ch_idx][:, :tmp_len] * mfilt[ch_idx][:, :tmp_len]
+            rtdata = cupy.fft.fft(pdata, fft_len, axis=0) * chirps[ch_idx][:, None] * mfilt[ch_idx][:, None]
             upsample_data = cupy.array(np.random.normal(0, noise_level, (up_fft_len, tmp_len)) +
                                        1j * np.random.normal(0, noise_level, (up_fft_len, tmp_len)),
                                        dtype=np.complex128)
@@ -201,6 +201,7 @@ if __name__ == '__main__':
 
             # This is equivalent to a dot product
             beamform_data += rtdata * fine_ucavec[ch_idx]
+            # beamform_data = rtdata
             del pd_r
             del pd_i
         posrx_gpu = cupy.array(rpref.rxpos(ts), dtype=np.float64)
@@ -219,7 +220,7 @@ if __name__ == '__main__':
         postoorig = llh2enu(*settings['origin'], bg.ref) - rpref.pos(ts)
         angtoorig = np.arctan2(-postoorig[:, 1], postoorig[:, 0]) + np.pi / 2 - panrx
         if np.any(abs(angtoorig) < .1 * DTR):
-            locp = rpref.pos(ts[-1]).T
+            locp = rpref.txpos(ts[-1]).T
             test = beamform_data.get()
             angd = angs_debug.get()
             locd = pts_debug.get()
