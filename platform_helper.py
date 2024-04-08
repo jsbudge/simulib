@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import medfilt
+
+from data_converter import SDRBase
 from simulib.simulation_functions import llh2enu, findPowerOf2
 
 c0 = 299792458.0
@@ -40,22 +42,6 @@ class Platform(object):
                  gps_az: np.ndarray = None,
                  gps_rxpos: np.ndarray = None,
                  gps_txpos: np.ndarray = None):
-        """
-        Init function.
-        :param e: array. Eastings in meters used to generate position function.
-        :param n: array. Northings in meters used to generate position function.
-        :param u: array. Altitude in meters used to generate position function.
-        :param r: array. Roll values in degrees.
-        :param p: array. Pitch values in degrees.
-        :param y: array. Yaw values in degrees.
-        :param t: array. GPS times, in seconds, that correspond to the above position/attitude arrays.
-        :param gimbal: N x 2 array. Pan and Tilt values from the gimbal.
-        :param gimbal_offset: 3-tuple. Gimbal offset from body in meters, XYZ.
-        :param gimbal_rotations: 3-tuple. Initial gimbal rotation from the inertial frame in degrees.
-        :param tx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Tx antenna.
-        :param rx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Rx antenna.
-        :param gps_data: DataFrame. This is a dataframe of GPS data, taken from the GPS debug data in APS. Optional.
-        """
         self._gpst = t
         self._txant = tx_offset
         self._rxant = rx_offset
@@ -63,13 +49,13 @@ class Platform(object):
         self._gimbal_offset = gimbal_offset
         self._gimbal_offset_mat = None
         self.gimbal_rotations = gimbal_rotations
-        use_gps = False if gps_t is None else True
+        use_gps = gps_t is not None
         gps_t = gps_t if use_gps else t
 
         # attitude spline
         rr = CubicSpline(t, r)
         pp = CubicSpline(t, p)
-        yy = CubicSpline(t, y) if not use_gps else CubicSpline(gps_t, gps_az + 2 * np.pi)
+        yy = CubicSpline(gps_t, gps_az + 2 * np.pi) if use_gps else CubicSpline(t, y)
         self._att = lambda lam_t: np.array([rr(lam_t), pp(lam_t), yy(lam_t)]).T
 
         # Take into account the gimbal if necessary
@@ -204,14 +190,68 @@ class Platform(object):
 
 
 """
-RadarPlatform
-Inherits from base Platform class. This is more specialized for radar, and includes some radar parameters such as
-beamwidths, sampling frequencies, and angles. Intended for use in simulation work, where there isn't a SAR file to
-provide these things.
+    A class representing a Radar Platform that inherits from Platform.
+
+    Args:
+        e: np.ndarray. East coordinate.
+        n: np.ndarray. North coordinate.
+        u: np.ndarray. Up coordinate.
+        r: np.ndarray. Right coordinate.
+        p: np.ndarray. Pitch angle.
+        y: np.ndarray. Yaw angle.
+        t: np.ndarray. Time.
+        tx_offset: np.ndarray. Transmitter offset.
+        rx_offset: np.ndarray. Receiver offset.
+        gimbal: np.ndarray. (Nx2) Gimbal array of pan/tilt values.
+        gimbal_offset: np.ndarray. Gimbal offset.
+        gimbal_rotations: np.ndarray. Gimbal rotations.
+        dep_angle: float. Depression angle (default: 45.).
+        squint_angle: float. Squint angle (default: 0.).
+        az_bw: float. Azimuth beamwidth (default: 10.).
+        el_bw: float. Elevation beamwidth (default: 10.).
+        fs: float. Sampling frequency.
+        gps_t: np.ndarray. GPS time.
+        gps_az: np.ndarray. GPS azimuth.
+        gps_rxpos: np.ndarray. GPS receiver position.
+        gps_txpos: np.ndarray. GPS transmitter position.
+        tx_num: int. Transmitter number (default: 0).
+        rx_num: int. Receiver number (default: 0).
+        wavenumber: int. Wavenumber (default: 0).
+
+    Attributes:
+        dep_ang: float. Depression angle in radians.
+        squint_ang: float. Squint angle in radians.
+        az_half_bw: float. Half of azimuth beamwidth in radians.
+        el_half_bw: float. Half of elevation beamwidth in radians.
+        fs: float. Frequency.
+        near_range_angle: float. Near range angle in degrees.
+        far_range_angle: float. Far range angle in degrees.
+        rx_num: int. Receiver number.
+        tx_num: int. Transmitter number.
+        wavenumber: int. Wavenumber.
+        pulse: ndarray. Array set aside for a pulse.
+        mfilt: ndarray. Array set aside for a matched filter.
+        fc: float. Center frequency in Hz.
+        bwidth: float. Bandwidth of pulse in Hz.
+
+    Methods:
+        calcRanges: Calculates near and far slant ranges.
+        calcPulseLength: Calculates pulse length.
+        calcNumSamples: Calculates number of samples in a pulse.
+        calcRangeBins: Calculates range bins for a given pulse.
+        getRadarParams: Gets relevant radar parameters.
+
+    Examples:
+        radar = RadarPlatform()
+        radar.calcRanges(100)
 """
 
 
 class RadarPlatform(Platform):
+    pulse: np.ndarray
+    mfilt: np.ndarray
+    fc: float
+    bwidth: float
 
     def __init__(self,
                  e: np.ndarray = None,
@@ -238,27 +278,37 @@ class RadarPlatform(Platform):
                  tx_num: int = 0,
                  rx_num: int = 0,
                  wavenumber: int = 0):
+
         """
-        Init function.
-        :param e: array. Eastings in meters used to generate position function.
-        :param n: array. Northings in meters used to generate position function.
-        :param u: array. Altitude in meters used to generate position function.
-        :param r: array. Roll values in degrees.
-        :param p: array. Pitch values in degrees.
-        :param y: array. Yaw values in degrees.
-        :param t: array. GPS times, in seconds, that correspond to the above position/attitude arrays.
-        :param tx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Tx antenna.
-        :param rx_offset: 3-tuple. Offset from the gimbal in XYZ, meters, for the Rx antenna.
-        :param gimbal: N x 2 array. Pan and Tilt values from the gimbal.
-        :param gimbal_offset: 3-tuple. Gimbal offset from body in meters, XYZ.
-        :param gimbal_rotations: 3-tuple. Initial gimbal rotation from the inertial frame in degrees.
-        :param dep_angle: float. Depression angle of antenna in degrees.
-        :param squint_angle: float. Squint angle of antenna in degrees.
-        :param az_bw: float. Beamwidth of antenna in azimuth, in degrees.
-        :param el_bw: float. Beamwidth of antenna in elevation, in degrees.
-        :param fs: float. Sampling frequency in Hz.
-        :param gps_data: DataFrame. This is a dataframe of GPS data, taken from the GPS debug data in APS. Optional.
+        Initializes a Radar Platform object with provided parameters.
+
+        Args:
+            e: np.ndarray. East coordinate.
+            n: np.ndarray. North coordinate.
+            u: np.ndarray. Up coordinate.
+            r: np.ndarray. Right coordinate.
+            p: np.ndarray. Pitch angle.
+            y: np.ndarray. Yaw angle.
+            t: np.ndarray. Time.
+            tx_offset: np.ndarray. Transmitter offset.
+            rx_offset: np.ndarray. Receiver offset.
+            gimbal: np.ndarray. Gimbal.
+            gimbal_offset: np.ndarray. Gimbal offset.
+            gimbal_rotations: np.ndarray. Gimbal rotations.
+            dep_angle: float. Depression angle (default: 45.).
+            squint_angle: float. Squint angle (default: 0.).
+            az_bw: float. Azimuth beamwidth (default: 10.).
+            el_bw: float. Elevation beamwidth (default: 10.).
+            fs: float. Frequency.
+            gps_t: np.ndarray. GPS time.
+            gps_az: np.ndarray. GPS azimuth.
+            gps_rxpos: np.ndarray. GPS receiver position.
+            gps_txpos: np.ndarray. GPS transmitter position.
+            tx_num: int. Transmitter number (default: 0).
+            rx_num: int. Receiver number (default: 0).
+            wavenumber: int. Wavenumber (default: 0).
         """
+
         super().__init__(e, n, u, r, p, y, t, gimbal, np.array(gimbal_offset), np.array(gimbal_rotations),
                          tx_offset, rx_offset, gps_t, gps_az, gps_rxpos, gps_txpos)
         self.dep_ang = dep_angle * DTR
@@ -271,10 +321,6 @@ class RadarPlatform(Platform):
         self.rx_num = rx_num
         self.tx_num = tx_num
         self.wavenumber = wavenumber
-        self.pulse = None
-        self.mfilt = None
-        self.fc = None
-        self.bwidth = None
 
     def calcRanges(self, height, exp_factor=1):
         """
@@ -378,7 +424,7 @@ class APSDebugPlatform(RadarPlatform):
     _sdr: object
 
     def __init__(self,
-                 sdr: object,
+                 sdr: SDRBase,
                  origin: np.ndarray = None,
                  tx_offset: np.ndarray = None,
                  rx_offset: np.ndarray = None,
@@ -451,7 +497,7 @@ class APSDebugPlatform(RadarPlatform):
                          el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_t=gps_data['gps_ms'],
                          tx_num=tx_num, rx_num=rx_num, gps_az=gps_data['az'], gps_rxpos=gps_data['rxpos'],
                          gps_txpos=gps_data['txpos'])
-        self._sdr = sdr
+        self._sdr: SDRBase = sdr
         self.origin = origin
         self._channel = channel
 
@@ -529,7 +575,7 @@ class APSDebugPlatform(RadarPlatform):
 class SDRPlatform(RadarPlatform):
     _sdr = None
 
-    def __init__(self, sdr: object,
+    def __init__(self, sdr: SDRBase,
                  origin: np.ndarray = None,
                  tx_offset: np.ndarray = None,
                  rx_offset: np.ndarray = None,
