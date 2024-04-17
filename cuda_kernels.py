@@ -209,11 +209,11 @@ def genRangeProfile(gx, gy, vgz, vert_reflectivity,
             cuda.syncthreads()
 
 
-@cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], float64[:], '
+@cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
           'float64[:], float64[:], float64[:], complex128[:, :], complex128[:, :], float64, float64, float64, float64, '
-          'float64, float64, int32, float64[:, :, :], float64[:, :, :], int32)')
-def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, eltx, pulse_data, final_grid,
-                wavelength, near_range_s, source_fs, signal_bw, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
+          'float64, int32, float64[:, :, :], float64[:, :, :], int32)')
+def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, pulse_data, final_grid,
+                wavelength, near_range_s, source_fs, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
     """
     Backprojection kernel.
     :param source_xyz: array. XYZ values of the source, usually Tx antenna, in meters.
@@ -283,8 +283,9 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             # Get index into range compressed data
             two_way_rng = tx_rng + rx_rng
             rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
-            but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
-            if but > n_samples:
+            bi0 = int(rng_bin)
+            bi1 = bi0 + 1
+            if bi1 > n_samples:
                 continue
 
             # Attenuation of beam in elevation and azimuth
@@ -298,20 +299,15 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
             az_win = raisedCosine(az_diffrx, bw_az, .5)
             # az_win = 1.
 
-            if rbins[but - 1] < tx_rng < rbins[but]:
-                bi0 = but - 1
-                bi1 = but
-            else:
-                bi0 = but
-                bi1 = but + 1
-
             if poly == 0:
                 # This is how APS does it (for reference, I guess)
                 a = cp[bi1]
             elif poly == 1:
                 # Linear interpolation between bins (slower but more accurate)
-                a = (cp[bi0] * (rbins[bi1] - tx_rng) + cp[bi1] * (tx_rng - rbins[bi0])) \
-                    / (rbins[bi1] - rbins[bi0])
+                bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
+                bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
+                a = (cp[bi0] * (bi1_rng - tx_rng) + cp[bi1] * (tx_rng - bi0_rng)) \
+                    / (bi1_rng - bi0_rng)
             else:
                 # This is a lagrange polynomial interpolation of the specified order
                 ar = ai = 0
@@ -319,10 +315,12 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, rbins, panrx, elrx, pantx, 
                 ks = max(bi0 - kspan, 0)
                 ke = bi0 + kspan + 1 if bi0 + kspan < n_samples else n_samples
                 for jdx in range(ks, ke):
+                    jrng = c0 / 2 * (jdx / source_fs + 2 * near_range_s)
                     mm = 1
                     for kdx in range(ks, ke):
+                        krng = c0 / 2 * (kdx / source_fs + 2 * near_range_s)
                         if jdx != kdx:
-                            mm *= (tx_rng - rbins[kdx]) / (rbins[jdx] - rbins[kdx])
+                            mm *= (tx_rng - krng) / (jrng - krng)
                     ar += mm * cp[jdx].real
                     ai += mm * cp[jdx].imag
                 a = ar + 1j * ai

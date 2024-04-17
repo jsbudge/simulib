@@ -99,12 +99,34 @@ class Environment(object):
         with open(fnme, 'wb') as f:
             pickle.dump(self, f)
 
-    def getPos(self, px, py):
-        return self._transforms[0].dot(np.array([px - self.shape[0] / 2, py - self.shape[1] / 2])) + self._transforms[1]
+    def getPos(self, px: float, py: float, elevation: bool = False) -> np.ndarray:
+        """
+        Calculate the grid position based on the given pixel coordinates.
 
-    def getIndex(self, x, y):
+        Args:
+            px (int): The x-coordinate of the pixel element.
+            py (int): The y-coordinate of the pixel element.
+            elevation (bool, optional): Flag to include elevation data. Defaults to False.
+
+        Returns:
+            np.array: An array containing the calculated position coordinates.
+            If elevation is True, the array also includes the elevation relative to a reference point.
+        """
+        gx = px - self.shape[1] / 2
+        gy = py - self.shape[0] / 2
+        pos_x = self._transforms[0][0, 0] * gx + self._transforms[0][0, 1] * gy + self._transforms[0][0, 2]
+        pos_y = self._transforms[0][1, 0] * gx + self._transforms[0][1, 1] * gy + self._transforms[0][1, 2]
+        if elevation:
+            lat, lon, _ = enu2llh(pos_x, pos_y, 0, self.ref)
+            return np.array([pos_x, pos_y, getElevation(lat, lon) - self.ref[2]])
+        else:
+            return np.array([pos_x, pos_y])
+
+    def getIndex(self, x: float, y: float) -> np.ndarray:
         irmat = np.linalg.pinv(self._transforms[0])
-        return irmat.dot(np.array([x, y, 1])) + np.array([self.shape[0] / 2, self.shape[1] / 2])
+        px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
+        py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
+        return np.array([px, py])
 
     def interp(self, x, y):
         return interpn((np.arange(self.refgrid.shape[0]),
