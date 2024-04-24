@@ -179,6 +179,7 @@ def genSimPulseData(a_rp: RadarPlatform,
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, p_fft_len, _ = (
         a_rp.getRadarParams(a_fdelay, a_plp, a_upsample))
     fft_len = p_fft_len if a_fft_len is None else a_fft_len
+    up_fft_len = fft_len * a_upsample
 
     # Chirp and matched filter calculations
     bpj_wavelength = a_sdr.getBackprojectWavelength(a_channel) if a_sdr else a_bpj_wavelength
