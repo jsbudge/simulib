@@ -1,16 +1,16 @@
 import numpy as np
 from numba.cuda.random import create_xoroshiro128p_states
 
-from simulation_functions import llh2enu, db, genPulse
-from cuda_kernels import getMaxThreads, backproject, genRangeProfile
-from grid_helper import SDREnvironment
-from platform_helper import SDRPlatform, RadarPlatform
+from simulib.simulation_functions import llh2enu, db, genPulse
+from simulib.cuda_kernels import getMaxThreads, backproject, genRangeProfile
+from simulib.grid_helper import SDREnvironment
+from simulib.platform_helper import SDRPlatform, RadarPlatform
 import cupy as cupy
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.io as pio
 from tqdm import tqdm
-from SDRParsing import load, SDRParse
+from data_converter.SDRParsing import load, SDRParse
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
