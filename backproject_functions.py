@@ -171,12 +171,14 @@ def genSimPulseData(a_rp: RadarPlatform,
                     a_ant_gain: float = 20.,
                     a_rotate_grid: bool = False,
                     a_debug: bool = False,
+                    a_fft_len: int = None,
                     a_noise_level: float = 0.,
                     a_origin: tuple[float, float, float] = None) -> (
         tuple)[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     nbpj_pts = (int(a_grid_width * pixels_per_m), int(a_grid_height * pixels_per_m))
-    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
+    nsam, nr, ranges, ranges_sampled, near_range_s, granges, p_fft_len, _ = (
         a_rp.getRadarParams(a_fdelay, a_plp, a_upsample))
+    fft_len = p_fft_len if a_fft_len is None else a_fft_len
 
     # Chirp and matched filter calculations
     bpj_wavelength = a_sdr.getBackprojectWavelength(a_channel) if a_sdr else a_bpj_wavelength
@@ -203,7 +205,7 @@ def genSimPulseData(a_rp: RadarPlatform,
     receive_power_scale = (a_transmit_power / .01 *
                            (10 ** (a_ant_gain / 20)) ** 2
                            * bpj_wavelength ** 2 / (4 * np.pi) ** 3)
-    noise_level = 0  #10 ** (a_noise_level / 20) / np.sqrt(2) / a_upsample
+    noise_level = 10 ** (a_noise_level / 20) / np.sqrt(2) / a_upsample
     chirp_gpu = cupy.array(a_chirp, dtype=np.complex128)
     rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_bpj[0], seed=1)
 
