@@ -257,7 +257,7 @@ DTR = np.pi / 180
 inch_to_m = .0254
 
 if __name__ == '__main__':
-    do_sim = True
+    do_sim = False
     # This is the file used to backproject data
     # bg_file = '/data5/SAR_DATA/2021/05052021/SAR_05052021_112647.sar'
     # bg_file = '/data5/SAR_DATA/2022/09082022/SAR_09082022_131237.sar'
@@ -266,10 +266,10 @@ if __name__ == '__main__':
     # bg_file = '/data6/Tower_Redo_Again/tower_redo_SAR_03292023_120731.sar'
     # bg_file = '/data5/SAR_DATA/2022/09272022/SAR_09272022_103053.sar'
     # bg_file = '/data5/SAR_DATA/2019/08072019/SAR_08072019_100120.sar'
-    bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_122801.sar'
+    bg_file = '/data6/SAR_DATA/2024/04112024/SAR_04112024_100348.sar'
     # bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_122801.sar'
     # bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_123050.sar'
-    upsample = 1
+    upsample = 4
     poly_num = 1
     rotate_grid = True
     use_ecef = True
@@ -278,12 +278,12 @@ if __name__ == '__main__':
     plp = 0
     partial_pulse_percent = .2
     debug = True
-    pts_per_m = 4
-    grid_width = 200
-    grid_height = 200
+    pts_per_m = 20
+    grid_width = 20
+    grid_height = 20
     channel = 0
-    fdelay = 5.8
-    origin = (40.138018, -111.660087, 1382)
+    fdelay = 2.0
+    origin = (30.5624864261, -86.4363868067, 18.03066)
 
     print('Loading SDR file...')
     sdr = load(bg_file, progress_tracker=True, use_jump_correction=False)

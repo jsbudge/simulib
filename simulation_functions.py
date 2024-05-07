@@ -309,6 +309,29 @@ def factors(n):
                            ([i, n // i] for i in range(1, int(pow(n, 0.5) + 1)) if n % i == 0))))
 
 
+def genTaylorWindow(baseband_fc: float, half_bw: float, fs: float, fft_len: int, nbar: int = 5,
+                    sll: float = -35) -> np.array:
+    # Get the basebanded center, start and stop frequency of the chirp
+    basebandedStartFreqHz = baseband_fc - half_bw
+    basebandedStopFreqHz = baseband_fc + half_bw
+    windowSize = \
+        int(np.floor(half_bw * 2.0 / fs * fft_len))
+    taylorWindow = window_taylor(windowSize, nbar=nbar, sll=sll) if sll != 0 else np.ones(windowSize)
+
+    # IQ baseband vs offset video
+    if np.sign(basebandedStartFreqHz) != np.sign(basebandedStopFreqHz):
+        aboveZeroLength = int(np.ceil((baseband_fc + half_bw) / fs * fft_len))
+        taylorWindowExtended = np.zeros(fft_len)
+        taylorWindowExtended[fft_len // 2 - aboveZeroLength: fft_len // 2 - aboveZeroLength + windowSize] = taylorWindow
+        taylorWindowExtended = np.fft.fftshift(taylorWindowExtended)
+    else:
+        bandStartInd = \
+            int(np.floor((baseband_fc - half_bw) / fs * fft_len))
+        taylorWindowExtended = np.zeros(fft_len)
+        taylorWindowExtended[bandStartInd: bandStartInd + windowSize] = taylorWindow
+    return taylorWindowExtended
+
+
 def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20, fft_len=None):
     # Things the PS will need to know from the configuration
     numSamples = chan.nsam
