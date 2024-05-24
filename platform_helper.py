@@ -42,7 +42,9 @@ class Platform(object):
                  gps_t: np.ndarray = None,
                  gps_az: np.ndarray = None,
                  gps_rxpos: np.ndarray = None,
-                 gps_txpos: np.ndarray = None):
+                 gps_txpos: np.ndarray = None,
+                 *args,
+                 **kwargs):
         self._gpst = t
         self._txant = tx_offset
         self._rxant = rx_offset
@@ -254,7 +256,9 @@ class RadarPlatform(Platform):
                  gps_txpos: np.ndarray = None,
                  tx_num: int = 0,
                  rx_num: int = 0,
-                 wavenumber: int = 0):
+                 wavenumber: int = 0,
+                 *args,
+                 **kwargs):
 
         """
         Initializes a Radar Platform object with provided parameters.

@@ -20,5 +20,5 @@ for _ash, _asi in tqdm(pairs.items()):
         max_val = max(max_val, asi.max())
         if min_north < ash['geo']['north'] < max_north or min_north < ash['geo']['south'] < max_north:
             if min_east < ash['geo']['east'] < max_east or min_east < ash['geo']['west'] < max_east:
-                pass
+                print(_asi)
 
