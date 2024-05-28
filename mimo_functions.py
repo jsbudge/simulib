@@ -104,7 +104,7 @@ def genSimPulseData(a_rp: RadarPlatform,
     gz_gpu = cupy.array(gz, dtype=np.float64)
     refgrid_gpu = cupy.array(rg, dtype=np.float64)
 
-    n_tx = len(np.unique([rp.tx_num for rp in a_rps]))
+    n_rx = len(np.unique([rp.rx_num for rp in a_rps]))
 
     if a_debug:
         pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
@@ -128,7 +128,7 @@ def genSimPulseData(a_rp: RadarPlatform,
     frame_idx = np.arange(len(dt))
     for ts, frames in getPulseTimeGen(dt, frame_idx, a_cpi_len, True):
         tmp_len = len(ts)
-        ret_data = np.zeros((n_tx, tmp_len, up_fft_len), dtype=np.complex128)
+        ret_data = np.zeros((n_rx, tmp_len, up_fft_len), dtype=np.complex128)
         for ch_idx, curr_rp in enumerate(a_rps):
             panrx_gpu = cupy.array(curr_rp.pan(ts), dtype=np.float64)
             elrx_gpu = cupy.array(curr_rp.tilt(ts), dtype=np.float64)
@@ -151,7 +151,7 @@ def genSimPulseData(a_rp: RadarPlatform,
             upsample_data[:fft_len // 2, :] += rtdata[:fft_len // 2, :]
             upsample_data[-fft_len // 2:, :] += rtdata[-fft_len // 2:, :]
             cupy.cuda.Device().synchronize()
-            ret_data[curr_rp.tx_num, ...] += upsample_data.get().T
+            ret_data[curr_rp.rx_num, ...] += upsample_data.get().T
         # Yielding the chirp here so it can be changed with the send method down the line
         yield a_chirp, ret_data
 
