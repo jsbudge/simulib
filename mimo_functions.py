@@ -72,7 +72,6 @@ def applyRangeRolloff(bpj_truedata):
 
 def genSimPulseData(a_rp: RadarPlatform,
                     a_rps: list[RadarPlatform],
-                    a_vxarray: np.array,
                     a_bg: SDREnvironment,
                     a_fdelay: float = 0.,
                     a_plp: float = .5,
@@ -84,8 +83,8 @@ def genSimPulseData(a_rp: RadarPlatform,
                     a_chirp: np.array = None,
                     a_bpj_wavelength: float = 1.,
                     a_pulse_times: np.array = None,
-                    a_transmit_power: float = 100.,
-                    a_ant_gain: float = 20.,
+                    a_transmit_power: list | float = 100.,
+                    a_ant_gain: list | float = 20.,
                     a_rotate_grid: bool = False,
                     a_debug: bool = False,
                     a_fft_len: int = None,
@@ -97,10 +96,6 @@ def genSimPulseData(a_rp: RadarPlatform,
     fft_len = p_fft_len if a_fft_len is None else a_fft_len
     up_fft_len = fft_len * a_upsample
 
-    # Chirp and matched filter calculations
-    ublock = -azelToVec(np.pi / 2, 0)
-    fine_ucavec = np.exp(1j * 2 * np.pi / a_bpj_wavelength * a_vxarray.dot(ublock))
-
     # Calculate out points on the ground
     gx, gy, gz = a_bg.getGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
     rg = a_bg.getRefGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
@@ -108,6 +103,8 @@ def genSimPulseData(a_rp: RadarPlatform,
     gy_gpu = cupy.array(gy, dtype=np.float64)
     gz_gpu = cupy.array(gz, dtype=np.float64)
     refgrid_gpu = cupy.array(rg, dtype=np.float64)
+
+    n_tx = len(np.unique([rp.tx_num for rp in a_rps]))
 
     if a_debug:
         pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
@@ -131,7 +128,7 @@ def genSimPulseData(a_rp: RadarPlatform,
     frame_idx = np.arange(len(dt))
     for ts, frames in getPulseTimeGen(dt, frame_idx, a_cpi_len, True):
         tmp_len = len(ts)
-        ret_data = np.zeros((up_fft_len, tmp_len), dtype=np.complex128)
+        ret_data = np.zeros((n_tx, tmp_len, up_fft_len), dtype=np.complex128)
         for ch_idx, curr_rp in enumerate(a_rps):
             panrx_gpu = cupy.array(curr_rp.pan(ts), dtype=np.float64)
             elrx_gpu = cupy.array(curr_rp.tilt(ts), dtype=np.float64)
@@ -154,9 +151,9 @@ def genSimPulseData(a_rp: RadarPlatform,
             upsample_data[:fft_len // 2, :] += rtdata[:fft_len // 2, :]
             upsample_data[-fft_len // 2:, :] += rtdata[-fft_len // 2:, :]
             cupy.cuda.Device().synchronize()
-            ret_data += upsample_data.get() * fine_ucavec[ch_idx]
+            ret_data[curr_rp.tx_num, ...] += upsample_data.get().T
         # Yielding the chirp here so it can be changed with the send method down the line
-        yield a_chirp, ret_data.T
+        yield a_chirp, ret_data
 
     del panrx_gpu
     del postx_gpu
@@ -205,6 +202,10 @@ if __name__ == '__main__':
                                      gimbal_offset, gimbal_rotation, 30, 5 * DTR, 5 * DTR, fs, RadarPlatform)
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, p_fft_len, _ = (
         rpi.getRadarParams(u.mean(), .5, 1))
+
+    ublock = -azelToVec(np.pi / 2, 0)
+    fine_ucavec = np.exp(1j * 2 * np.pi / (c0 / fc) * vx_array.dot(ublock))
+
     waves = np.array([genPulse(np.linspace(0, 1, 10),
                                np.linspace(0, 1, 10), nr, fs, fc, bwidth),
                       genPulse(np.linspace(0, 1, 10),
@@ -216,14 +217,16 @@ if __name__ == '__main__':
 
     collect_times = np.linspace(0, 5, 1288 * 5)
 
-    data_gen = genSimPulseData(rpi, rps, vx_array, bg, a_fdelay=u.mean(), a_grid_width=200, a_grid_height=200,
+    data_gen = genSimPulseData(rpi, rps, bg, u.mean(), a_grid_width=200, a_grid_height=200,
                                a_pulse_times=collect_times, a_chirp=chirp, a_cpi_len=128,
                                a_bpj_wavelength=c0 / fc, a_origin=origin, a_noise_level=-300, a_debug=True)
 
     plt.ion()
     for idx, (chirp, pdata) in enumerate(data_gen):
         try:
-            compressed_data = np.fft.fft(np.fft.ifft(pdata * mfilt[0].get(), axis=1)[:, :nsam], axis=0)
+            compressed_data = np.sum([np.fft.ifft(pdata[rp.tx_num] * mfilt[ch_idx].get(), axis=1)[:, :nsam] *
+                                      fine_ucavec[ch_idx] for ch_idx, rp in enumerate(rps)], axis=0)
+            compressed_data = np.fft.fft(compressed_data, axis=0)
             plt.gca().cla()
             plt.imshow(db(compressed_data))
             plt.axis('tight')
