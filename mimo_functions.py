@@ -90,8 +90,7 @@ def genSimPulseData(a_rp: RadarPlatform,
                     a_debug: bool = False,
                     a_fft_len: int = None,
                     a_noise_level: float = -300.,
-                    a_origin: tuple[float, float, float] = None) -> (
-        tuple)[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+                    a_origin: tuple[float, float, float] = None):
     nbpj_pts = (int(a_grid_width * pixels_per_m), int(a_grid_height * pixels_per_m))
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, p_fft_len, _ = (
         a_rp.getRadarParams(a_fdelay, a_plp, a_upsample))
@@ -156,7 +155,8 @@ def genSimPulseData(a_rp: RadarPlatform,
             upsample_data[-fft_len // 2:, :] += rtdata[-fft_len // 2:, :]
             cupy.cuda.Device().synchronize()
             ret_data += upsample_data.get() * fine_ucavec[ch_idx]
-        yield ret_data.T
+        # Yielding the chirp here so it can be changed with the send method down the line
+        yield a_chirp, ret_data.T
 
     del panrx_gpu
     del postx_gpu
@@ -210,6 +210,7 @@ if __name__ == '__main__':
                       genPulse(np.linspace(0, 1, 10),
                                np.linspace(1, 0, 10), nr, fs, fc, bwidth)])
     waves = np.fft.fft(waves, p_fft_len, axis=1)
+    second_waves = np.fft.fft(np.random.random(waves.shape) + 1j * np.random.random(waves.shape), axis=1)
 
     win, chirp, mfilt = genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, p_fft_len)
 
@@ -220,7 +221,7 @@ if __name__ == '__main__':
                                a_bpj_wavelength=c0 / fc, a_origin=origin, a_noise_level=-300, a_debug=True)
 
     plt.ion()
-    for idx, pdata in enumerate(data_gen):
+    for idx, (chirp, pdata) in enumerate(data_gen):
         try:
             compressed_data = np.fft.fft(np.fft.ifft(pdata * mfilt[0].get(), axis=1)[:, :nsam], axis=0)
             plt.gca().cla()
@@ -229,5 +230,8 @@ if __name__ == '__main__':
             plt.title(f'CPI {idx}')
             plt.draw()
             plt.pause(0.1)
+            if idx == 17:
+                # win, sec_chirp, mfilt = genChirpAndMatchedFilters(second_waves, rps, bwidth, fs, fc, p_fft_len)
+                data_gen.send((chirp, pdata))
         except KeyboardInterrupt:
             break
