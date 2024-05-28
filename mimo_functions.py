@@ -25,13 +25,16 @@ def genChannels(n_tx, n_rx, tx_pos, rx_pos, plat_e, plat_n, plat_u, plat_r, plat
         rxpos = np.array(rx_pos[rx])
         vx_pos = rxpos + txpos
         rps.append(
-            platform(plat_e, plat_n, plat_u, plat_r, plat_p, plat_y, gpst, txpos, rxpos, gimbal, goff,
-                     grot, dep_ang, 0., az_half_bw * 2 / DTR, el_half_bw * 2 / DTR,
-                     fs, tx_num=tx, rx_num=rx, **platform_kwargs))
+            platform(e=plat_e, n=plat_n, u=plat_u, r=plat_r, p=plat_p, y=plat_y, t=gpst, tx_offset=txpos,
+                     rx_offset=rxpos, gimbal=gimbal, gimbal_offset=goff, gimbal_rotations=grot, dep_angle=dep_ang,
+                     squint_angle=0., az_bw=az_half_bw * 2 / DTR, el_bw=el_half_bw * 2 / DTR,
+                     fs=fs, tx_num=tx, rx_num=rx, **platform_kwargs))
         rx_array.append(vx_pos)
-    rpref = platform(plat_e, plat_n, plat_u, plat_r, plat_p, plat_y, gpst, np.array([0., 0., 0.]),
-                     np.array([0., 0., 0.]), gimbal, goff, grot, dep_ang, 0.,
-                     az_half_bw * 2 / DTR, el_half_bw * 2 / DTR, fs, **platform_kwargs)
+    rpref = platform(e=plat_e, n=plat_n, u=plat_u, r=plat_r, p=plat_p, y=plat_y, t=gpst,
+                     tx_offset=np.array([0., 0., 0.]), rx_offset=np.array([0., 0., 0.]), gimbal=gimbal,
+                     gimbal_offset=goff, gimbal_rotations=grot, dep_angle=dep_ang,
+                     squint_angle=0., az_bw=az_half_bw * 2 / DTR, el_bw=el_half_bw * 2 / DTR,
+                     fs=fs, **platform_kwargs)
     return rpref, rps, np.array(rx_array)
 
 
