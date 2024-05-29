@@ -211,9 +211,9 @@ def genRangeProfile(gx, gy, vgz, vert_reflectivity,
 
 @cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
           'float64[:], float64[:], float64[:], complex128[:, :], complex128[:, :], float64, float64, float64, float64, '
-          'float64, int32, float64[:, :, :], float64[:, :, :], int32)')
+          'float64, int32)')
 def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, pulse_data, final_grid,
-                wavelength, near_range_s, source_fs, bw_az, bw_el, poly, calc_pts, calc_angs, debug_flag):
+                wavelength, near_range_s, source_fs, bw_az, bw_el, poly):
     """
     Backprojection kernel.
     :param source_xyz: array. XYZ values of the source, usually Tx antenna, in meters.
@@ -266,13 +266,6 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
             rx_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
             r_el = -math.asin(rz / rx_rng)
             r_az = math.atan2(-ry, rx) + np.pi / 2
-            if debug_flag and tt == 0:
-                calc_pts[0, pcol, prow] = rx
-                calc_pts[1, pcol, prow] = ry
-                calc_pts[2, pcol, prow] = rz
-                calc_angs[0, pcol, prow] = r_el
-                calc_angs[1, pcol, prow] = r_az
-                calc_angs[2, pcol, prow] = rx_rng
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
