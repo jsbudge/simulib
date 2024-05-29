@@ -38,7 +38,7 @@ def genChannels(n_tx, n_rx, tx_pos, rx_pos, plat_e, plat_n, plat_u, plat_r, plat
     return rpref, rps, np.array(rx_array)
 
 
-def genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len):
+def genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len, use_window=True):
     # Get Taylor window of appropriate length and shift it to the aliased frequency of fc
     taywin = int(bwidth / fs * fft_len)
     taywin = taywin + 1 if taywin % 2 != 0 else taywin
@@ -53,7 +53,7 @@ def genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, fft_len):
     chirps = []
     mfilt = []
     for rp in rps:
-        mf = waves[rp.tx_num].conj() * taytay
+        mf = waves[rp.tx_num].conj() * taytay if use_window else waves[rp.tx_num].conj()
         chirps.append(cupy.array(waves[rp.tx_num], dtype=np.complex128))
         mfilt.append(cupy.array(mf, dtype=np.complex128))
     return taytay, chirps, mfilt
