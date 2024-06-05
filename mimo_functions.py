@@ -134,7 +134,6 @@ def genSimPulseData(a_rp: RadarPlatform,
         tmp_len = len(ts)
         ret_data = (np.random.normal(0, noise_level, (n_rx, tmp_len, fft_len)) +
                     1j * np.random.normal(0, noise_level, (n_rx, tmp_len, fft_len)))
-        # If we're updating the chirp, yield this to the send function
         for ch_idx, curr_rp in enumerate(a_rps):
             panrx_gpu = cupy.array(curr_rp.pan(ts), dtype=np.float64)
             elrx_gpu = cupy.array(curr_rp.tilt(ts), dtype=np.float64)
@@ -160,6 +159,9 @@ def genSimPulseData(a_rp: RadarPlatform,
         else:
             yield ret_data
 
+        # If we're updating the chirp, yield this to the send function
+        if a_update_chirp:
+            yield a_chirp
 
     del panrx_gpu
     del postx_gpu
