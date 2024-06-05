@@ -89,12 +89,12 @@ def genSimPulseData(a_rp: RadarPlatform,
                     a_debug: bool = False,
                     a_fft_len: int = None,
                     a_noise_level: float = -300.,
-                    a_origin: tuple[float, float, float] = None):
+                    a_origin: tuple[float, float, float] = None,
+                    a_update_chirp: bool = True):
     nbpj_pts = (int(a_grid_width * pixels_per_m), int(a_grid_height * pixels_per_m))
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, p_fft_len, _ = (
         a_rp.getRadarParams(a_fdelay, a_plp, a_upsample))
     fft_len = p_fft_len if a_fft_len is None else a_fft_len
-    up_fft_len = fft_len * a_upsample
 
     # Calculate out points on the ground
     gx, gy, gz = a_bg.getGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
@@ -123,12 +123,18 @@ def genSimPulseData(a_rp: RadarPlatform,
     noise_level = 10 ** (a_noise_level / 20) / np.sqrt(2) / a_upsample
     rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_bpj[0], seed=1)
 
+    # Only if updating the chirp; requires a while loop instead of for
+    if a_update_chirp:
+        yield
+
     # Run through loop to get data simulated
     dt = a_pulse_times
     frame_idx = np.arange(len(dt))
     for ts, frames in getPulseTimeGen(dt, frame_idx, a_cpi_len, True):
         tmp_len = len(ts)
-        ret_data = np.zeros((n_rx, tmp_len, up_fft_len), dtype=np.complex128)
+        ret_data = (np.random.normal(0, noise_level, (n_rx, tmp_len, fft_len)) +
+                    1j * np.random.normal(0, noise_level, (n_rx, tmp_len, fft_len)))
+        # If we're updating the chirp, yield this to the send function
         for ch_idx, curr_rp in enumerate(a_rps):
             panrx_gpu = cupy.array(curr_rp.pan(ts), dtype=np.float64)
             elrx_gpu = cupy.array(curr_rp.tilt(ts), dtype=np.float64)
@@ -145,22 +151,21 @@ def genSimPulseData(a_rp: RadarPlatform,
 
             pdata = pd_r + 1j * pd_i
             rtdata = cupy.fft.fft(pdata, fft_len, axis=0) * a_chirp[ch_idx][:, None]
-            upsample_data = cupy.array(np.random.normal(0, noise_level, (up_fft_len, tmp_len)) +
-                                       1j * np.random.normal(0, noise_level, (up_fft_len, tmp_len)),
-                                       dtype=np.complex128)
-            upsample_data[:fft_len // 2, :] += rtdata[:fft_len // 2, :]
-            upsample_data[-fft_len // 2:, :] += rtdata[-fft_len // 2:, :]
             cupy.cuda.Device().synchronize()
-            ret_data[curr_rp.rx_num, ...] += upsample_data.get().T
+            ret_data[curr_rp.rx_num, ...] += rtdata.get().T
         # Yielding the chirp here so it can be changed with the send method down the line
-        yield a_chirp, ret_data
+        if a_update_chirp:
+            # Works backward from normal assignment in send function
+            a_chirp = yield ret_data
+        else:
+            yield ret_data
+
 
     del panrx_gpu
     del postx_gpu
     del posrx_gpu
     del elrx_gpu
     del rtdata
-    del upsample_data
     del gx_gpu
     del gy_gpu
     del gz_gpu
@@ -238,3 +243,26 @@ if __name__ == '__main__':
                 data_gen.send((chirp, pdata))
         except KeyboardInterrupt:
             break
+'''def multiplier():
+    print("top of generator")
+    m = yield # nothing to yield the first time, just a value we get
+    print("before loop, m =", m)
+    while True:
+        print("top of loop, m =", m)
+        m = yield m * 2, m * 3         # we always care about the value we're sent
+        print("bottom of loop, m =", m)
+
+print("calling generator")
+it = multiplier()
+
+print("calling next")
+next(it)   # this is equivalent to it.send(None)
+
+print("sending 10")
+print(it.send(10))
+
+print("sending 20")
+print(it.send(20))
+
+print("sending 100")
+print(it.send(100))'''
