@@ -2,7 +2,7 @@ import cmath
 import math
 from numba import cuda, njit
 from numba.cuda.random import xoroshiro128p_uniform_float64
-from simulib.simulation_functions import findPowerOf2
+from simulation_functions import findPowerOf2
 import numpy as np
 
 c0 = 299792458.0
@@ -84,17 +84,29 @@ def applyRadiationPatternCPU(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_e
     eldiff = cpudiff(el_c, el_tx)
     azdiff = cpudiff(az_c, az_tx)
     txaz = abs(np.sin(a * azdiff) / (a * azdiff))
-    txaz[a * azdiff == 0] = 1
+    if isinstance(txaz, list):
+        txaz[a * azdiff == 0] = 1
+    else:
+        txaz = 1 if a * azdiff == 0 else txaz
     txel = abs(np.sin(b * eldiff) / (b * eldiff))
-    txel[b * eldiff == 0] = 1
+    if isinstance(txel, list):
+        txel[b * eldiff == 0] = 1
+    else:
+        txel = 1 if b * eldiff == 0 else txel
     tx_pat = txaz * txel
     # tx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
     eldiff = cpudiff(el_c, el_rx)
     azdiff = cpudiff(az_c, az_rx)
     rxaz = abs(np.sin(a * azdiff) / (a * azdiff))
-    rxaz[a * azdiff == 0] = 1
+    if isinstance(rxaz, list):
+        rxaz[a * azdiff == 0] = 1
+    else:
+        rxaz = 1 if a * azdiff == 0 else rxaz
     rxel = abs(np.sin(b * eldiff) / (b * eldiff))
-    rxel[b * eldiff == 0] = 1
+    if isinstance(rxel, list):
+        rxel[b * eldiff == 0] = 1
+    else:
+        rxel = 1 if b * eldiff == 0 else rxel
     rx_pat = rxaz * rxel
     # rx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
     return tx_pat * tx_pat * rx_pat * rx_pat

@@ -221,6 +221,11 @@ def genPulse(phase_x, phase_y, nnr, nfs, nfc, bandw):
     return np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / nfs))
 
 
+def genChirp(nnr, nfs, nfc, bandw):
+    phase = nfc - bandw // 2 + bandw * np.interp(np.linspace(0, 1, nnr), np.linspace(0, 1, 10), np.linspace(0, 1, 10))
+    return np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / nfs))
+
+
 def rotate(az, nel, rot_mat):
     return rot.from_euler('zx', [[-az, 0.], [0., nel - np.pi / 2]]).apply(rot_mat)
 
