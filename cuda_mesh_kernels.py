@@ -1,10 +1,12 @@
 import cmath
 import math
+
+import cupy
 from numba import cuda, njit
 from simulation_functions import findPowerOf2
 import numpy as np
 import open3d as o3d
-from cuda_kernels import applyRadiationPattern, applyRadiationPatternCPU
+from cuda_kernels import applyRadiationPattern, applyRadiationPatternCPU, getMaxThreads
 
 c0 = 299792458.0
 TAC = 125e6
@@ -65,8 +67,10 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
             return
 
         if n_samples > but > 0:
-            gamma = math.pow((1. / -rx_strength + 1.) / 20, 10)
-            att = applyRadiationPattern(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (two_way_rng * two_way_rng)
+            gamma = math.pow(-rx_strength, 5)
+            # att = applyRadiationPattern(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (
+            #         two_way_rng * two_way_rng)
+            att = 1.
             att *= power_scale
             acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * vert_reflectivity[pidx] * gamma
             cuda.atomic.add(pd_r, (but, np.uint16(t)), acc_val.real)
@@ -75,8 +79,8 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
 
 
 def genRangeProfileFromMeshCPU(vert_xyz, vert_norm, vert_reflectivity,
-                            source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, wavelength, near_range_s,
-                            source_fs, bw_az, bw_el, power_scale):
+                               source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, wavelength, near_range_s,
+                               source_fs, bw_az, bw_el, power_scale):
     # sourcery no-metrics
     for pidx in range(vert_xyz.shape[0]):
         for t in range(source_xyz.shape[0]):
@@ -111,7 +115,8 @@ def genRangeProfileFromMeshCPU(vert_xyz, vert_norm, vert_reflectivity,
             by = ty - vny * bounce_dot
             bz = tz - vnz * bounce_dot
 
-            rx_strength = (rx * bx + ry * by + rz * bz) / (r_rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+            rx_strength = (rx * bx + ry * by + rz * bz) / (
+                    r_rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
             if rx_strength < 0:
                 continue
 
@@ -123,7 +128,9 @@ def genRangeProfileFromMeshCPU(vert_xyz, vert_norm, vert_reflectivity,
 
             if n_samples > but > 0:
                 gamma = math.pow(-rx_strength, 5)
-                att = applyRadiationPatternCPU(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (two_way_rng * two_way_rng)
+                # att = applyRadiationPatternCPU(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (
+                #         two_way_rng * two_way_rng)
+                att = 1.
                 att *= power_scale
                 acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * vert_reflectivity[pidx] * gamma
                 pd_r[but, t] += acc_val.real
@@ -172,73 +179,6 @@ def bounceVector(x0, n0):
     return x0 - 2 * sum(x0 * n0) / sum(n0 * n0) * n0
 
 
-def transform1(a):
-    idx = np.flatnonzero(a[:, -1] == 0)
-    out0 = np.empty((a.shape[0], 2, 3), dtype=a.dtype)
-
-    out0[:, 0, 1:] = a[:, 1:-1]
-    out0[:, 1, 1:] = a[:, 2:]
-
-    out0[..., 0] = a[:, 0, None]
-
-    out0.shape = (-1, 3)
-
-    mask = np.ones(out0.shape[0], dtype=bool)
-    mask[idx * 2 + 1] = 0
-    return out0[mask]
-
-
-def readObjFile(fpath):
-    v = []
-    fp = []
-    fn = []
-    vn = []
-    with open(fpath, 'r') as f:
-        while data := f.readline():
-            data = data.strip()
-            if len(data) < 2:
-                continue
-            if data[0] == 'v':
-                if data[1] == 'n':
-                    un_n = [float(q) for q in data[3:].split(' ')]
-                    un_norm = np.linalg.norm(un_n)
-                    if un_norm == 0:
-                        vn.append([1., 0, 0])
-                    else:
-                        vn.append([u / un_norm for u in un_n])
-                elif data[1] == ' ':
-                    v.append([float(q) for q in data[2:].split(' ')])
-            elif data[0] == 'f':
-                if '/' in data:
-                    nodes = [q.split('/') for q in data[2:].split(' ')]
-                    if len(nodes) == 3:
-                        fp.append([int(q[0]) for q in nodes] + [0])
-                        fn.append([int(q[2]) for q in nodes] + [0])
-                    elif len(nodes) == 4:
-                        fp.append([int(q[0]) for q in nodes])
-                        fn.append([int(q[2]) for q in nodes])
-                    else:
-                        for n in range(4, len(nodes) + 1):
-                            fp.append([int(q[0]) for q in nodes[n-4:n]])
-                            fn.append([int(q[2]) for q in nodes[n-4:n]])
-                else:
-                    fp.append([int(q) for q in data[1:].split(' ')])
-                    if len(fp[-1]) == 3:
-                        fp[-1] += [0]
-    return np.array(v), np.array(vn), transform1(np.array(fp)) - 1, transform1(np.array(fn)) - 1
-
-
-def createMeshFromObj(fnme):
-    v, vn, f, fn = readObjFile(fnme)
-    mesh = o3d.geometry.TriangleMesh()
-    mesh.vertices = o3d.utility.Vector3dVector(v)
-    mesh.triangles = o3d.utility.Vector3iVector(f)
-    mesh.compute_vertex_normals()
-    mesh.compute_triangle_normals()
-    mesh.normalize_normals()
-    return mesh
-
-
 def readCombineMeshFile(fnme, points=100000):
     full_mesh = o3d.io.read_triangle_model(fnme)
     mesh = full_mesh.meshes[0].mesh
@@ -254,15 +194,12 @@ def readCombineMeshFile(fnme, points=100000):
     mesh.normalize_normals()
     return mesh
 
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     from simulation_functions import db, genChirp, azelToVec
 
-    '''full_mesh = o3d.io.read_triangle_model('/home/jeff/Documents/piper_pa18.obj')
-    mesh = full_mesh.meshes[0].mesh
-    for me in full_mesh.meshes[1:]:
-        mesh += me.mesh'''
-    mesh = readCombineMeshFile('/home/jeff/Documents/piper_pa18.obj')
+    mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/piper_pa18.obj')
     # mesh = sum([t.mesh for t in full_mesh.meshes])
     obs_pt = np.array([100., 0., 50.])
     nsam = 256
@@ -273,18 +210,11 @@ if __name__ == '__main__':
     up_fft_len = fft_len * 4
 
     print('Generating Mesh...')
-    # mesh.scale(1 / 41.08, center=(0, 0, 0))
-
-    '''mesh = mesh.simplify_vertex_clustering(voxel_size=.01, contraction=o3d.geometry.SimplificationContraction.Average)
-    mesh.compute_vertex_normals()
-    mesh.compute_triangle_normals()
-    mesh.normalize_normals()'''
-    # trimesh.repair.broken_faces(mesh)
     mverts = np.asarray(mesh.vertices)
     mnorms = np.asarray(mesh.vertex_normals)
 
     print('Sampling Points...')
-    sample_points = mesh.sample_points_poisson_disk(3000)
+    sample_points = mesh.sample_points_poisson_disk(10000)
 
     face_centers = np.asarray(sample_points.points)
     face_normals = np.asarray(sample_points.normals)
@@ -314,17 +244,43 @@ if __name__ == '__main__':
     bounces *= powers[:, None]
 
     # Get some pans and tilts
-    pd_r = np.zeros((nsam, len(pan)))
-    pd_i = np.zeros((nsam, len(pan)))
+    pd_r = cupy.zeros((nsam, len(pan)), dtype=np.float32)
+    pd_i = cupy.zeros((nsam, len(pan)), dtype=np.float32)
     near_range_s = (standoff - 10) / c0
 
     print('Generating range profile...')
-    pd_r, pd_i = genRangeProfileFromMeshCPU(face_centers, face_normals, np.ones(face_centers.shape[0]) * 1e9, poses, poses,
-                                            pan, tilt, pan, tilt, pd_r, pd_i, c0 / fc, near_range_s, fs, 10 * DTR,
-                                            10 * DTR, 1e9)
+    face_centers_gpu = cupy.array(face_centers, dtype=np.float32)
+    face_normals_gpu = cupy.array(face_normals, dtype=np.float32)
+    reflectivity_gpu = cupy.array(np.ones(face_centers.shape[0]) * 1e9, dtype=np.float32)
+    poses_gpu = cupy.array(poses, dtype=np.float32)
+    pan_gpu = cupy.array(pan, dtype=np.float32)
+    tilt_gpu = cupy.array(pan, dtype=np.float32)
 
-    pd = pd_r + 1j * pd_i
+    # GPU device calculations
+    threads_per_block = getMaxThreads()
+    bpg_bpj = (max(1, face_centers.shape[0] // threads_per_block[0] + 1), len(pan) // threads_per_block[1] + 1)
+    genRangeProfileFromMesh[bpg_bpj, threads_per_block](face_centers_gpu, face_normals_gpu, reflectivity_gpu, poses_gpu,
+                                                        poses_gpu,
+                                                        pan_gpu, tilt_gpu, pan_gpu, tilt_gpu, pd_r, pd_i, c0 / fc,
+                                                        near_range_s, fs, 10 * DTR,
+                                                        10 * DTR, 1e9)
+
+    pd = pd_r.get() + 1j * pd_i.get()
     pd = pd / abs(pd).max()
+
+    pd_r_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
+    pd_i_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
+
+    pd_r_cpu, pd_i_cpu = genRangeProfileFromMeshCPU(face_centers.astype(np.float32), face_normals.astype(np.float32),
+                                                    reflectivity_gpu.get(), poses.astype(np.float32),
+                                                    poses.astype(np.float32),
+                                                    pan.astype(np.float32), tilt.astype(np.float32),
+                                                    pan.astype(np.float32), tilt.astype(np.float32), pd_r_cpu, pd_i_cpu,
+                                                    c0 / fc,
+                                                    near_range_s, fs, 10 * DTR,
+                                                    10 * DTR, 1e9)
+    pd_cpu = pd_r_cpu + 1j * pd_i_cpu
+    pd_cpu = pd_cpu / abs(pd_cpu).max()
     chirp = np.fft.fft(genChirp(nr, fs, fc, 400e6), fft_len)
     mfilt = chirp.conj()
 
@@ -357,10 +313,16 @@ if __name__ == '__main__':
     # ax.quiver(*obs_pt, *obs_dir * 10, color='red')
 
     plt.figure('RangeProfile')
-    plt.subplot(1, 2, 1)
+    plt.subplot(2, 2, 1)
     plt.imshow(db(pd))
     plt.axis('tight')
-    plt.subplot(1, 2, 2)
+    plt.subplot(2, 2, 2)
     plt.imshow(db(pd_ch))
+    plt.axis('tight')
+    plt.subplot(2, 2, 3)
+    plt.imshow(db(pd_cpu))
+    plt.axis('tight')
+    plt.subplot(2, 2, 4)
+    plt.imshow(db(pd_cpu - pd))
     plt.axis('tight')
     plt.show()
