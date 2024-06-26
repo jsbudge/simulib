@@ -51,18 +51,13 @@ def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     """
     a = np.pi / bw_az
     b = np.pi / bw_el
-    eldiff = diff(el_c, el_tx)
-    azdiff = diff(az_c, az_tx)
-    txaz = abs(math.sin(a * azdiff) / (a * azdiff)) if azdiff != 0 else 1.
-    txel = abs(math.sin(b * eldiff) / (b * eldiff)) if eldiff != 0 else 1.
-    tx_pat = txaz * txel
-    # tx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
-    eldiff = diff(el_c, el_rx)
-    azdiff = diff(az_c, az_rx)
-    rxaz = abs(math.sin(a * azdiff) / (a * azdiff)) if azdiff != 0 else 1.
-    rxel = abs(math.sin(b * eldiff) / (b * eldiff)) if eldiff != 0 else 1.
-    rx_pat = rxaz * rxel
-    # rx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
+    # Abs shouldn't be a problem since the pattern is symmetrical about zero
+    eldiff = max(1e-9, abs(diff(el_c, el_tx)))
+    azdiff = max(1e-9, abs(diff(az_c, az_tx)))
+    tx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
+    eldiff = max(1e-9, abs(diff(el_c, el_rx)))
+    azdiff = max(1e-9, abs(diff(az_c, az_rx)))
+    rx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
     return tx_pat * tx_pat * rx_pat * rx_pat
 
 
@@ -81,18 +76,13 @@ def applyRadiationPatternCPU(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_e
     """
     a = np.pi / bw_az
     b = np.pi / bw_el
-    eldiff = cpudiff(el_c, el_tx)
-    azdiff = cpudiff(az_c, az_tx)
-    txaz = abs(math.sin(a * azdiff) / (a * azdiff)) if azdiff != 0 else 1.
-    txel = abs(math.sin(b * eldiff) / (b * eldiff)) if eldiff != 0 else 1.
-    tx_pat = txaz * txel
-    # tx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
-    eldiff = cpudiff(el_c, el_rx)
-    azdiff = cpudiff(az_c, az_rx)
-    rxaz = abs(math.sin(a * azdiff) / (a * azdiff)) if azdiff != 0 else 1.
-    rxel = abs(math.sin(b * eldiff) / (b * eldiff)) if eldiff != 0 else 1.
-    rx_pat = rxaz * rxel
-    # rx_pat = (2 * np.pi - abs(eldiff)) * (2 * np.pi - abs(azdiff))
+    # Abs shouldn't be a problem since the pattern is symmetrical about zero
+    eldiff = max(1e-9, abs(cpudiff(el_c, el_tx)))
+    azdiff = max(1e-9, abs(cpudiff(az_c, az_tx)))
+    tx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
+    eldiff = max(1e-9, abs(cpudiff(el_c, el_rx)))
+    azdiff = max(1e-9, abs(cpudiff(az_c, az_rx)))
+    rx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
     return tx_pat * tx_pat * rx_pat * rx_pat
 
 

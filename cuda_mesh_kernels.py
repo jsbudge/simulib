@@ -3,6 +3,8 @@ import math
 
 import cupy
 from numba import cuda, njit
+from numba.cuda.random import xoroshiro128p_uniform_float64
+
 from simulation_functions import findPowerOf2
 import numpy as np
 import open3d as o3d
@@ -14,14 +16,64 @@ fs = 2e9
 DTR = np.pi / 180
 
 
-def calcBounceFromMesh(vertices, faces, source_xyz, bounce_xyz, bounce_dir):
-    pass
+@cuda.jit()
+def calcSpread(ray_power, ray_distance, vert_xyz, vert_power, vert_norm, source_xyz, wavenumber):
+    ray_idx, vert_idx = cuda.grid(ndim=2)
+    if vert_idx < vert_xyz.shape[0] and ray_idx < ray_power.shape[0]:
+        # Calculate the bounce vector for this time
+        vx = vert_xyz[vert_idx, 0]
+        vy = vert_xyz[vert_idx, 1]
+        vz = vert_xyz[vert_idx, 2]
+        vnx = vert_norm[vert_idx, 0]
+        vny = vert_norm[vert_idx, 1]
+        vnz = vert_norm[vert_idx, 2]
+
+        # Calculate out the angles in azimuth and elevation for the bounce
+        # First, get the accumulator value
+        tx = vx - source_xyz[0]
+        ty = vy - source_xyz[1]
+        tz = vz - source_xyz[2]
+        rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+
+        bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
+        bx = tx - vnx * bounce_dot
+        by = ty - vny * bounce_dot
+        bz = tz - vnz * bounce_dot
+
+        rx_strength = (tx * bx + ty * by + tz * bz) / (rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+        if rx_strength < 0:
+            return
+
+        att = ray_power[ray_idx, vert_idx] * math.pow(-rx_strength, 5)
+        two_way_rng = ray_distance[ray_idx, vert_idx] + rng
+        acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
+        cuda.atomic.add(vert_power, vert_idx, acc_val.real)
+        cuda.atomic.add(vert_power, vert_idx, acc_val.imag)
+
+        # Now, send the ray bouncing to the other vertex
+        tx = vx - vert_xyz[ray_idx, 0]
+        ty = vy - vert_xyz[ray_idx, 1]
+        tz = vz - vert_xyz[ray_idx, 2]
+        rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+
+        bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
+        bx = tx - vnx * bounce_dot
+        by = ty - vny * bounce_dot
+        bz = tz - vnz * bounce_dot
+
+        rx_strength = (tx * bx + ty * by + tz * bz) / (rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+        if rx_strength < 0:
+            return
+        ray_power[ray_idx, vert_idx] = ray_power[ray_idx, vert_idx] * math.pow(-rx_strength, 5)
+        ray_distance[ray_idx, vert_idx] += rng
+        cuda.syncthreads()
+
 
 
 @cuda.jit()
 def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
                             source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, wavelength, near_range_s,
-                            source_fs, bw_az, bw_el, power_scale):
+                            source_fs, bw_az, bw_el, power_scale, do_beampattern, do_bounce):
     # sourcery no-metrics
     pidx, t = cuda.grid(ndim=2)
     if pidx < vert_xyz.shape[0] and t < source_xyz.shape[0]:
@@ -51,14 +103,18 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
         r_az = math.atan2(rx, ry)
 
         # Calculate bounce vector and strength
-        bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
-        bx = tx - vnx * bounce_dot
-        by = ty - vny * bounce_dot
-        bz = tz - vnz * bounce_dot
+        if do_bounce:
+            bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
+            bx = tx - vnx * bounce_dot
+            by = ty - vny * bounce_dot
+            bz = tz - vnz * bounce_dot
 
-        rx_strength = (rx * bx + ry * by + rz * bz) / (r_rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
-        if rx_strength < 0:
-            return
+            rx_strength = (rx * bx + ry * by + rz * bz) / (r_rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+            if rx_strength < 0:
+                return
+            gamma = math.pow(-rx_strength, 5)
+        else:
+            gamma = 1.
 
         two_way_rng = rng + r_rng
         rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
@@ -67,10 +123,11 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
             return
 
         if n_samples > but > 0:
-            gamma = math.pow(-rx_strength, 5)
-            # att = applyRadiationPattern(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (
-            #         two_way_rng * two_way_rng)
-            att = 1.
+            if do_beampattern:
+                att = applyRadiationPattern(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (
+                        two_way_rng * two_way_rng)
+            else:
+                att = 1.
             att *= power_scale
             acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * vert_reflectivity[pidx] * gamma
             cuda.atomic.add(pd_r, (but, np.uint16(t)), acc_val.real)
@@ -196,10 +253,13 @@ def readCombineMeshFile(fnme, points=100000):
 
 
 if __name__ == '__main__':
+    scalings = [30., .25, 41.08, 1.8, 60, 1., 1., .8, 12., 1., 156.25
+                ]
     import matplotlib.pyplot as plt
     from simulation_functions import db, genChirp, azelToVec
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/piper_pa18.obj')
+    mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/helic.obj')
+    mesh.scale(1 / 3., center=mesh.get_center())
     # mesh = sum([t.mesh for t in full_mesh.meshes])
     obs_pt = np.array([100., 0., 50.])
     nsam = 256
@@ -263,12 +323,12 @@ if __name__ == '__main__':
                                                         poses_gpu,
                                                         pan_gpu, tilt_gpu, pan_gpu, tilt_gpu, pd_r, pd_i, c0 / fc,
                                                         near_range_s, fs, 10 * DTR,
-                                                        10 * DTR, 1e9)
+                                                        10 * DTR, 1e9, False, True)
 
     pd = pd_r.get() + 1j * pd_i.get()
     pd = pd / abs(pd).max()
 
-    pd_r_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
+    '''pd_r_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
     pd_i_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
 
     pd_r_cpu, pd_i_cpu = genRangeProfileFromMeshCPU(face_centers.astype(np.float32), face_normals.astype(np.float32),
@@ -280,7 +340,7 @@ if __name__ == '__main__':
                                                     near_range_s, fs, 10 * DTR,
                                                     10 * DTR, 1e9)
     pd_cpu = pd_r_cpu + 1j * pd_i_cpu
-    pd_cpu = pd_cpu / abs(pd_cpu).max()
+    pd_cpu = pd_cpu / abs(pd_cpu).max()'''
     chirp = np.fft.fft(genChirp(nr, fs, fc, 400e6), fft_len)
     mfilt = chirp.conj()
 
@@ -319,10 +379,10 @@ if __name__ == '__main__':
     plt.subplot(2, 2, 2)
     plt.imshow(db(pd_ch))
     plt.axis('tight')
-    plt.subplot(2, 2, 3)
+    '''plt.subplot(2, 2, 3)
     plt.imshow(db(pd_cpu))
     plt.axis('tight')
     plt.subplot(2, 2, 4)
     plt.imshow(db(pd_cpu - pd))
-    plt.axis('tight')
+    plt.axis('tight')'''
     plt.show()

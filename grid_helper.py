@@ -1,5 +1,5 @@
 import numpy as np
-from simulib.simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
+from simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
 from scipy.spatial import Delaunay
 from scipy.interpolate import interpn
 import pickle
@@ -95,11 +95,20 @@ class Environment(object):
                              fill_value=0).reshape(x.shape, order='C'),
                      *self.getGridParams(pos, width, height, (nrows, ncols), az))
 
+    def sample(self, x, y):
+        irmat = np.linalg.pinv(self._transforms[0])
+        px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
+        py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
+        pos_r = np.stack([px.ravel(), py.ravel()]).T
+        return interpn((np.arange(self.refgrid.shape[1]),
+                        np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
+                       fill_value=0)
+
     def save(self, fnme):
         with open(fnme, 'wb') as f:
             pickle.dump(self, f)
 
-    def getPos(self, px: float, py: float, elevation: bool = False) -> np.ndarray:
+    def getPos(self, px: float | list[float], py: float | list[float], elevation: bool = False) -> np.ndarray:
         """
         Calculate the grid position based on the given pixel coordinates.
 
@@ -116,11 +125,15 @@ class Environment(object):
         gy = py - self.shape[0] / 2
         pos_x = self._transforms[0][0, 0] * gx + self._transforms[0][0, 1] * gy + self._transforms[0][0, 2]
         pos_y = self._transforms[0][1, 0] * gx + self._transforms[0][1, 1] * gy + self._transforms[0][1, 2]
-        if elevation:
-            lat, lon, _ = enu2llh(pos_x, pos_y, 0, self.ref)
-            return np.array([pos_x, pos_y, getElevation(lat, lon) - self.ref[2]])
-        else:
-            return np.array([pos_x, pos_y])
+        if not elevation:
+            return np.array([pos_x, pos_y]).T
+        lat, lon, _ = (
+            enu2llh(pos_x, pos_y, 0, self.ref)
+            if isinstance(px, float)
+            else enu2llh(pos_x, pos_y, np.zeros_like(pos_x), self.ref)
+        )
+        return np.array([pos_x, pos_y, getElevation(lat, lon) - self.ref[2]]) if isinstance(px, float) else (
+            np.array([pos_x, pos_y, getElevationMap(lat, lon) - self.ref[2]]).T)
 
     def getIndex(self, x: float, y: float) -> np.ndarray:
         irmat = np.linalg.pinv(self._transforms[0])
@@ -218,12 +231,8 @@ class SDREnvironment(Environment):
         return self._sdr
 
 
-def mesh(grid, tri_err, num_vertices):
+def mesh(ptx, pty, ref_im, tri_err, max_vertices, max_iters=20, minimize_vertices=True):
     # Generate a mesh using SVS metrics to make triangles in the right spots
-    ptx = grid[0, :, :].flatten()
-    pty = grid[1, :, :].flatten()
-    im = grid[2, :, :].flatten()
-    pts = np.array([ptx, pty]).T
 
     # Initial points are the four corners of the grid
     init_pts = np.array([[ptx.min(), pty.min()],
@@ -231,42 +240,43 @@ def mesh(grid, tri_err, num_vertices):
                          [ptx.max(), pty.min()],
                          [ptx.max(), pty.max()]])
     tri = Delaunay(init_pts, incremental=True, qhull_options='QJ')
-    total_err = np.inf
-    its = 0
-    total_its = 20
-    while total_err > tri_err and its < total_its:
+    total_err = 0.
+    for _ in range(max_iters):
+        pts = np.array([np.random.rand(max_vertices) * ptx.max(), np.random.rand(max_vertices) * pty.max()]).T
+        im = interpn([ptx, pty], ref_im, pts)
         pts_tri = tri.find_simplex(pts).astype(int)
-        sort_args = pts_tri.argsort()
-        sorted_arr = pts_tri[sort_args]
-        _, cut = np.unique(sorted_arr, return_index=True)
-        out = np.split(sort_args, cut)
-        total_err = 0
+        simp_idx = np.unique(pts_tri)
         add_pts = []
-        for simplex in out:
+        for sidx in simp_idx:
+            i = pts_tri == sidx
             # Calculate out SVS error of triangle
-            if len(simplex) > 1:
-                tric = im[simplex].mean()
-                errors = abs(im[simplex] - tric) ** 2
-                if np.mean(errors) > tri_err:
-                    winner = simplex[errors == errors.max()][0]
-                    add_pts.append([ptx[winner], pty[winner]])
-                    total_err += sum(errors)
-                    if len(add_pts) + tri.points.shape[0] >= num_vertices:
-                        its = total_its
-                        break
+            tric = im[i].mean()
+            errors = abs(im[i] - tric) ** 2
+            if np.any(errors > tri_err):
+                add_pts.append(pts[i][errors == errors.max()][0])
+                total_err += sum(errors)
+                if len(add_pts) + tri.points.shape[0] >= max_vertices:
+                    break
         total_err /= len(pts_tri)
         if not add_pts:
-            break
+            if minimize_vertices:
+                break
+            for sidx in simp_idx:
+                i = pts_tri == sidx
+                # Calculate out SVS error of triangle
+                tric = im[i].mean()
+                errors = abs(im[i] - tric) ** 2
+                add_pts.append(pts[i][errors == errors.max()][0])
+                if len(add_pts) + tri.points.shape[0] >= max_vertices:
+                    break
         try:
             tri.add_points(np.array(add_pts))
         except IndexError:
             print('Something went wrong.')
             break
-        its += 1
     ptx = tri.points[:, 0]
     pty = tri.points[:, 1]
-    reflectivity = tri.find_simplex(pts).reshape((grid.shape[1], grid.shape[2]))
-    return ptx, pty, reflectivity, tri.simplices
+    return ptx, pty, tri.find_simplex(tri.points), tri.simplices
 
 
 def getGridParams(ref, pos, width, height, npts, az=0):
