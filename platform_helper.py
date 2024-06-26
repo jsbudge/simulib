@@ -2,14 +2,15 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
 
-from data_converter import SDRBase
-from simulib.simulation_functions import llh2enu, findPowerOf2
+from typing import Type
+from simulation_functions import llh2enu, findPowerOf2
 
 c0 = 299792458.0
 TAC = 125e6
 DTR = np.pi / 180
 inch_to_m = .0254
 INS_REFRESH_HZ = 100
+SDRBase = Type
 
 """
 Platform class

@@ -17,9 +17,9 @@ DTR = np.pi / 180
 
 
 @cuda.jit()
-def calcSpread(ray_power, ray_distance, vert_xyz, vert_power, vert_norm, source_xyz, wavenumber):
+def calcSpread(ray_power, ray_distance, vert_xyz, vert_power_r, vert_power_i, vert_norm, source_xyz, wavenumber):
     ray_idx, vert_idx = cuda.grid(ndim=2)
-    if vert_idx < vert_xyz.shape[0] and ray_idx < ray_power.shape[0]:
+    if vert_xyz.shape[0] > vert_idx != ray_idx and ray_idx < ray_power.shape[0]:
         # Calculate the bounce vector for this time
         vx = vert_xyz[vert_idx, 0]
         vy = vert_xyz[vert_idx, 1]
@@ -47,8 +47,8 @@ def calcSpread(ray_power, ray_distance, vert_xyz, vert_power, vert_norm, source_
         att = ray_power[ray_idx, vert_idx] * math.pow(-rx_strength, 5)
         two_way_rng = ray_distance[ray_idx, vert_idx] + rng
         acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
-        cuda.atomic.add(vert_power, vert_idx, acc_val.real)
-        cuda.atomic.add(vert_power, vert_idx, acc_val.imag)
+        cuda.atomic.add(vert_power_r, vert_idx, acc_val.real)
+        cuda.atomic.add(vert_power_i, vert_idx, acc_val.imag)
 
         # Now, send the ray bouncing to the other vertex
         tx = vx - vert_xyz[ray_idx, 0]
@@ -64,7 +64,7 @@ def calcSpread(ray_power, ray_distance, vert_xyz, vert_power, vert_norm, source_
         rx_strength = (tx * bx + ty * by + tz * bz) / (rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
         if rx_strength < 0:
             return
-        ray_power[ray_idx, vert_idx] = ray_power[ray_idx, vert_idx] * math.pow(-rx_strength, 5)
+        ray_power[ray_idx, vert_idx] = ray_power[ray_idx, vert_idx] / (rng * rng) * math.pow(rx_strength, 5)
         ray_distance[ray_idx, vert_idx] += rng
         cuda.syncthreads()
 
