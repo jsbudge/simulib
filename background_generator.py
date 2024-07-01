@@ -25,57 +25,21 @@ wavelength = c0 / 9.6e9
 bg = SDREnvironment(sdr)
 rp = SDRPlatform(sdr, origin=bg.ref)
 
-gx, gy, gz = bg.getGrid(origin, 500, 500, 500, 500)
-refgrid = bg.getRefGrid(origin, 500, 500, 500, 500)
-smooth_grid = gaussian_filter(db(refgrid), 25.)
-edge_im = np.sqrt(sobel(smooth_grid, 0) ** 2 + sobel(smooth_grid, 1) ** 2)
-edge_im = edge_im / edge_im.max()
-
-print('Calculating mesh...')
-mx, my, mref, simp = mesh(np.arange(500), np.arange(500), edge_im, 1e-3, 25000,
-                          max_iters=60, minimize_vertices=False)
-
-
-npos = bg.getPos(mx, my, True)
-
-print('Getting face colors...')
-facecolors = interpn([np.arange(500), np.arange(500)], db(refgrid),
-                     np.array([(mx[simp[:, 0]] + mx[simp[:, 1]] + mx[simp[:, 2]]) / 3,
-                               (my[simp[:, 0]] + my[simp[:, 1]] + my[simp[:, 2]]) / 3]).T)
-fcx = facecolors - facecolors.min()
-fcx /= fcx.max()
-
 print('Generating Open3d mesh...')
-pcd = o3d.geometry.PointCloud()
-pcd.points = o3d.utility.Vector3dVector(npos)
-pcd.colors = o3d.utility.Vector3dVector(np.array([fcx, fcx, fcx]).T)
-pcd.estimate_normals()
-background_mesh = o3d.geometry.TriangleMesh()
-background_mesh.vertices = o3d.utility.Vector3dVector(npos)
-background_mesh.triangles = o3d.utility.Vector3iVector(simp)
+background_mesh = readCombineMeshFile('/home/jeff/Documents/airport.obj')
 background_mesh.remove_degenerate_triangles()
 background_mesh.remove_duplicated_vertices()
 background_mesh.remove_non_manifold_edges()
 background_mesh.compute_vertex_normals()
 background_mesh.compute_triangle_normals()
 background_mesh.normalize_normals()
-background_mesh.vertex_colors = o3d.utility.Vector3dVector(np.array([fcx, fcx, fcx]).T)
-background_mesh.translate(np.array([0, 0, 0.]))
 
 target_mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/x-wing.obj')
 target_mesh.translate(np.array([1050., 800., 10.]))
 target_mesh.rotate(o3d.geometry.get_rotation_matrix_from_xyz(np.array([np.pi / 2, np.pi / 2, 0.])))
 full_mesh = background_mesh + target_mesh
 
-'''plt.figure()
-plt.imshow(edge_im, origin='lower')
-plt.figure()
-plt.imshow(db(refgrid), origin='lower')
-plt.figure()
-plt.tripcolor(mx, my, simp, facecolors=facecolors)
-plt.figure()
-plt.tricontourf(Triangulation(mx, my, simp), db(bg.refgrid[mx.astype(int), my.astype(int)]), levels=120)'''
-nsamples = 10000
+nsamples = 20000
 # GPU device calculations
 threads_per_block = getMaxThreads()
 bpg_bpj = (max(1, nsamples // threads_per_block[0] + 1), nsamples // threads_per_block[1] + 1)
@@ -90,7 +54,7 @@ vert_xyz_gpu = cupy.array(face_centers, dtype=np.float32)
 vert_norm_gpu = cupy.array(face_normals, dtype=np.float32)
 
 range_profile = np.zeros((128, len(ranges))).astype(np.complex128)
-for idx, t in tqdm(enumerate(rp.gpst[:128])):
+for idx, t in tqdm(enumerate(rp.gpst[:1280:10])):
     platform_pos = rp.pos(t)
     source_xyz_gpu = cupy.array(platform_pos, dtype=np.float32)
     range_vec = face_centers - platform_pos
@@ -118,6 +82,15 @@ for idx, t in tqdm(enumerate(rp.gpst[:128])):
         range_profile[idx, face_bin[face_bin < len(ranges)]] += \
             (vrp_r_gpu.get() + 1j * vrp_i_gpu.get())[face_bin < len(ranges)]
 
+    del source_xyz_gpu
+    del ray_distance_gpu
+    del ray_power_gpu
+    del vrp_r_gpu
+    del vrp_i_gpu
+
+del vert_xyz_gpu
+del vert_norm_gpu
+
 plt.figure()
 plt.imshow(db(np.fft.fft(range_profile, axis=0)))
 plt.axis('tight')
@@ -125,6 +98,6 @@ plt.show()
 
 # bpg_bpj = (max(1, face_centers.shape[0] // threads_per_block[0] + 1), len(pan) // threads_per_block[1] + 1)
 
-# o3d.visualization.draw_geometries([pcd, full_mesh])
+# o3d.visualization.draw_geometries([full_mesh])
 
 # Calculate normal vectors for center points

@@ -16,6 +16,17 @@ fs = 2e9
 DTR = np.pi / 180
 
 
+@cuda.jit(device=True)
+def getRangeAndAngles(vx, vy, vz, sx, sy, sz):
+    tx = vx - sx
+    ty = vy - sy
+    tz = vz - sz
+    rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+    az = math.atan2(tx, ty)
+    el = -math.asin(tz / rng)
+    return tx, ty, tz, rng, az, el
+
+
 @cuda.jit()
 def calcSpread(ray_power, ray_distance, vert_xyz, vert_power_r, vert_power_i, vert_norm, source_xyz, wavenumber):
     ray_idx, vert_idx = cuda.grid(ndim=2)
@@ -30,10 +41,7 @@ def calcSpread(ray_power, ray_distance, vert_xyz, vert_power_r, vert_power_i, ve
 
         # Calculate out the angles in azimuth and elevation for the bounce
         # First, get the accumulator value
-        tx = vx - source_xyz[0]
-        ty = vy - source_xyz[1]
-        tz = vz - source_xyz[2]
-        rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+        tx, ty, tz, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[0], source_xyz[1], source_xyz[2])
 
         bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
         bx = tx - vnx * bounce_dot
@@ -44,7 +52,7 @@ def calcSpread(ray_power, ray_distance, vert_xyz, vert_power_r, vert_power_i, ve
         if rx_strength < 0:
             return
 
-        att = ray_power[ray_idx, vert_idx] * math.pow(-rx_strength, 5)
+        att = ray_power[ray_idx, vert_idx] * math.pow(rx_strength, 5)
         two_way_rng = ray_distance[ray_idx, vert_idx] + rng
         acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
         cuda.atomic.add(vert_power_r, vert_idx, acc_val.real)
@@ -90,19 +98,11 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
         vnz = vert_norm[pidx, 2]
 
         # Calculate out the angles in azimuth and elevation for the bounce
-        tx = vx - source_xyz[t, 0]
-        ty = vy - source_xyz[t, 1]
-        tz = vz - source_xyz[t, 2]
-        rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
-
-        rx = vx - receive_xyz[t, 0]
-        ry = vy - receive_xyz[t, 1]
-        rz = vz - receive_xyz[t, 2]
-        r_rng = math.sqrt(abs(rx * rx) + abs(ry * ry) + abs(rz * rz))
-        r_el = -math.asin(rz / r_rng)
-        r_az = math.atan2(rx, ry)
+        tx, ty, tz, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[t, 0], source_xyz[t, 1], source_xyz[t, 2])
+        rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(vx, vy, vz, receive_xyz[t, 0], receive_xyz[t, 1], receive_xyz[t, 2])
 
         # Calculate bounce vector and strength
+        gamma = 1.
         if do_bounce:
             bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
             bx = tx - vnx * bounce_dot
@@ -113,8 +113,6 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
             if rx_strength < 0:
                 return
             gamma = math.pow(-rx_strength, 5)
-        else:
-            gamma = 1.
 
         two_way_rng = rng + r_rng
         rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
@@ -123,11 +121,10 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
             return
 
         if n_samples > but > 0:
+            att = 1.
             if do_beampattern:
                 att = applyRadiationPattern(r_el, r_az, panrx[t], elrx[t], pantx[t], eltx[t], bw_az, bw_el) / (
                         two_way_rng * two_way_rng)
-            else:
-                att = 1.
             att *= power_scale
             acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * vert_reflectivity[pidx] * gamma
             cuda.atomic.add(pd_r, (but, np.uint16(t)), acc_val.real)
