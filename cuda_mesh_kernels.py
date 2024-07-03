@@ -28,53 +28,136 @@ def getRangeAndAngles(vx, vy, vz, sx, sy, sz):
 
 
 @cuda.jit()
-def calcSpread(ray_power, ray_distance, vert_xyz, vert_power_r, vert_power_i, vert_norm, source_xyz, wavenumber):
-    ray_idx, vert_idx = cuda.grid(ndim=2)
-    if vert_xyz.shape[0] > vert_idx != ray_idx and ray_idx < ray_power.shape[0]:
-        # Calculate the bounce vector for this time
-        vx = vert_xyz[vert_idx, 0]
-        vy = vert_xyz[vert_idx, 1]
-        vz = vert_xyz[vert_idx, 2]
-        vnx = vert_norm[vert_idx, 0]
-        vny = vert_norm[vert_idx, 1]
-        vnz = vert_norm[vert_idx, 2]
+def calcIntersection(ray_power, ray_distance, ray_bounce, ray_xyz, vert_xyz, tri_norm, tri_verts, source_xyz, panrx, elrx,
+                     pd_r, pd_i, wavenumber, near_range_s, source_fs, bw_az, bw_el):
+    ray_idx, tri_idx = cuda.grid(ndim=2)
+    if tri_norm.shape[0] > tri_idx and ray_idx < ray_power.shape[0]:
+        rx = ray_xyz[ray_idx, 0]
+        ry = ray_xyz[ray_idx, 1]
+        rz = ray_xyz[ray_idx, 2]
+        e1x = vert_xyz[tri_verts[tri_idx, 1], 0] - vert_xyz[tri_verts[tri_idx, 0], 0]
+        e1y = vert_xyz[tri_verts[tri_idx, 1], 1] - vert_xyz[tri_verts[tri_idx, 0], 1]
+        e1z = vert_xyz[tri_verts[tri_idx, 1], 2] - vert_xyz[tri_verts[tri_idx, 0], 2]
+        e2x = vert_xyz[tri_verts[tri_idx, 2], 0] - vert_xyz[tri_verts[tri_idx, 0], 0]
+        e2y = vert_xyz[tri_verts[tri_idx, 2], 1] - vert_xyz[tri_verts[tri_idx, 0], 1]
+        e2z = vert_xyz[tri_verts[tri_idx, 2], 2] - vert_xyz[tri_verts[tri_idx, 0], 2]
+        crossx = ray_bounce[ray_idx, 1] * e2z - ray_bounce[ray_idx, 2] * e2y
+        crossy = ray_bounce[ray_idx, 2] * e2x - ray_bounce[ray_idx, 0] * e2z
+        crossz = ray_bounce[ray_idx, 0] * e2y - ray_bounce[ray_idx, 1] * e2x
+        det = e1x * crossx + e1y * crossy + e1z * crossz
+        # Check to see if ray is parallel to triangle
+        if abs(det) < 1e-9:
+            return
+
+        inv_det = 1. / det
+        sx = rx - vert_xyz[tri_verts[tri_idx, 0], 0]
+        sy = ry - vert_xyz[tri_verts[tri_idx, 0], 1]
+        sz = rz - vert_xyz[tri_verts[tri_idx, 0], 2]
+
+        u = inv_det * (sx * crossx + sy * crossy + sz * crossz)
+        if u < 0 or u > 1:
+            return
+
+        # Recompute cross for s and edge 1
+        crossx = sy * e1z - sz * e1y
+        crossy = sz * e1x - sx * e1z
+        crossz = sx * e1y - sy * e1x
+        v = inv_det * (ray_bounce[ray_idx, 0] * crossx + ray_bounce[ray_idx, 1] * crossy + ray_bounce[ray_idx, 2] * crossz)
+        if v < 0 or u + v > 1:
+            return
+
+        # Compute intersection point
+        t = inv_det * (e2x * crossx + e2y * crossy + e2z * crossz)
+        if t < 1e-9:
+            return
+
+        vnx = tri_norm[tri_idx, 0]
+        vny = tri_norm[tri_idx, 1]
+        vnz = tri_norm[tri_idx, 2]
+
+        intx = rx + t * ray_bounce[ray_idx, 0]
+        inty = ry + t * ray_bounce[ray_idx, 1]
+        intz = rz + t * ray_bounce[ray_idx, 2]
 
         # Calculate out the angles in azimuth and elevation for the bounce
-        # First, get the accumulator value
-        tx, ty, tz, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[0], source_xyz[1], source_xyz[2])
+        tx, ty, tz, vrng, _, _ = getRangeAndAngles(intx, inty, intz, rx, ry, rz)
+        sx, sy, sz, srng, r_az, r_el = getRangeAndAngles(intx, inty, intz, source_xyz[0], source_xyz[1], source_xyz[2])
 
         bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
         bx = tx - vnx * bounce_dot
         by = ty - vny * bounce_dot
         bz = tz - vnz * bounce_dot
+        bounce_len = math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz))
+        ray_bounce[ray_idx, 0] = bx / bounce_len
+        ray_bounce[ray_idx, 1] = by / bounce_len
+        ray_bounce[ray_idx, 2] = bz / bounce_len
+        ray_xyz[ray_idx, 0] = intx
+        ray_xyz[ray_idx, 1] = inty
+        ray_xyz[ray_idx, 2] = intz
 
-        rx_strength = (tx * bx + ty * by + tz * bz) / (rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
-        if rx_strength < 0:
-            return
+        ray_distance[ray_idx] += vrng
 
-        att = ray_power[ray_idx, vert_idx] * math.pow(rx_strength, 5)
-        two_way_rng = ray_distance[ray_idx, vert_idx] + rng
-        acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
-        cuda.atomic.add(vert_power_r, vert_idx, acc_val.real)
-        cuda.atomic.add(vert_power_i, vert_idx, acc_val.imag)
+        # Calculate for return to source
+        rx_strength = (sx * bx + sy * by + sz * bz) / (srng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+        rx_strength = max(rx_strength, 0.)
+        accumulateRangeProfile(ray_power[ray_idx] * math.pow(rx_strength, 5),
+                               ray_distance[ray_idx] + srng, r_el, r_az, panrx,
+                               elrx, pd_r, pd_i, wavenumber, near_range_s, source_fs, bw_az, bw_el)
 
-        # Now, send the ray bouncing to the other vertex
-        tx = vx - vert_xyz[ray_idx, 0]
-        ty = vy - vert_xyz[ray_idx, 1]
-        tz = vz - vert_xyz[ray_idx, 2]
-        rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+        # Calculate cosine similarity between bounce vector and source vector
+        rx_strength = (intx * bx + inty * by + intz * bz) / (srng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+        rx_strength = max(rx_strength, 0.)
+        ray_power[ray_idx] = ray_power[ray_idx] * math.pow(rx_strength, 5)
 
-        bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
-        bx = tx - vnx * bounce_dot
-        by = ty - vny * bounce_dot
-        bz = tz - vnz * bounce_dot
-
-        rx_strength = (tx * bx + ty * by + tz * bz) / (rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
-        if rx_strength < 0:
-            return
-        ray_power[ray_idx, vert_idx] = ray_power[ray_idx, vert_idx] / (rng * rng) * math.pow(rx_strength, 5)
-        ray_distance[ray_idx, vert_idx] += rng
         cuda.syncthreads()
+
+
+@cuda.jit()
+def calcInitSpread(ray_power, ray_distance, ray_bounce, vert_xyz, vert_norm, vert_power, source_xyz, panrx, elrx, pd_r, pd_i,
+                   wavenumber, near_range_s, source_fs, bw_az, bw_el):
+    ray_idx, vert_idx = cuda.grid(ndim=2)
+    if ray_idx < ray_power.shape[0] and vert_idx == 0:
+        # Calculate the bounce vector for this time
+        vx = vert_xyz[ray_idx, 0]
+        vy = vert_xyz[ray_idx, 1]
+        vz = vert_xyz[ray_idx, 2]
+        vnx = vert_norm[ray_idx, 0]
+        vny = vert_norm[ray_idx, 1]
+        vnz = vert_norm[ray_idx, 2]
+
+        # Calculate out the angles in azimuth and elevation for the bounce
+        sx, sy, sz, srng, r_az, r_el = getRangeAndAngles(vx, vy, vz, source_xyz[0], source_xyz[1], source_xyz[2])
+
+        bounce_dot = (sx * vnx + sy * vny + sz * vnz) * 2.
+        bx = sx - vnx * bounce_dot
+        by = sy - vny * bounce_dot
+        bz = sz - vnz * bounce_dot
+        bounce_len = math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz))
+        ray_bounce[ray_idx, 0] = bx / bounce_len
+        ray_bounce[ray_idx, 1] = by / bounce_len
+        ray_bounce[ray_idx, 2] = bz / bounce_len
+
+        rx_strength = (sx * bx + sy * by + sz * bz) / (srng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+        rx_strength = max(rx_strength, 0.)
+        ray_power[ray_idx] = ray_power[ray_idx] * math.pow(rx_strength, 5)
+        ray_distance[ray_idx] = srng
+        accumulateRangeProfile(ray_power[ray_idx] / (ray_distance[ray_idx] * ray_distance[ray_idx]) * vert_power[ray_idx], srng, r_el, r_az, panrx,
+                               elrx, pd_r, pd_i, wavenumber, near_range_s, source_fs, bw_az, bw_el)
+        cuda.syncthreads()
+
+
+@cuda.jit(device=True)
+def accumulateRangeProfile(power, two_way_rng, r_el, r_az, panrx, elrx, pd_r, pd_i, wavenumber, near_range_s,
+                            source_fs, bw_az, bw_el):
+    rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+    but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
+    if but > pd_r.shape[0] or but < 0:
+        return
+    att = applyRadiationPattern(r_el, r_az, panrx, elrx, panrx, elrx, bw_az, bw_el) / (
+            two_way_rng * two_way_rng)
+    acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * power
+    cuda.atomic.add(pd_r, but, acc_val.real)
+    cuda.atomic.add(pd_i, but, acc_val.imag)
 
 
 
