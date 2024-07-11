@@ -2,7 +2,7 @@ import cupy
 import numpy as np
 from SDRParsing import load
 from cuda_mesh_kernels import readCombineMeshFile, calcInitSpread, calcIntersection
-from cuda_kernels import getMaxThreads, cpudiff
+from cuda_kernels import getMaxThreads, cpudiff, applyRadiationPatternCPU
 from grid_helper import SDREnvironment, mesh
 from platform_helper import SDRPlatform, RadarPlatform
 from scipy.ndimage import sobel, gaussian_filter
@@ -28,7 +28,7 @@ transmit_power = 100
 bg = SDREnvironment(sdr)
 rp = SDRPlatform(sdr, origin=bg.ref)
 
-print('Generating Open3d mesh...')
+'''print('Generating Open3d mesh...')
 mesh_lat = [40.09549, 40.09807]
 mesh_lon = [-111.67357, -111.66864]
 mesh_origin = (40.092961, -111.674558, 1370.)# (40.096657, -111.671529, 1370.)
@@ -41,8 +41,8 @@ background_mesh.compute_vertex_normals()
 background_mesh.compute_triangle_normals()
 background_mesh.normalize_normals()
 
-'''target_mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/x-wing.obj')
-target_mesh.translate(np.array([550., 800., 10.]))'''
+target_mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/x-wing.obj')
+target_mesh.translate(np.array([550., 800., 10.]))
 center_mesh += np.array([-115., -35, 0])
 background_mesh.rotate(o3d.geometry.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0., 0.])))
 background_mesh.rotate(o3d.geometry.get_rotation_matrix_from_xyz(np.array([0., 0., rp.heading(rp.gpst).mean()])))
@@ -142,7 +142,7 @@ for idx, t in tqdm(enumerate(sdr[0].pulse_time[8173: 8173 + 128])):
 
 del vert_xyz_gpu
 del tri_norm_gpu
-del tri_indices_gpu
+del tri_indices_gpu'''
 
 '''plt.figure()
 plt.imshow(db(np.fft.fft(range_profile, axis=0)))
@@ -198,8 +198,12 @@ o3d.visualization.draw_geometries([ray_cloud, full_mesh], zoom=.2, front=[*platf
 # Calculate normal vectors for center points
 # Experiments in scaling for JPEG file
 from sklearn.preprocessing import QuantileTransformer
-from scipy.ndimage import gaussian_filter, binary_dilation, binary_erosion
+from scipy.ndimage import gaussian_filter, binary_dilation, binary_erosion, binary_fill_holes
 from scipy.signal import convolve2d
+import skimage.restoration as resto
+from skimage.feature import canny, multiscale_basic_features
+from skimage.segmentation import chan_vese
+from PIL import Image
 
 
 def anisodiff(img, niter=1, kappa=50, gamma=0.1, step=(1., 1.), option=1):
@@ -311,26 +315,73 @@ def std_convoluted(image, N):
     ns = convolve2d(ones, kernel, mode="same")
 
     return np.sqrt((s2 - s ** 2 / ns) / ns)
-mag_data = np.sqrt(abs(bg.refgrid))
+
+
+asi_data = sdr.loadASI(sdr.files['asi'])[:, :7720]
+mag_data = np.sqrt(abs(asi_data))
+phase_data = np.angle(asi_data)
+
+print('Denoising...')
+mag_data = anisodiff(mag_data, 5, gamma=.25, kappa=1000)
 
 # mag_data = np.sqrt(abs(sdr.loadASI(sdr.files['asi'][0])))
-nbits = 128
-plot_data_init = QuantileTransformer(output_distribution='normal').fit(
+print('Binning...')
+nbits = 256
+plot_data = QuantileTransformer(output_distribution='normal').fit(
     mag_data[mag_data > 0].reshape(-1, 1)).transform(mag_data.reshape(-1, 1)).reshape(mag_data.shape)
-plot_data = plot_data_init
 max_bin = 3
 hist_counts, hist_bins = \
     np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
 while hist_counts[-1] == 0:
-    max_bin -= .2
+    max_bin -= .01
     hist_counts, hist_bins = \
         np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
-scaled_data = np.digitize(plot_data_init, hist_bins)
-gauss_data = anisodiff(scaled_data, 10, kappa=100)#  + std_convoluted(scaled_data, 2)
-plt.figure(); plt.imshow(gauss_data); plt.axis('tight'); plt.show()
+scaled_data = np.sqrt(np.digitize(plot_data, hist_bins))
+denoised = multiscale_basic_features(scaled_data)
+nsub = int(np.round(np.sqrt(denoised.shape[2])))
+plt.figure('Features')
+for n in range(denoised.shape[2]):
+    plt.subplot(nsub, nsub, n + 1)
+    if denoised[:, :, n].min() >= 0:
+        denoised[:, :, n] = denoised[:, :, n] / denoised[:, :, n].max()
+    else:
+        denoised[:, :, n] = denoised[:, :, n] / abs(denoised[:, :, n]).max()
+    plt.imshow(denoised[:, :, n], origin='lower')
+    plt.axis('off')
 
-shadowmask = binary_dilation(binary_erosion(gauss_data < 8))
-plt.figure(); plt.imshow(shadowmask); plt.axis('tight'); plt.show()
+print('Chan-Vese...')
+cv = chan_vese(
+    scaled_data,
+    mu=0.25,
+    lambda1=1,
+    lambda2=1,
+    tol=1e-3,
+    max_num_iter=200,
+    dt=0.5,
+    init_level_set="checkerboard",
+    extended_output=True,
+)
+
+plt.figure('Chan_Vese')
+plt.imshow(cv[1])
+
+
+# selection = gauss_data[:, 5400]
+plt.figure('Section')
+plt.plot(scaled_data[:, 5400])
+plt.plot(cv[1][:, 5400])
+
+
+'''shadowmask = binary_fill_holes(binary_dilation(binary_erosion(scaled_data < 1.)))
+plt.figure()
+plt.imshow(shadowmask)
+plt.axis('tight')
 
 line_heading = (rp.heading(rp.gpst).mean() - np.pi / 2)
-np.arange(bg.shape[0]) * (np.sin(line_heading) + 1j * np.cos(line_heading))
+plt.figure()
+plt.imshow(shadowmask)
+plt.axis('tight')
+plt.plot(np.arange(bg.shape[0]) * np.cos(line_heading) + 5250, np.arange(bg.shape[0]))
+plt.show()'''
+
+# tree_kernel = denoised[611:655, 5079:5115]
