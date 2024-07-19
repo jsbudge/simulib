@@ -1,4 +1,5 @@
 import contextlib
+import itertools
 from typing import List, Any
 import torch
 from torch import nn, optim, Tensor
@@ -6,6 +7,7 @@ from torch.nn import functional as tf
 from abc import abstractmethod
 from pytorch_lightning import LightningModule
 import numpy as np
+from skimage.filters import gabor_kernel
 import matplotlib.pyplot as plt
 
 
@@ -21,7 +23,24 @@ def init_weights(m):
         if hasattr(m, 'bias'):
             if m.bias is not None:
                 m.bias.data.fill_(.01)
-                
+
+
+class GaborBank(LightningModule):
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        kernels = np.zeros((16, 1, 35, 35))
+        freqs = [.1, .3, .5, .7]
+        orients = [np.pi / 2, 0., np.pi / 4, 5 * np.pi / 8]
+        for idx, (f, o) in enumerate(itertools.product(freqs, orients)):
+            ker = gabor_kernel(f, o).real
+            kernels[idx, 0, 17 - ker.shape[0] // 2:17 + ker.shape[0] // 2 + 1, 17 - ker.shape[1] // 2:17 + ker.shape[1] // 2 + 1] = ker
+        self.kernel = nn.Conv2d(1, 16, 35, 1, 17)
+        self.kernel.weight = nn.Parameter(torch.tensor(kernels, dtype=torch.float32), requires_grad=False)
+        
+    def forward(self, x):
+        return self.kernel(x)
+
                 
 class FlatModule(LightningModule):
 
@@ -76,8 +95,11 @@ class ImageSegmenter(FlatModule):
         self.automatic_optimization = False
         out_sz = 256
 
-        # Encoder
-        self.channel_conv = nn.Conv2d(in_channels, channel_sz, 1, 1, 0)
+        self.gabor = GaborBank().to(self.device)
+
+        self.channel_conv = nn.Sequential(
+            nn.Conv2d(16, channel_sz, 1, 1, 0),
+        )
         self.big_features = nn.Sequential(
             nn.Conv2d(channel_sz, channel_sz, 15, 1, 7),
             nn.GELU(),
@@ -134,7 +156,7 @@ class ImageSegmenter(FlatModule):
         self.example_input_array = torch.randn((1, in_channels, 256, 256))
 
     def forward(self, inp: Tensor, **kwargs) -> Tensor:
-        inp = self.channel_conv(inp)
+        inp = self.channel_conv(self.gabor(inp))
         z = self.feed_stack[0](inp) + self.big_features(inp)
         z = self.feed_stack[1](z) + self.medium_features(inp)
         z = self.feed_stack[2](z) + self.little_features(inp)

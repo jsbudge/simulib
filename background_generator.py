@@ -1,6 +1,6 @@
 import cupy
 import numpy as np
-from SDRParsing import load
+from SDRParsing import load, loadASIFile
 from cuda_mesh_kernels import readCombineMeshFile, calcInitSpread, calcIntersection
 from cuda_kernels import getMaxThreads, cpudiff, applyRadiationPatternCPU
 from grid_helper import SDREnvironment, mesh
@@ -202,8 +202,10 @@ from scipy.ndimage import gaussian_filter, binary_dilation, binary_erosion, bina
 from scipy.signal import convolve2d
 import skimage.restoration as resto
 from skimage.feature import canny, multiscale_basic_features
+from skimage.filters import gabor
 from skimage.segmentation import chan_vese
 from PIL import Image
+from pathlib import Path
 
 
 def anisodiff(img, niter=1, kappa=50, gamma=0.1, step=(1., 1.), option=1):
@@ -304,29 +306,18 @@ def anisodiff(img, niter=1, kappa=50, gamma=0.1, step=(1., 1.), option=1):
     return imgout
 
 
-def std_convoluted(image, N):
-    im = np.array(image, dtype=float)
-    im2 = im ** 2
-    ones = np.ones(im.shape)
-
-    kernel = np.ones((2 * N + 1, 2 * N + 1))
-    s = convolve2d(im, kernel, mode="same")
-    s2 = convolve2d(im2, kernel, mode="same")
-    ns = convolve2d(ones, kernel, mode="same")
-
-    return np.sqrt((s2 - s ** 2 / ns) / ns)
-
-
-asi_data = sdr.loadASI(sdr.files['asi'])[:, :7720]
+asi_data = sdr.loadASI(sdr.files['asi'])[:, :7200]
 mag_data = np.sqrt(abs(asi_data))
 phase_data = np.angle(asi_data)
+
+output_image = np.zeros((*mag_data.shape, 3))
 
 print('Denoising...')
 mag_data = anisodiff(mag_data, 5, gamma=.25, kappa=1000)
 
 # mag_data = np.sqrt(abs(sdr.loadASI(sdr.files['asi'][0])))
 print('Binning...')
-nbits = 256
+nbits = 255
 plot_data = QuantileTransformer(output_distribution='normal').fit(
     mag_data[mag_data > 0].reshape(-1, 1)).transform(mag_data.reshape(-1, 1)).reshape(mag_data.shape)
 max_bin = 3
@@ -336,42 +327,55 @@ while hist_counts[-1] == 0:
     max_bin -= .01
     hist_counts, hist_bins = \
         np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
-scaled_data = np.sqrt(np.digitize(plot_data, hist_bins))
-denoised = multiscale_basic_features(scaled_data)
-nsub = int(np.round(np.sqrt(denoised.shape[2])))
-plt.figure('Features')
-for n in range(denoised.shape[2]):
-    plt.subplot(nsub, nsub, n + 1)
-    if denoised[:, :, n].min() >= 0:
-        denoised[:, :, n] = denoised[:, :, n] / denoised[:, :, n].max()
-    else:
-        denoised[:, :, n] = denoised[:, :, n] / abs(denoised[:, :, n]).max()
-    plt.imshow(denoised[:, :, n], origin='lower')
-    plt.axis('off')
+output_image[:, :, 0] = np.digitize(plot_data, hist_bins)
 
-print('Chan-Vese...')
-cv = chan_vese(
-    scaled_data,
-    mu=0.25,
-    lambda1=1,
-    lambda2=1,
-    tol=1e-3,
-    max_num_iter=200,
-    dt=0.5,
-    init_level_set="checkerboard",
-    extended_output=True,
-)
+mag_data = np.gradient(np.unwrap(phase_data, axis=0))[0]
+mag_data = mag_data - np.mean(mag_data, axis=1)[:, None]
+plot_data = QuantileTransformer(output_distribution='normal').fit(
+    mag_data[mag_data > 0].reshape(-1, 1)).transform(mag_data.reshape(-1, 1)).reshape(mag_data.shape)
+max_bin = 3
+hist_counts, hist_bins = \
+    np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
+while hist_counts[-1] == 0:
+    max_bin -= .01
+    hist_counts, hist_bins = \
+        np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
+output_image[:, :, 1] = np.digitize(plot_data, hist_bins)
 
-plt.figure('Chan_Vese')
-plt.imshow(cv[1])
+mag_data = np.gradient(np.unwrap(phase_data, axis=1))[1]
+mag_data = mag_data - np.mean(mag_data, axis=0)[None, :]
+plot_data = QuantileTransformer(output_distribution='normal').fit(
+    mag_data[mag_data > 0].reshape(-1, 1)).transform(mag_data.reshape(-1, 1)).reshape(mag_data.shape)
+max_bin = 3
+hist_counts, hist_bins = \
+    np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
+while hist_counts[-1] == 0:
+    max_bin -= .01
+    hist_counts, hist_bins = \
+        np.histogram(plot_data, bins=np.linspace(-1, max_bin, nbits))
+output_image[:, :, 2] = np.digitize(plot_data, hist_bins)
 
+plt.imshow(Image.fromarray(output_image.astype(np.uint8)))
+plt.show()
 
-# selection = gauss_data[:, 5400]
-plt.figure('Section')
-plt.plot(scaled_data[:, 5400])
-plt.plot(cv[1][:, 5400])
+plt.figure(); plt.imshow(output_image[100:900, 5000:5700, 0]); plt.show()
+gabor_data = asi_data[100:900, 5000:5700] * 1e11
 
+freqs = [.1, .3, .5, .7]
+orients = [np.pi / 2, 0., np.pi / 4, 5 * np.pi / 8]
+plt.figure('Gabors')
+idx = 1
+for f in freqs:
+    for o in orients:
+        plt.subplot(len(freqs), len(orients), idx)
+        plt.title(f'freq {f}, orient {o}')
+        gdata = gabor(gabor_data, f, o, n_stds=3)
+        gdata = np.sqrt(gdata[0]**2 + gdata[1]**2)
+        plt.imshow(abs(gdata), clim=[0, gdata.std()])
+        idx += 1
+plt.show()
 
+# Image.fromarray(scaled_data.astype(np.float32)).convert('L').save(f'./data/base_{basename}.png')
 '''shadowmask = binary_fill_holes(binary_dilation(binary_erosion(scaled_data < 1.)))
 plt.figure()
 plt.imshow(shadowmask)

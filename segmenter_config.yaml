@@ -7,13 +7,13 @@ swa_start: .5
 log_epoch: 10
 save_model: True
 transform_data: False
-warm_start: True
+warm_start: False
 loss_landscape: False
 output_images: False
 model_type: Segmentation
 patience: 150
 is_tuning: False
-max_epochs: 15
+max_epochs: 1500
 exp_name: train-segmentation
 init_task: True
 log_dir: ./logs
@@ -30,5 +30,5 @@ dataset_params:
   var: 49527137064.739006
   noise_level: 0.
 model_params:
-  in_channels: 4
+  in_channels: 1
   channel_sz: 128

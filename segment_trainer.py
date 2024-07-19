@@ -107,6 +107,6 @@ if trainer.is_global_zero:
     plt.subplot(4, 2, 8)
     plt.title('Nothing Detection')
     plt.imshow(recon[3, ...])
-    plt.show()
+    plt.show(block=True)
     if param_dict['init_task']:
         task.close()
