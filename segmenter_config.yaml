@@ -1,21 +1,21 @@
 LR: 0.001
 weight_decay: 0.01
-scheduler_gamma: 0.5
-betas: [.07, .9]
+scheduler_gamma: 0.8
+betas: [.07, .99]
 step_size: 1
 swa_start: .5
 log_epoch: 10
 save_model: True
 transform_data: False
-warm_start: False
+warm_start: True
 loss_landscape: False
 output_images: False
 model_type: Segmentation
 patience: 150
 is_tuning: False
-max_epochs: 1500
+max_epochs: 150
 exp_name: train-segmentation
-init_task: True
+init_task: False
 log_dir: ./logs
 dataset_params:
   data_path: ./data
@@ -31,4 +31,4 @@ dataset_params:
   noise_level: 0.
 model_params:
   in_channels: 1
-  channel_sz: 128
+  channel_sz: 64

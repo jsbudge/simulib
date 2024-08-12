@@ -1,16 +1,16 @@
 import numpy as np
 from numba.cuda.random import create_xoroshiro128p_states
 
-from simulib.simulation_functions import llh2enu, db, genPulse
-from simulib.cuda_kernels import getMaxThreads, backproject, genRangeProfile
-from simulib.grid_helper import SDREnvironment
-from simulib.platform_helper import SDRPlatform, RadarPlatform
+from simulation_functions import llh2enu, db, genPulse
+from cuda_kernels import getMaxThreads, backproject, genRangeProfile
+from grid_helper import SDREnvironment
+from platform_helper import SDRPlatform, RadarPlatform
 import cupy as cupy
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.io as pio
 from tqdm import tqdm
-from data_converter.SDRParsing import load, SDRParse
+from SDRParsing import load, SDRParse
 
 # pio.renderers.default = 'svg'
 pio.renderers.default = 'browser'
@@ -266,27 +266,28 @@ if __name__ == '__main__':
     # bg_file = '/data6/Tower_Redo_Again/tower_redo_SAR_03292023_120731.sar'
     # bg_file = '/data5/SAR_DATA/2022/09272022/SAR_09272022_103053.sar'
     # bg_file = '/data5/SAR_DATA/2019/08072019/SAR_08072019_100120.sar'
-    bg_file = '/data6/SAR_DATA/2024/04112024/SAR_04112024_100348.sar'
+    # bg_file = '/data6/SAR_DATA/2024/04112024/SAR_04112024_100348.sar'
     # bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_122801.sar'
     # bg_file = '/data6/SAR_DATA/2023/07132023/SAR_07132023_123050.sar'
-    upsample = 4
+    bg_file = '/home/jeff/SDR_DATA/RAW/08052024/SAR_08052024_110111.sar'
+    upsample = 2
     poly_num = 1
     rotate_grid = True
     use_ecef = True
     ipr_mode = False
-    cpi_len = 256
+    cpi_len = 64
     plp = 0
     partial_pulse_percent = .2
     debug = True
-    pts_per_m = 20
-    grid_width = 20
-    grid_height = 20
+    pts_per_m = 1
+    grid_width = 200
+    grid_height = 200
     channel = 0
     fdelay = 2.0
-    origin = (30.5624864261, -86.4363868067, 18.03066)
+    origin = (40.138544, -111.664394, 1381.)
 
     print('Loading SDR file...')
-    sdr = load(bg_file, progress_tracker=True, use_jump_correction=False)
+    sdr = load(bg_file, import_pickle=False, export_pickle=False, progress_tracker=True, use_jump_correction=False)
     print('Generating platform...', end='')
     bg, rp = getRadarAndEnvironment(bg_file, channel)
     print('Done.')
@@ -371,3 +372,29 @@ if __name__ == '__main__':
         e, n, u = llh2enu(sdr.gps_data['lat'].values, sdr.gps_data['lon'].values, sdr.gps_data['alt'].values, bg.ref)
         plt.plot(rpos[:, 2] - u)
         plt.show()
+
+        plt.figure('Chirp and Matched Filter')
+        nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
+            rp.getRadarParams(fdelay, plp, upsample))
+        pulse = np.fft.fft(sdr[0].cal_chirp, fft_len)
+        mfilt = sdr.genMatchedFilter(0, fft_len=fft_len)
+        freqs = np.fft.fftshift(np.fft.fftfreq(fft_len, 1 / rp.fs))
+        plt.subplot(2, 1, 1)
+        plt.plot(freqs, np.fft.fftshift(db(pulse)))
+        plt.subplot(2, 1, 2)
+        plt.plot(freqs, np.fft.fftshift(db(mfilt)))
+
+        from glob import glob
+
+        rchirp = np.fft.fft(sdr[0].ref_chirp)
+        waves = glob('/data6/Jeff/generated_waveforms/*.wave')
+        minima = np.inf
+        for w in waves:
+            with open(w, 'rb') as f:
+                wave = np.fromfile(f, np.float32)
+            wchirp = np.fft.fft(wave[2:], len(rchirp))
+            diffy = abs(np.sum(rchirp - wchirp))
+            if diffy < minima:
+                minima = diffy + 0.0
+                print(f'{w} with {minima}')
+            # print(f'Diff for {w} is {abs(np.sum(rchirp - wchirp))}')

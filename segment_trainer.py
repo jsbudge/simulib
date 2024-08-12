@@ -1,6 +1,9 @@
 from glob import glob
+
+from PIL import Image
 from clearml import Task
 import torch
+from torch.nn import functional as tf
 from pytorch_lightning import Trainer, loggers, seed_everything
 from pytorch_lightning.callbacks import EarlyStopping, StochasticWeightAveraging
 import yaml
@@ -24,7 +27,7 @@ data = RCSModule(**param_dict["dataset_params"])
 data.setup()
 
 # Get the model, experiment, logger set up
-model = ImageSegmenter(**param_dict['model_params'], params=param_dict)
+model = ImageSegmenter(**param_dict['model_params'], label_sz=data.train_dataset.label_sz, params=param_dict)
 print('Setting up model...')
 tag_warm = 'new_model'
 if param_dict['warm_start']:
@@ -88,25 +91,50 @@ if trainer.is_global_zero:
     plt.imshow(labels[0, ...])
     plt.subplot(4, 2, 2)
     plt.title('Building Detection')
-    plt.imshow(recon[0, ...])
+    plt.imshow(recon[0, ...], clim=[0, 1])
     plt.subplot(4, 2, 3)
     plt.title('Trees')
     plt.imshow(labels[1, ...])
     plt.subplot(4, 2, 4)
     plt.title('Tree Detection')
-    plt.imshow(recon[1, ...])
+    plt.imshow(recon[1, ...], clim=[0, 1])
     plt.subplot(4, 2, 5)
     plt.title('Roads')
     plt.imshow(labels[2, ...])
     plt.subplot(4, 2, 6)
     plt.title('Road Detection')
-    plt.imshow(recon[2, ...])
+    plt.imshow(recon[2, ...], clim=[0, 1])
     plt.subplot(4, 2, 7)
-    plt.title('Nothing')
+    plt.title('Fields')
     plt.imshow(labels[3, ...])
     plt.subplot(4, 2, 8)
-    plt.title('Nothing Detection')
-    plt.imshow(recon[3, ...])
+    plt.title('Field Detection')
+    plt.imshow(recon[3, ...], clim=[0, 1])
+
+    # Load in the whole deal
+    print('Loading in test image for segmentation...')
+    model.to('cuda:1')
+    idata = np.array(Image.open('/home/jeff/repo/simulib/data/base_SAR_07082024_112333.png')) / 65535.
+    segment_image = np.zeros((*idata.shape, 3), dtype=np.uint8)
+    colors = np.array([(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255), (0, 0, 0)])
+    seg_size = 512
+    for x in range(0, segment_image.shape[0], seg_size):
+        for y in range(0, segment_image.shape[1], seg_size):
+            tense = torch.tensor(idata[x:x + seg_size, y:y + seg_size], dtype=torch.float32, device='cuda:1')
+            if tense.shape[0] < seg_size or tense.shape[1] < seg_size:
+                tense = tf.pad(tense, (0, seg_size - tense.shape[1], 0, seg_size - tense.shape[0]))
+            sdata = model(tense.unsqueeze(0).unsqueeze(0))[0].squeeze(0).cpu().data.numpy()
+            sdata_arg = np.argmax(sdata, axis=0)
+            cdata = np.zeros((seg_size, seg_size, 3), dtype=np.uint8)
+            for seg in range(sdata.shape[0]):
+                cdata[sdata_arg == seg, :] = colors[seg][None, :]
+            segment_image[x:x + min(seg_size, segment_image.shape[0] - x),
+            y:y + min(seg_size, segment_image.shape[1] - y), :] = cdata[:min(seg_size, segment_image.shape[0] - x),
+                                                             :min(seg_size, segment_image.shape[1] - y), :]
+    plt.figure('Segmented Image')
+    plt.imshow(idata, cmap='gray')
+    plt.imshow(segment_image, alpha=.5)
+    plt.axis('tight')
     plt.show(block=True)
     if param_dict['init_task']:
         task.close()
