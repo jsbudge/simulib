@@ -1,3 +1,4 @@
+import contextlib
 import cupy
 import numpy as np
 import torch
@@ -14,7 +15,8 @@ from platform_helper import SDRPlatform, RadarPlatform
 from image_segment_loader import prepImage
 from scipy.ndimage import sobel, gaussian_filter, binary_dilation, binary_erosion, binary_fill_holes
 from scipy.interpolate import interpn
-from skimage.measure import label
+from skimage.measure import label, find_contours
+from shapely.geometry import Polygon, Point
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from matplotlib.tri import Triangulation
@@ -28,80 +30,15 @@ c0 = 299792458.0
 fs = 2e9
 DTR = np.pi / 180
 
-fnme = '/data6/SAR_DATA/2024/08052024/SAR_08052024_105936.sar'
-# sdr = load(fnme, progress_tracker=True)
+fnme = '/data6/SAR_DATA/2024/07082024/SAR_07082024_112333.sar'
+sdr = load(fnme, progress_tracker=True)
 wavelength = c0 / 9.6e9
 ant_gain = 25
 transmit_power = 100
 
 # Prep the background ASI image
-# bg = SDREnvironment(sdr)
-# rp = SDRPlatform(sdr, origin=bg.ref)
-
-png_fnme = '/home/jeff/repo/simulib/logs/base_SAR_06212024_124710.png'
-
-background = np.array(Image.open(png_fnme)) / 65535.
-chip = background[:1024, 5000:6024]
-
-wavelets = ['coif4', 'db1', 'db4', 'haar', 'coif1', 'bior1.1', 'rbio1.1']
-
-plt.figure('Wavelets')
-for idx, w in enumerate(wavelets):
-    try:
-        plt.subplot(3, 3, idx + 1)
-        plt.title(w)
-        wave_coeffs = wavedec2(chip, w, level=3)
-        plt.imshow(wave_coeffs[1][0])
-        plt.axis('off')
-    except:
-        continue
-plt.show()
-
-'''shadows = binary_fill_holes(binary_dilation(binary_erosion(chip == 0)))
-blobs, nblobs = label(shadows, return_num=True)
-
-selector = np.zeros_like(chip)
-
-for b in tqdm(range(1, nblobs)):
-    picktree = blobs == b
-    shadow_start = np.cumsum(picktree, axis=0)
-    shadow_start = shadow_start * np.gradient(shadow_start, axis=0)
-    shadow_start = np.argmax(shadow_start, axis=0)
-    shadow_height = np.sum(picktree, axis=0) * .25
-    height_from_shadow = shadow_height / np.tan(np.pi / 2 - rp.dep_ang)
-    layover_heights = height_from_shadow / np.tan(np.pi / 2 - rp.dep_ang)
-
-    layover_pix = np.ceil(layover_heights / .25).astype(int)
-
-    tree_correction = (np.ceil((shadow_start[shadow_start != 0].max() - shadow_start[shadow_start != 0]) * .25 /
-                               np.tan(np.pi / 2 - rp.dep_ang) ** 2).astype(int) + layover_pix.max() -
-                       layover_pix[shadow_start != 0])
-    shadow_start[shadow_start != 0] += tree_correction
-
-    tree_mask = np.zeros_like(picktree)
-    for n in range(tree_mask.shape[1]):
-        tree_mask[shadow_start[n]:shadow_start[n] + layover_pix[n], n] = 1
-    tree_mask = binary_dilation(binary_erosion(tree_mask))
-    hull = ConvexHull(np.array(np.where(picktree)).T)
-    if hull.volume - np.sum(picktree) > 150:
-        print(f'Blob {b} fails convex test.')
-        plt.figure(f'Blob {b}')
-        plt.imshow(picktree)'''
-
-    # selector += chip * tree_mask
-
-'''plt.figure()
-plt.imshow(selector)
-
-plt.figure()
-plt.subplot(2, 2, 1)
-plt.imshow(chip)
-plt.subplot(2, 2, 2)
-plt.imshow(blobs)
-plt.subplot(2, 2, 3)
-plt.imshow(chip * tree_mask)
-plt.subplot(2, 2, 4)
-plt.imshow(picktree)
+bg = SDREnvironment(sdr)
+rp = SDRPlatform(sdr, origin=bg.ref)
 
 # Load the segmentation model
 with open('./segmenter_config.yaml') as y:
@@ -111,12 +48,26 @@ print('Setting up model...')
 segmenter.load_state_dict(torch.load('./model/inference_model.state'))
 segmenter.to('cuda:1')
 
-activation = {}
+png_fnme = '/home/jeff/repo/simulib/data/base_SAR_07082024_112333.png'
+
+background = np.array(Image.open(png_fnme)) / 65535.
+chip = background[:512, :512]
+
+segment = np.zeros((5, *background.shape))
+
+for x in tqdm(range(0, background.shape[0] - 512, 256)):
+    for y in range(0, background.shape[1] - 512, 256):
+        tense = torch.tensor(background[x:x + 512, y:y + 512], dtype=torch.float32,
+                             device=segmenter.device).view(1, 1, 512, 512)
+        segment[:, x:x + 512, y:y + 512] = segmenter(tense).cpu()[0, ...].data.numpy()
+
+'''activation = {}
 
 
 def get_activation(name):
     def hook(model, input, output):
-        activation[name] = output.detach()
+        with contextlib.suppress(AttributeError):
+            activation[name] = output.detach()
 
     return hook
 
@@ -140,3 +91,145 @@ for key, activ in activation.items():
             plt.imshow(act[x])
             plt.axis('off')
 plt.show()'''
+
+pcd = o3d.geometry.TriangleMesh()
+
+'''
+============================================================
+=======================BUILDINGS============================
+'''
+# Get the buildings
+buildings = binary_dilation(binary_erosion(segment[0] > .9))
+
+# Blob them
+blabels, nlabels = label(buildings, return_num=True)
+
+# Run through and get shadows for height estimation
+for n in tqdm(range(1, nlabels)):
+    bding = blabels == n
+
+    # Locate the shadow
+    ypts, xpts = np.where(bding)
+    bding_extent = ypts.max() - ypts.min()
+    ymin = ypts.min() - bding_extent
+    xmin = xpts.min()
+    shadow_block = background[ymin:ypts.max(), xmin:xpts.max()]
+    bding_block = bding[ymin:ypts.max(), xmin:xpts.max()]
+
+    shadows = binary_dilation(binary_erosion(shadow_block == 0))
+
+    # Get connected shadows
+    conn = label(shadows + bding_block)
+    reconn = (conn == conn[bding_block].min()) ^ bding_block
+    mhght = 0
+    for m in range(reconn.shape[1]):
+        try:
+            bmin = np.where(bding_block[:, m])[0].max()
+            reconn[bmin:, m] = False
+            mhght = max(mhght, sum(reconn[:, m]))
+        except ValueError:
+            continue
+
+    mhght = mhght * .25
+    # Calculate height from image angle
+    bding_height = mhght / np.tan(rp.dep_ang)
+    foreshortening = mhght / np.tan(rp.dep_ang)**2
+
+    contours = np.concatenate(find_contours(bding_block.astype(int), .9))
+    poly = Polygon(contours)
+    poly_s = poly.simplify(2)
+
+    innerpts = np.array([[y, x] for y, x in zip(*np.where(bding_block)) if Point(y, x).within(poly_s)][::5])
+    contours = np.array(poly_s.boundary.coords)
+
+    bcld = o3d.geometry.PointCloud()
+    bpt_list = [np.array([contours[:, 1] * 0.25 + ymin * 0.25, contours[:, 0] * 0.25 + xmin * 0.25,
+                          np.ones(contours.shape[0]) * bding_height]),
+                np.array([innerpts[:, 1] * 0.25 + ymin * 0.25, innerpts[:, 0] * 0.25 + xmin * 0.25,
+                          np.ones(innerpts.shape[0]) * bding_height]),
+                np.array([innerpts[:, 1] * 0.25 + ymin * 0.25, innerpts[:, 0] * 0.25 + xmin * 0.25,
+                          np.ones(innerpts.shape[0]) * 0])
+                ]
+    bpt_list.extend(
+        np.array(
+            [
+                contours[:, 1] * 0.25 + ymin * 0.25,
+                contours[:, 0] * 0.25 + xmin * 0.25,
+                np.ones(contours.shape[0]) * inter_height,
+            ]
+        )
+        for inter_height in np.arange(0, mhght, 0.5)
+    )
+    bpts = np.concatenate(bpt_list, axis=1)
+    bcld.points = o3d.utility.Vector3dVector(bpts.T)
+    bcld.estimate_normals()
+    bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([1., 5., 10., 100.]))
+    pcd += bmesh
+
+
+'''
+============================================================
+=======================TREES============================
+'''
+# Get the trees
+trees = binary_dilation(binary_erosion(segment[1] > .9))
+
+# Blob them
+blabels, nlabels = label(trees, return_num=True)
+
+# Run through and get shadows for height estimation
+for n in tqdm(range(1, nlabels)):
+    bding = blabels == n
+
+    # Locate the shadow
+    ypts, xpts = np.where(bding)
+    bding_extent = ypts.max() - ypts.min()
+    ymin = ypts.min() - bding_extent
+    xmin = xpts.min()
+    shadow_block = background[ymin:ypts.max(), xmin:xpts.max()]
+    bding_block = bding[ymin:ypts.max(), xmin:xpts.max()]
+
+    shadows = binary_dilation(binary_erosion(shadow_block == 0))
+
+    # Get connected shadows
+    conn = label(shadows + bding_block)
+    reconn = (conn == conn[bding_block].min()) ^ bding_block
+    mhght = 0
+    for m in range(reconn.shape[1]):
+        try:
+            bmin = np.where(bding_block[:, m])[0].max()
+            reconn[bmin:, m] = False
+            mhght = max(mhght, sum(reconn[:, m]))
+        except ValueError:
+            continue
+
+    mhght = mhght * .25
+    # Calculate height from image angle
+    bding_height = mhght / np.tan(rp.dep_ang)
+    foreshortening = mhght / np.tan(rp.dep_ang)**2
+
+    # Center of mass
+    xmass = xpts.mean()
+    ymass = ypts.mean()
+
+    contours = np.concatenate(find_contours(bding.astype(int), .9))
+    innerpts = np.array(np.where(bding)).T
+    innerdists = np.zeros(innerpts.shape[0])
+
+    for i in range(innerpts.shape[0]):
+        innerdists[i] = np.linalg.norm(innerpts[i] - contours, axis=1).min()
+
+    shrubbery_size = mhght * .33
+    hght_weights = innerdists * .25
+    hght_weights = (hght_weights / hght_weights.max())**(1/4) * shrubbery_size
+
+    tcld = o3d.geometry.PointCloud()
+    tpts = np.concatenate((np.array([innerpts[:, 0] * .25, innerpts[:, 1] * .25, mhght - hght_weights]),
+                           np.array([innerpts[:, 0] * .25, innerpts[:, 1] * .25, mhght + hght_weights])),
+                          axis=1)
+    tcld.points = o3d.utility.Vector3dVector(tpts.T)
+    tcld.estimate_normals()
+    tmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(tcld, o3d.utility.DoubleVector([1., 5., 10., 50.]))
+    pcd += tmesh
+
+o3d.visualization.draw_geometries([pcd])

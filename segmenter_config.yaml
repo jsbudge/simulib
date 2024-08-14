@@ -13,9 +13,9 @@ output_images: False
 model_type: Segmentation
 patience: 150
 is_tuning: False
-max_epochs: 150
+max_epochs: 1500
 exp_name: train-segmentation
-init_task: False
+init_task: True
 log_dir: ./logs
 dataset_params:
   data_path: ./data
