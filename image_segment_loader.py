@@ -161,5 +161,5 @@ if __name__ == '__main__':
     plt.imshow(denoised, cmap='gray')
     plt.show()
 
-    stem_name = Path(asi_fnme).stem[:19]
-    imageio.imwrite(f'./data/base_{stem_name}.png', renoised.astype(np.uint16))
+    # stem_name = Path(asi_fnme).stem[:19]
+    # imageio.imwrite(f'./data/base_{stem_name}.png', renoised.astype(np.uint16))

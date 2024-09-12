@@ -345,7 +345,7 @@ class ImageSegmenter(FlatModule):
             nn.Conv2d(in_channels, channel_sz, 1, 1, 0),
             nn.GELU(),
             nn.MaxPool2d(2),
-            nn.Conv2d(channel_sz, channel_sz, 3, 1, 1),
+            nn.Conv2d(channel_sz, channel_sz, 33, 1, 16),
             nn.GELU(),
         )
         self.wavelet_0 = nn.Sequential(
@@ -368,10 +368,10 @@ class ImageSegmenter(FlatModule):
         )
         self.fusion_0 = nn.Sequential(
             nn.LayerNorm(out_sz // 2),
-            LKA(channel_sz, kernel_sizes=(5, 3), dilation=9),
-            nn.Conv2d(channel_sz, channel_sz, 3, 1, 1),
+            LKA(channel_sz, kernel_sizes=(15, 7), dilation=9),
+            nn.Conv2d(channel_sz, channel_sz, 7, 1, 3),
             nn.GELU(),
-            nn.Conv2d(channel_sz, channel_sz, 3, 1, 1),
+            nn.Conv2d(channel_sz, channel_sz, 7, 1, 3),
             nn.GELU(),
             nn.Conv2d(channel_sz, channel_sz, 3, 1, 1),
             nn.GELU(),

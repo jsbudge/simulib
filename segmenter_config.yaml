@@ -1,10 +1,10 @@
 LR: 0.001
-weight_decay: 0.01
+weight_decay: 0.1
 scheduler_gamma: 0.8
 betas: [.07, .99]
 step_size: 1
 swa_start: .5
-log_epoch: 10
+log_epoch: 50
 save_model: True
 transform_data: False
 warm_start: True

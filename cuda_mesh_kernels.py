@@ -331,17 +331,21 @@ def readCombineMeshFile(fnme, points=100000):
     mesh.normalize_normals()
     return mesh
 
+def checkBoxIntersection(ray, ray_origin, box_max, box_min, box_center):
+    if ray.shape[0] > 1:
+        norm_ray = ray_origin + ray / np.linalg.norm(ray, axis=1)[:, None] * np.linalg.norm(ray_origin - box_center)
+        return np.logical_and(np.all(box_max - norm_ray > 0, axis=1), np.all(norm_ray - box_min > 0, axis=1))
+    else:
+        norm_ray = ray_origin + ray / np.linalg.norm(ray) * np.linalg.norm(ray_origin - box_center)
+        return bool(np.all(box_max - norm_ray > 0) and np.all(norm_ray - box_min > 0))
+
 
 if __name__ == '__main__':
-    scalings = [30., .25, 41.08, 1.8, 60, 1., 1., .8, 12., 1., 156.25
-                ]
     import matplotlib.pyplot as plt
     from simulation_functions import db, genChirp, azelToVec
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/helic.obj')
-    mesh.scale(1 / 3., center=mesh.get_center())
-    # mesh = sum([t.mesh for t in full_mesh.meshes])
-    obs_pt = np.array([100., 0., 50.])
+    mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=260000)
+    obs_pt = np.array([0., -300., 500.])
     nsam = 256
     nr = 4096
     fc = 32.0e9
@@ -349,7 +353,62 @@ if __name__ == '__main__':
     fft_len = findPowerOf2(nsam + nr)
     up_fft_len = fft_len * 4
 
-    print('Generating Mesh...')
+    # Generate bounding box tree
+    min_pts = np.asarray(mesh.vertices).min(axis=0)
+    max_pts = np.asarray(mesh.vertices).max(axis=0)
+    center = mesh.get_center()
+    center[2] = min_pts[2]
+    bounding_pts = [np.array([min_pts[0], min_pts[1], max_pts[2]]),
+                    np.array([min_pts[0], max_pts[1], max_pts[2]]),
+                    np.array([max_pts[0], min_pts[1], max_pts[2]]),
+                    np.array([max_pts[0], max_pts[1], max_pts[2]])]
+    boxes = [o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+        o3d.utility.Vector3dVector(
+            np.concatenate((bounding_pts[0].reshape(1, 3), center.reshape(1, 3)), axis=0))),
+        o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+            o3d.utility.Vector3dVector(
+                np.concatenate((bounding_pts[1].reshape(1, 3), center.reshape(1, 3)), axis=0))),
+        o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+            o3d.utility.Vector3dVector(
+                np.concatenate((bounding_pts[2].reshape(1, 3), center.reshape(1, 3)), axis=0))),
+        o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+            o3d.utility.Vector3dVector(
+                np.concatenate((bounding_pts[3].reshape(1, 3), center.reshape(1, 3)), axis=0)))
+    ]
+    mesh_quads = [mesh.crop(b) for b in boxes]
+
+    ant_point = mesh.get_center() - obs_pt
+
+    sample_points = mesh.sample_points_poisson_disk(10000)
+
+    face_centers = np.asarray(sample_points.points)
+    face_normals = np.asarray(sample_points.normals)
+
+    tvec = face_centers - obs_pt
+    rng = np.linalg.norm(tvec, axis=1)
+    tvec = tvec / np.linalg.norm(tvec, axis=1)
+    az = np.arctan2(tvec[:, 0], tvec[:, 1])
+    el = -np.arcsin(tvec[:, 2] / rng)
+
+    rho_o = np.array([applyRadiationPatternCPU(e, a,
+                             -np.arcsin(ant_point[2] / np.linalg.norm(ant_point)),
+                             np.arctan2(ant_point[0], ant_point[1]),
+                             -np.arcsin(ant_point[2] / np.linalg.norm(ant_point)),
+                             np.arctan2(ant_point[0], ant_point[1]),
+                             40 * DTR,
+                             40 * DTR) for e, a in zip(el, az)]) * 100
+
+    sigma = np.zeros_like(rho_o) + np.pi / 2
+
+    # Test each ray and find the correct bounding box
+    quad = np.array([checkBoxIntersection(tvec, obs_pt, np.asarray(b.get_max_bound()), np.asarray(b.get_min_bound()), np.asarray(b.get_center())) for b in boxes])
+
+
+
+
+    o3d.visualization.draw_geometries([mesh])
+
+    '''print('Generating Mesh...')
     mverts = np.asarray(mesh.vertices)
     mnorms = np.asarray(mesh.vertex_normals)
 
@@ -408,7 +467,7 @@ if __name__ == '__main__':
     pd = pd_r.get() + 1j * pd_i.get()
     pd = pd / abs(pd).max()
 
-    '''pd_r_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
+    pd_r_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
     pd_i_cpu = np.zeros((nsam, len(pan)), dtype=np.float32)
 
     pd_r_cpu, pd_i_cpu = genRangeProfileFromMeshCPU(face_centers.astype(np.float32), face_normals.astype(np.float32),
@@ -420,7 +479,7 @@ if __name__ == '__main__':
                                                     near_range_s, fs, 10 * DTR,
                                                     10 * DTR, 1e9)
     pd_cpu = pd_r_cpu + 1j * pd_i_cpu
-    pd_cpu = pd_cpu / abs(pd_cpu).max()'''
+    pd_cpu = pd_cpu / abs(pd_cpu).max()
     chirp = np.fft.fft(genChirp(nr, fs, fc, 400e6), fft_len)
     mfilt = chirp.conj()
 
@@ -459,10 +518,10 @@ if __name__ == '__main__':
     plt.subplot(2, 2, 2)
     plt.imshow(db(pd_ch))
     plt.axis('tight')
-    '''plt.subplot(2, 2, 3)
+    plt.subplot(2, 2, 3)
     plt.imshow(db(pd_cpu))
     plt.axis('tight')
     plt.subplot(2, 2, 4)
     plt.imshow(db(pd_cpu - pd))
-    plt.axis('tight')'''
-    plt.show()
+    plt.axis('tight')
+    plt.show()'''

@@ -16,6 +16,7 @@ from image_segment_loader import prepImage
 from scipy.ndimage import sobel, gaussian_filter, binary_dilation, binary_erosion, binary_fill_holes
 from scipy.interpolate import interpn
 from skimage.measure import label, find_contours
+from skimage.morphology import medial_axis
 from shapely.geometry import Polygon, Point
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -23,8 +24,11 @@ from matplotlib.tri import Triangulation
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
 import open3d as o3d
-from simulation_functions import db, llh2enu, getElevation
+from simulation_functions import db, llh2enu, getElevationMap
 from pywt import wavedec2
+from trimesh.creation import extrude_polygon
+import plotly.io as pio
+pio.renderers.default = 'browser'
 
 c0 = 299792458.0
 fs = 2e9
@@ -35,10 +39,13 @@ sdr = load(fnme, progress_tracker=True)
 wavelength = c0 / 9.6e9
 ant_gain = 25
 transmit_power = 100
+pixel_to_m = .25
 
 # Prep the background ASI image
 bg = SDREnvironment(sdr)
 rp = SDRPlatform(sdr, origin=bg.ref)
+
+device = o3d.core.Device("CPU:0")
 
 # Load the segmentation model
 with open('./segmenter_config.yaml') as y:
@@ -46,9 +53,10 @@ with open('./segmenter_config.yaml') as y:
 segmenter = ImageSegmenter(**param_dict['model_params'], label_sz=5, params=param_dict)
 print('Setting up model...')
 segmenter.load_state_dict(torch.load('./model/inference_model.state'))
-segmenter.to('cuda:1')
+segmenter.to('cuda:0')
 
 png_fnme = '/home/jeff/repo/simulib/data/base_SAR_07082024_112333.png'
+# bx, by, bz = bg.getGrid()
 
 background = np.array(Image.open(png_fnme)) / 65535.
 chip = background[:512, :512]
@@ -96,6 +104,48 @@ pcd = o3d.geometry.TriangleMesh()
 
 '''
 ============================================================
+==================ROADS=====================================
+'''
+# Get the roads
+roads = binary_dilation(binary_erosion(segment[2] > .9))
+
+# Blob them
+blabels, nlabels = label(roads, return_num=True)
+
+# Take the roads and add them to the background
+bcld = o3d.geometry.PointCloud()
+xp, yp = np.where(blabels > 0)
+bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
+bcld.points = o3d.utility.Vector3dVector(bpts.T)
+bcld.estimate_normals()
+bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
+bmesh.paint_uniform_color([0, 255, 0])
+pcd += bmesh
+print('Roads added to mesh.')
+
+'''
+============================================================
+==================FIELDS====================================
+'''
+# Get the roads
+fields = binary_dilation(binary_erosion(segment[3] > .9))
+
+# Blob them
+blabels = label(fields)
+
+# Take the fields and add them to the background
+bcld = o3d.geometry.PointCloud()
+xp, yp = np.where(blabels > 0)
+bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
+bcld.points = o3d.utility.Vector3dVector(bpts.T)
+bcld.estimate_normals()
+bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
+bmesh.paint_uniform_color([255, 255, 0])
+pcd += bmesh
+print('Fields added to mesh.')
+
+'''
+============================================================
 =======================BUILDINGS============================
 '''
 # Get the buildings
@@ -130,7 +180,7 @@ for n in tqdm(range(1, nlabels)):
         except ValueError:
             continue
 
-    mhght = mhght * .25
+    mhght = mhght * pixel_to_m if mhght > 0 else 5.
     # Calculate height from image angle
     bding_height = mhght / np.tan(rp.dep_ang)
     foreshortening = mhght / np.tan(rp.dep_ang)**2
@@ -138,34 +188,13 @@ for n in tqdm(range(1, nlabels)):
     contours = np.concatenate(find_contours(bding_block.astype(int), .9))
     poly = Polygon(contours)
     poly_s = poly.simplify(2)
-
-    innerpts = np.array([[y, x] for y, x in zip(*np.where(bding_block)) if Point(y, x).within(poly_s)][::5])
-    contours = np.array(poly_s.boundary.coords)
-
-    bcld = o3d.geometry.PointCloud()
-    bpt_list = [np.array([contours[:, 1] * 0.25 + ymin * 0.25, contours[:, 0] * 0.25 + xmin * 0.25,
-                          np.ones(contours.shape[0]) * bding_height]),
-                np.array([innerpts[:, 1] * 0.25 + ymin * 0.25, innerpts[:, 0] * 0.25 + xmin * 0.25,
-                          np.ones(innerpts.shape[0]) * bding_height]),
-                np.array([innerpts[:, 1] * 0.25 + ymin * 0.25, innerpts[:, 0] * 0.25 + xmin * 0.25,
-                          np.ones(innerpts.shape[0]) * 0])
-                ]
-    bpt_list.extend(
-        np.array(
-            [
-                contours[:, 1] * 0.25 + ymin * 0.25,
-                contours[:, 0] * 0.25 + xmin * 0.25,
-                np.ones(contours.shape[0]) * inter_height,
-            ]
-        )
-        for inter_height in np.arange(0, mhght, 0.5)
-    )
-    bpts = np.concatenate(bpt_list, axis=1)
-    bcld.points = o3d.utility.Vector3dVector(bpts.T)
-    bcld.estimate_normals()
-    bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([1., 5., 10., 100.]))
+    bmm = extrude_polygon(poly_s.convex_hull, bding_height, engine='triangle')
+    bmesh = o3d.geometry.TriangleMesh()
+    bmesh.triangles = o3d.utility.Vector3iVector(bmm.faces)
+    bmesh.vertices = o3d.utility.Vector3dVector(bmm.vertices)
+    bmesh = bmesh.translate(np.array([(poly_s.centroid.x + xmin) * pixel_to_m, (poly_s.centroid.y + ymin) * pixel_to_m, 0.]))
     pcd += bmesh
-
+print('Buildings added to mesh.')
 
 '''
 ============================================================
@@ -203,33 +232,26 @@ for n in tqdm(range(1, nlabels)):
         except ValueError:
             continue
 
-    mhght = mhght * .25
+    mhght = mhght * pixel_to_m if mhght > 0 else 3.
     # Calculate height from image angle
     bding_height = mhght / np.tan(rp.dep_ang)
     foreshortening = mhght / np.tan(rp.dep_ang)**2
+    skeleton, dists = medial_axis(bding, return_distance=True)
 
-    # Center of mass
-    xmass = xpts.mean()
-    ymass = ypts.mean()
+    yd, xd = np.where(skeleton)
+    sk_dists = dists[skeleton]
 
-    contours = np.concatenate(find_contours(bding.astype(int), .9))
-    innerpts = np.array(np.where(bding)).T
-    innerdists = np.zeros(innerpts.shape[0])
+    for n in range(0, len(xd), 5):
+        nm = o3d.geometry.TriangleMesh.create_sphere(sk_dists[n] * pixel_to_m)
+        nm.paint_uniform_color(np.array([0, 255, 0]))
+        trunk = o3d.geometry.TriangleMesh.create_cylinder(.5, mhght)
+        trunk = trunk.translate(np.array([0, 0, -mhght / 2]))
+        nm += trunk
+        nm = nm.translate(np.array([xd[n] * pixel_to_m, yd[n] * pixel_to_m, mhght]))
+        pcd += nm
+print('Trees added to mesh.')
 
-    for i in range(innerpts.shape[0]):
-        innerdists[i] = np.linalg.norm(innerpts[i] - contours, axis=1).min()
-
-    shrubbery_size = mhght * .33
-    hght_weights = innerdists * .25
-    hght_weights = (hght_weights / hght_weights.max())**(1/4) * shrubbery_size
-
-    tcld = o3d.geometry.PointCloud()
-    tpts = np.concatenate((np.array([innerpts[:, 0] * .25, innerpts[:, 1] * .25, mhght - hght_weights]),
-                           np.array([innerpts[:, 0] * .25, innerpts[:, 1] * .25, mhght + hght_weights])),
-                          axis=1)
-    tcld.points = o3d.utility.Vector3dVector(tpts.T)
-    tcld.estimate_normals()
-    tmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(tcld, o3d.utility.DoubleVector([1., 5., 10., 50.]))
-    pcd += tmesh
-
+o3d.visualization.draw_plotly([pcd])
 o3d.visualization.draw_geometries([pcd])
+plt.figure()
+plt.imshow(background)
