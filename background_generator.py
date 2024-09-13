@@ -119,7 +119,7 @@ bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
 bcld.points = o3d.utility.Vector3dVector(bpts.T)
 bcld.estimate_normals()
 bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
-bmesh.paint_uniform_color([0, 255, 0])
+bmesh = bmesh.paint_uniform_color([0, 1., 0])
 pcd += bmesh
 print('Roads added to mesh.')
 
@@ -128,7 +128,7 @@ print('Roads added to mesh.')
 ==================FIELDS====================================
 '''
 # Get the roads
-fields = binary_dilation(binary_erosion(segment[3] > .9))
+'''fields = binary_dilation(binary_erosion(segment[3] > .9))
 
 # Blob them
 blabels = label(fields)
@@ -140,9 +140,9 @@ bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
 bcld.points = o3d.utility.Vector3dVector(bpts.T)
 bcld.estimate_normals()
 bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
-bmesh.paint_uniform_color([255, 255, 0])
+bmesh = bmesh.paint_uniform_color([1., 1, 0])
 pcd += bmesh
-print('Fields added to mesh.')
+print('Fields added to mesh.')'''
 
 '''
 ============================================================
@@ -243,7 +243,7 @@ for n in tqdm(range(1, nlabels)):
 
     for n in range(0, len(xd), 5):
         nm = o3d.geometry.TriangleMesh.create_sphere(sk_dists[n] * pixel_to_m)
-        nm.paint_uniform_color(np.array([0, 255, 0]))
+        nm = nm.paint_uniform_color(np.array([0, 1, 0]))
         trunk = o3d.geometry.TriangleMesh.create_cylinder(.5, mhght)
         trunk = trunk.translate(np.array([0, 0, -mhght / 2]))
         nm += trunk
@@ -251,7 +251,9 @@ for n in tqdm(range(1, nlabels)):
         pcd += nm
 print('Trees added to mesh.')
 
-o3d.visualization.draw_plotly([pcd])
+pcd = pcd.compute_triangle_normals()
+pcd = pcd.compute_vertex_normals()
+# o3d.visualization.draw_plotly([pcd])
 o3d.visualization.draw_geometries([pcd])
 plt.figure()
 plt.imshow(background)

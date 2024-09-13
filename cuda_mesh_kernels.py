@@ -1,6 +1,6 @@
 import cmath
 import math
-
+from tqdm import tqdm
 import cupy
 from numba import cuda, njit
 from numba.cuda.random import xoroshiro128p_uniform_float64
@@ -331,13 +331,15 @@ def readCombineMeshFile(fnme, points=100000):
     mesh.normalize_normals()
     return mesh
 
-def checkBoxIntersection(ray, ray_origin, box_max, box_min, box_center):
-    if ray.shape[0] > 1:
-        norm_ray = ray_origin + ray / np.linalg.norm(ray, axis=1)[:, None] * np.linalg.norm(ray_origin - box_center)
-        return np.logical_and(np.all(box_max - norm_ray > 0, axis=1), np.all(norm_ray - box_min > 0, axis=1))
-    else:
-        norm_ray = ray_origin + ray / np.linalg.norm(ray) * np.linalg.norm(ray_origin - box_center)
-        return bool(np.all(box_max - norm_ray > 0) and np.all(norm_ray - box_min > 0))
+def checkBoxIntersection(ray, ray_origin, box_max, box_min):
+    tmin = 0.
+    tmax = np.inf
+    for d in range(3):
+        t1 = (box_min[d] - ray_origin[d]) / ray[d]
+        t2 = (box_max[d] - ray_origin[d]) / ray[d]
+        tmin = max(tmin, min(t1, t2))
+        tmax = min(tmax, max(t1, t2))
+    return tmin < tmax
 
 
 if __name__ == '__main__':
@@ -354,28 +356,13 @@ if __name__ == '__main__':
     up_fft_len = fft_len * 4
 
     # Generate bounding box tree
-    min_pts = np.asarray(mesh.vertices).min(axis=0)
-    max_pts = np.asarray(mesh.vertices).max(axis=0)
-    center = mesh.get_center()
-    center[2] = min_pts[2]
-    bounding_pts = [np.array([min_pts[0], min_pts[1], max_pts[2]]),
-                    np.array([min_pts[0], max_pts[1], max_pts[2]]),
-                    np.array([max_pts[0], min_pts[1], max_pts[2]]),
-                    np.array([max_pts[0], max_pts[1], max_pts[2]])]
-    boxes = [o3d.geometry.AxisAlignedBoundingBox.create_from_points(
-        o3d.utility.Vector3dVector(
-            np.concatenate((bounding_pts[0].reshape(1, 3), center.reshape(1, 3)), axis=0))),
-        o3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            o3d.utility.Vector3dVector(
-                np.concatenate((bounding_pts[1].reshape(1, 3), center.reshape(1, 3)), axis=0))),
-        o3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            o3d.utility.Vector3dVector(
-                np.concatenate((bounding_pts[2].reshape(1, 3), center.reshape(1, 3)), axis=0))),
-        o3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            o3d.utility.Vector3dVector(
-                np.concatenate((bounding_pts[3].reshape(1, 3), center.reshape(1, 3)), axis=0)))
-    ]
+    full_box = o3d.geometry.VoxelGrid.create_from_triangle_mesh(mesh, 30.)
+    boxes = [o3d.geometry.AxisAlignedBoundingBox.create_from_points(full_box.get_voxel_bounding_points(t.grid_index))
+             for t in full_box.get_voxels()]
     mesh_quads = [mesh.crop(b) for b in boxes]
+    quad_triangles = [np.asarray(m.triangles) for m in mesh_quads]
+    quad_vertices = [np.asarray(m.vertices) for m in mesh_quads]
+    quad_normals = [np.asarray(m.triangle_normals) for m in mesh_quads]
 
     ant_point = mesh.get_center() - obs_pt
 
@@ -384,29 +371,97 @@ if __name__ == '__main__':
     face_centers = np.asarray(sample_points.points)
     face_normals = np.asarray(sample_points.normals)
 
-    tvec = face_centers - obs_pt
-    rng = np.linalg.norm(tvec, axis=1)
-    tvec = tvec / np.linalg.norm(tvec, axis=1)
-    az = np.arctan2(tvec[:, 0], tvec[:, 1])
-    el = -np.arcsin(tvec[:, 2] / rng)
+    initial_tvec = face_centers - obs_pt
+    rng = np.linalg.norm(initial_tvec, axis=1)
+    initial_tvec = initial_tvec / np.linalg.norm(initial_tvec, axis=1)[:, None]
+    az = np.arctan2(initial_tvec[:, 0], initial_tvec[:, 1])
+    el = -np.arcsin(initial_tvec[:, 2] / rng)
 
-    rho_o = np.array([applyRadiationPatternCPU(e, a,
-                             -np.arcsin(ant_point[2] / np.linalg.norm(ant_point)),
-                             np.arctan2(ant_point[0], ant_point[1]),
-                             -np.arcsin(ant_point[2] / np.linalg.norm(ant_point)),
-                             np.arctan2(ant_point[0], ant_point[1]),
-                             40 * DTR,
-                             40 * DTR) for e, a in zip(el, az)]) * 100
+    pointing_az = np.arctan2(ant_point[0], ant_point[1])
+    pointing_el = -np.arcsin(ant_point[2] / np.linalg.norm(ant_point))
 
-    sigma = np.zeros_like(rho_o) + np.pi / 2
+    rho_o = np.array([applyRadiationPatternCPU(e, a, pointing_el, pointing_az, pointing_el, pointing_az,
+                             40 * DTR, 40 * DTR) for e, a in zip(el, az)]) * 100
+
+    sigma = np.asarray(sample_points.colors)
+    sigma = (sigma[:, 1] - (sigma[:, 0] + sigma[:, 2])**2) * np.pi / 2
+    sigma[sigma <= 0] = .1
 
     # Test each ray and find the correct bounding box
-    quad = np.array([checkBoxIntersection(tvec, obs_pt, np.asarray(b.get_max_bound()), np.asarray(b.get_min_bound()), np.asarray(b.get_center())) for b in boxes])
+    quad = np.array([[checkBoxIntersection(
+        t, obs_pt, np.asarray(b.get_max_bound()), np.asarray(b.get_min_bound())) for t in initial_tvec]
+        for b in boxes]) * np.arange(1, len(quad_normals) + 1)[:, None]
+
+    # Test triangles in correct quads to find intsersection triangles
+    for p in tqdm(range(10000)):
+        ray = initial_tvec[p]
+        intersection = None
+        inter_normal = None
+        for q in quad[:, p]:
+            if q:
+                for tri_idx, tri in enumerate(quad_triangles[q - 1]):
+                    e1 = quad_vertices[q - 1][tri[1]] - quad_vertices[q - 1][tri[0]]
+                    e2 = quad_vertices[q - 1][tri[2]] - quad_vertices[q - 1][tri[0]]
+                    cross = np.cross(ray, e2)
+
+                    det = np.dot(e1, cross)
+                    # Check to see if ray is parallel to triangle
+                    if abs(det) < 1e-9:
+                        continue
+
+                    inv_det = 1. / det
+                    svec = obs_pt - quad_vertices[q - 1][tri[0]]
+
+                    u = inv_det * svec.dot(cross)
+                    if u < 0 or u > 1:
+                        continue
+
+                    # Recompute cross for s and edge 1
+                    cross = np.cross(svec, e1)
+                    v = inv_det * ray.dot(cross)
+                    if v < 0 or u + v > 1:
+                        continue
+
+                    # Compute intersection point
+                    t = inv_det * e2.dot(cross)
+                    if t < 1e-9:
+                        continue
+
+                    if intersection is not None:
+                        new_inter = obs_pt + ray * t
+                        if np.linalg.norm(obs_pt - new_inter) < np.linalg.norm(obs_pt - intersection):
+                            intersection = obs_pt + ray * t
+                            inter_normal = quad_normals[q - 1][tri_idx]
+                    else:
+                        intersection = obs_pt + ray * t
+                        inter_normal = quad_normals[q - 1][tri_idx]
+        face_centers[p] = intersection
+        face_normals[p] = inter_normal
+
+    # Get corrected ranges for power calculation, and get bounces as well
+    tvec = face_centers - obs_pt
+    rng = np.linalg.norm(tvec, axis=1)
+    tvec = tvec / np.linalg.norm(tvec, axis=1)[:, None]
+    bounces = np.array([bounceVector(t, fn) for t, fn in zip(tvec, face_normals)])
+
+    # Calculate returned power based on bounce vector
+    delta_phi = np.arccos(np.sum(tvec * bounces, axis=1))
+    att = np.sinc(sigma * delta_phi)**2
+    rho_final = rho_o * att / rng**4
+
+    face_cloud = o3d.geometry.PointCloud()
+    face_cloud.points = o3d.utility.Vector3dVector(np.concatenate((face_centers, obs_pt.reshape(1, 3))))
+    face_cloud.normals = o3d.utility.Vector3dVector(np.concatenate((bounces * (rho_final / rho_final.mean())[:, None],
+                                                                    -(obs_pt - mesh.get_center()).reshape(1, 3))))
+
+    o3d.visualization.draw_geometries([mesh, face_cloud])
 
 
 
 
-    o3d.visualization.draw_geometries([mesh])
+
+
+    # o3d.visualization.draw_geometries([mesh])
 
     '''print('Generating Mesh...')
     mverts = np.asarray(mesh.vertices)
