@@ -118,7 +118,7 @@ xp, yp = np.where(blabels > 0)
 bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
 bcld.points = o3d.utility.Vector3dVector(bpts.T)
 bcld.estimate_normals()
-bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
+bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2., 20.]))
 bmesh = bmesh.paint_uniform_color([0, 1., 0])
 pcd += bmesh
 print('Roads added to mesh.')
