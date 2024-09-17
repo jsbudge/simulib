@@ -26,12 +26,15 @@ def getRangeAndAngles(vx, vy, vz, sx, sy, sz):
     el = -math.asin(tz / rng)
     return tx, ty, tz, rng, az, el
 
+
 '''
 Calculate out if each ray intersects with each triangle given.
 This is meant to get possible occlusions in the mesh.
 Pass in the ray origin and direction, as well as the triangles in the possible bounding box, and let it check for
 any intersection that isn't the one expected.
 '''
+
+
 @cuda.jit()
 def calcIntersection(ray_dir, ray_xyz, vert_xyz, tri_norm, tri_verts, int_xyz, int_tri, ray_bounce):
     ray_idx, tri_idx = cuda.grid(ndim=2)
@@ -83,10 +86,9 @@ def calcIntersection(ray_dir, ray_xyz, vert_xyz, tri_norm, tri_verts, int_xyz, i
         inty = ry + t * ray_dir[ray_idx, 1]
         intz = rz + t * ray_dir[ray_idx, 2]
 
-        if (math.sqrt(abs(intx - rx)**2 + abs(inty - ry)**2 + abs(intz - rz)**2) <=
-                math.sqrt(abs(int_xyz[ray_idx, 0] - rx)**2 + abs(int_xyz[ray_idx, 1] - ry)**2 +
-                          abs(int_xyz[ray_idx, 2] - rz)**2)):
-
+        if (math.sqrt(abs(intx - rx) ** 2 + abs(inty - ry) ** 2 + abs(intz - rz) ** 2) <=
+                math.sqrt(abs(int_xyz[ray_idx, 0] - rx) ** 2 + abs(int_xyz[ray_idx, 1] - ry) ** 2 +
+                          abs(int_xyz[ray_idx, 2] - rz) ** 2)):
             # Calculate out the angles in azimuth and elevation for the bounce
             tx, ty, tz, vrng, _, _ = getRangeAndAngles(intx, inty, intz, rx, ry, rz)
 
@@ -106,7 +108,8 @@ def calcIntersection(ray_dir, ray_xyz, vert_xyz, tri_norm, tri_verts, int_xyz, i
 
 
 @cuda.jit()
-def calcInitSpread(ray_power, ray_distance, ray_bounce, vert_xyz, vert_norm, vert_power, source_xyz, panrx, elrx, pd_r, pd_i,
+def calcInitSpread(ray_power, ray_distance, ray_bounce, vert_xyz, vert_norm, vert_power, source_xyz, panrx, elrx, pd_r,
+                   pd_i,
                    wavenumber, near_range_s, source_fs, bw_az, bw_el):
     ray_idx, vert_idx = cuda.grid(ndim=2)
     if ray_idx < ray_power.shape[0] and vert_idx == 0:
@@ -134,14 +137,16 @@ def calcInitSpread(ray_power, ray_distance, ray_bounce, vert_xyz, vert_norm, ver
         rx_strength = max(rx_strength, 0.)
         ray_power[ray_idx] = ray_power[ray_idx] * math.pow(rx_strength, 5)
         ray_distance[ray_idx] = srng
-        accumulateRangeProfile(ray_power[ray_idx] / (ray_distance[ray_idx] * ray_distance[ray_idx]) * vert_power[ray_idx], srng, r_el, r_az, panrx,
-                               elrx, pd_r, pd_i, wavenumber, near_range_s, source_fs, bw_az, bw_el)
+        accumulateRangeProfile(
+            ray_power[ray_idx] / (ray_distance[ray_idx] * ray_distance[ray_idx]) * vert_power[ray_idx], srng, r_el,
+            r_az, panrx,
+            elrx, pd_r, pd_i, wavenumber, near_range_s, source_fs, bw_az, bw_el)
         cuda.syncthreads()
 
 
 @cuda.jit(device=True)
 def accumulateRangeProfile(power, two_way_rng, r_el, r_az, panrx, elrx, pd_r, pd_i, wavenumber, near_range_s,
-                            source_fs, bw_az, bw_el):
+                           source_fs, bw_az, bw_el):
     rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
     but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
     if but > pd_r.shape[0] or but < 0:
@@ -202,7 +207,6 @@ def genRangeProfileSinglePulse(int_xyz, vert_bounce, vert_reflectivity,
         cuda.syncthreads()
 
 
-
 @cuda.jit()
 def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
                             source_xyz, receive_xyz, panrx, elrx, pantx, eltx, pd_r, pd_i, wavelength, near_range_s,
@@ -224,7 +228,8 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
 
         # Calculate out the angles in azimuth and elevation for the bounce
         tx, ty, tz, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[t, 0], source_xyz[t, 1], source_xyz[t, 2])
-        rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(vx, vy, vz, receive_xyz[t, 0], receive_xyz[t, 1], receive_xyz[t, 2])
+        rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(vx, vy, vz, receive_xyz[t, 0], receive_xyz[t, 1],
+                                                          receive_xyz[t, 2])
 
         # Calculate bounce vector and strength
         gamma = 1.
@@ -234,7 +239,8 @@ def genRangeProfileFromMesh(vert_xyz, vert_norm, vert_reflectivity,
             by = ty - vny * bounce_dot
             bz = tz - vnz * bounce_dot
 
-            rx_strength = (rx * bx + ry * by + rz * bz) / (r_rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
+            rx_strength = (rx * bx + ry * by + rz * bz) / (
+                        r_rng * math.sqrt(abs(bx * bx) + abs(by * by) + abs(bz * bz)))
             if rx_strength < 0:
                 return
             gamma = math.pow(-rx_strength, 5)
@@ -373,15 +379,26 @@ def readCombineMeshFile(fnme, points=100000):
     mesh.normalize_normals()
     return mesh
 
+
 def checkBoxIntersection(ray, ray_origin, box_max, box_min):
-    tmin = 0.
+    tmin = -np.inf
     tmax = np.inf
-    for d in range(3):
-        t1 = (box_min[d] - ray_origin[d]) / ray[d]
-        t2 = (box_max[d] - ray_origin[d]) / ray[d]
-        tmin = max(tmin, min(t1, t2))
-        tmax = min(tmax, max(t1, t2))
-    return tmin < tmax
+    if ray[0] != 0.:
+        tx1 = (box_min[0] - ray_origin[0]) / ray[0]
+        tx2 = (box_max[0] - ray_origin[0]) / ray[0]
+        tmin = max(tmin, min(tx1, tx2))
+        tmax = min(tmax, max(tx1, tx2))
+    if ray[1] != 0.:
+        ty1 = (box_min[1] - ray_origin[1]) / ray[1]
+        ty2 = (box_max[1] - ray_origin[1]) / ray[1]
+        tmin = max(tmin, min(ty1, ty2))
+        tmax = min(tmax, max(ty1, ty2))
+    if ray[2] != 0.:
+        tz1 = (box_min[2] - ray_origin[2]) / ray[2]
+        tz2 = (box_max[2] - ray_origin[2]) / ray[2]
+        tmin = max(tmin, min(tz1, tz2))
+        tmax = min(tmax, max(tz1, tz2))
+    return tmax >= tmin and tmax >= 0
 
 
 if __name__ == '__main__':
@@ -434,7 +451,7 @@ if __name__ == '__main__':
     pointing_el = -np.arcsin(ant_point[2] / np.linalg.norm(ant_point))
 
     rho_o = np.array([applyRadiationPatternCPU(e, a, pointing_az, pointing_el, pointing_az, pointing_el,
-                             bw_az, bw_el) for e, a in zip(el, az)]) * 100
+                                               bw_az, bw_el) for e, a in zip(el, az)]) * 100
 
     int_tri = np.zeros(face_centers.shape[0], dtype=np.int32)
 
@@ -484,23 +501,34 @@ if __name__ == '__main__':
     int_gpu = cupy.array(face_centers, dtype=np.float64)
 
     print('Getting range profile...')
-    genRangeProfileSinglePulse[max(1, int_gpu.shape[0] // threads_per_block[0] + 1), threads_per_block[0]](int_gpu, bounce_gpu, sigma_gpu,
-                               obs_pt_gpu, obs_pt_gpu, pointing_az, pointing_el, pointing_az, pointing_el, pd_r, pd_i, c0 / fc,
-                               standoff / c0,
-                               fs, bw_az, bw_el, 10., True, True)
-
+    genRangeProfileSinglePulse[max(1, int_gpu.shape[0] // threads_per_block[0] + 1), threads_per_block[0]](int_gpu,
+                                                                                                           bounce_gpu,
+                                                                                                           sigma_gpu,
+                                                                                                           obs_pt_gpu,
+                                                                                                           obs_pt_gpu,
+                                                                                                           pointing_az,
+                                                                                                           pointing_el,
+                                                                                                           pointing_az,
+                                                                                                           pointing_el,
+                                                                                                           pd_r, pd_i,
+                                                                                                           c0 / fc,
+                                                                                                           standoff / c0,
+                                                                                                           fs, bw_az,
+                                                                                                           bw_el, 10.,
+                                                                                                           True, True)
 
     # Calculate returned power based on bounce vector
     rng = np.linalg.norm(face_centers - obs_pt[None, :], axis=1)
-    delta_phi = np.sum(-initial_tvec * bounce_vec, axis=1) # np.arccos(np.sum(-initial_tvec * bounce_vec, axis=1))
+    delta_phi = np.sum(-initial_tvec * bounce_vec, axis=1)  # np.arccos(np.sum(-initial_tvec * bounce_vec, axis=1))
     delta_phi[delta_phi < 0] = 0.
-    att = delta_phi / sigma**2 * np.exp(-delta_phi**2 / (2 * sigma**2))  # np.sinc(sigma * delta_phi)**2
-    rho_final = rho_o * att / rng**4
+    att = delta_phi / sigma ** 2 * np.exp(-delta_phi ** 2 / (2 * sigma ** 2))  # np.sinc(sigma * delta_phi)**2
+    rho_final = rho_o * att / rng ** 4
 
     face_cloud = o3d.geometry.PointCloud()
     face_cloud.points = o3d.utility.Vector3dVector(np.concatenate((face_centers, obs_pt.reshape(1, 3))))
-    face_cloud.normals = o3d.utility.Vector3dVector(np.concatenate((bounce_vec * (rho_final / rho_final.mean())[:, None],
-                                                                    -(obs_pt - mesh.get_center()).reshape(1, 3))))
+    face_cloud.normals = o3d.utility.Vector3dVector(
+        np.concatenate((bounce_vec * (rho_final / rho_final.mean())[:, None],
+                        -(obs_pt - mesh.get_center()).reshape(1, 3))))
 
     # o3d.visualization.draw_geometries([mesh, face_cloud])
 
