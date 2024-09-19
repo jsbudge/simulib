@@ -1,12 +1,9 @@
 import cmath
 import math
 from tqdm import tqdm
-from numba import cuda, njit
-from numba.cuda.random import xoroshiro128p_uniform_float64
+from numba import cuda
 import cupy
-from traitlets import observe
-
-from simulation_functions import findPowerOf2
+from simulation_functions import findPowerOf2, azelToVec
 import numpy as np
 import open3d as o3d
 from cuda_kernels import applyRadiationPattern, applyRadiationPatternCPU, getMaxThreads
@@ -19,6 +16,7 @@ c0 = 299792458.0
 TAC = 125e6
 fs = 2e9
 DTR = np.pi / 180
+RAYLEIGH_SIGMA_COEFF = .655
 
 
 @cuda.jit(device=True)
@@ -132,8 +130,10 @@ def genRangeProfileSinglePulse(int_xyz, vert_bounce, vert_reflectivity, source_x
         bz = vert_bounce[pidx, 2]
 
         # Calculate out the angles in azimuth and elevation for the bounce
-        _, _, _, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[pidx][0], source_xyz[pidx][1], source_xyz[pidx][2])
-        rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(vx, vy, vz, receive_xyz[pidx][0], receive_xyz[pidx][1], receive_xyz[pidx][2])
+        _, _, _, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[pidx][0], source_xyz[pidx][1],
+                                               source_xyz[pidx][2])
+        rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(vx, vy, vz, receive_xyz[pidx][0], receive_xyz[pidx][1],
+                                                          receive_xyz[pidx][2])
 
         # Calculate bounce vector and strength
         # Apply Rayleigh scattering with the sigma being the width of the distribution
@@ -233,47 +233,47 @@ def checkBoxIntersection(ray, ray_origin, box_max, box_min):
     return tmax >= tmin and tmax >= 0
 
 
-def getRangeProfileFromMesh(mesh, obs_pt, voxel_size=1000, sample_points=10000, bounce_rays=15, num_bounces=3):
+def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=10000, bounce_rays=15, num_bounces=3,
+                            debug=False):
     # GPU device calculations
     threads_per_block = getMaxThreads()
 
     # Generate bounding box tree
-    print('Generating bounding box tree...')
-    full_box = o3d.geometry.VoxelGrid.create_from_triangle_mesh(mesh, voxel_size)
+    full_box = o3d.geometry.VoxelGrid.create_from_triangle_mesh(a_mesh, voxel_size)
     boxes = [o3d.geometry.AxisAlignedBoundingBox.create_from_points(full_box.get_voxel_bounding_points(t.grid_index))
              for t in full_box.get_voxels()]
-    mesh_quads = [mesh.crop(b) for b in boxes]
+    mesh_quads = [a_mesh.crop(b) for b in boxes]
     quad_triangles = [np.asarray(m.triangles) for m in mesh_quads]
     quad_vertices = [np.asarray(m.vertices) for m in mesh_quads]
     quad_normals = [np.asarray(m.triangle_normals) for m in mesh_quads]
 
-    ant_point = mesh.get_center() - obs_pt
-
-    print('Sampling mesh...')
-    sample_points = mesh.sample_points_poisson_disk(sample_points)
+    sample_points = a_mesh.sample_points_poisson_disk(sample_points)
     face_centers = np.asarray(sample_points.points)
 
-    initial_tvec = face_centers - obs_pt
+    initial_tvec = face_centers - a_obs_pt
     initial_tvec = initial_tvec / np.linalg.norm(initial_tvec, axis=1)[:, None]
+
+    # Generate the pointing vector for the antenna and the antenna pattern
+    # that will affect the power received by the intersection point
+    ant_point = a_mesh.get_center() - a_obs_pt
+    pointing_az = np.arctan2(ant_point[0], ant_point[1])
+    pointing_el = -np.arcsin(ant_point[2] / np.linalg.norm(ant_point))
     az = np.arctan2(initial_tvec[:, 0], initial_tvec[:, 1])
     el = -np.arcsin(initial_tvec[:, 2])
 
-    pointing_az = np.arctan2(ant_point[0], ant_point[1])
-    pointing_el = -np.arcsin(ant_point[2] / np.linalg.norm(ant_point))
-
     rho_o = np.array([applyRadiationPatternCPU(e, a, pointing_az, pointing_el, pointing_az, pointing_el,
                                                bw_az, bw_el) for e, a in zip(el, az)]) * 1e12
-    obs_pt_vec = np.repeat(obs_pt.reshape(1, 3), initial_tvec.shape[0], axis=0)
+    obs_pt_vec = np.repeat(a_obs_pt.reshape(1, 3), initial_tvec.shape[0], axis=0)
     inter_xyz, inter_bounce_dir, inter_tri_idx = bounce(obs_pt_vec, initial_tvec, boxes, quad_vertices, quad_triangles,
                                                         quad_normals)
 
-    '''sigma = np.asarray(sample_points.colors)
+    # Get sigma values from colors (this will be changed with material parameters)
+    sigma = np.asarray(sample_points.colors)
     sigma = (sigma[:, 1] - (sigma[:, 0] + sigma[:, 2])**2) * np.pi / 2
-    sigma[sigma <= 0] = .1'''
-    sigma = np.ones(face_centers.shape[0])
+    sigma[sigma <= 0] = .1
 
     # Get the range profile from the intersection-tested rays
-    rng = np.linalg.norm(inter_xyz - obs_pt[None, :], axis=1)
+    rng = np.linalg.norm(inter_xyz - a_obs_pt[None, :], axis=1)
     bounce_gpu = cupy.array(inter_bounce_dir, dtype=np.float64)
     sigma_gpu = cupy.array(sigma, dtype=np.float64)
     pd_r = cupy.array(np.zeros(nsam), dtype=np.float64)
@@ -288,7 +288,7 @@ def getRangeProfileFromMesh(mesh, obs_pt, voxel_size=1000, sample_points=10000, 
                           pointing_az, pointing_el, pointing_az, pointing_el, pd_r, pd_i, c0 / fc, standoff / c0, fs,
                           bw_az, bw_el)
 
-    single_pulse = pd_r.get() + 1j * pd_i.get()
+    pulse_ret = pd_r.get() + 1j * pd_i.get()
 
     # Calculate returned power based on bounce vector
     delta_phi = np.sum(initial_tvec * inter_bounce_dir, axis=1)
@@ -296,13 +296,18 @@ def getRangeProfileFromMesh(mesh, obs_pt, voxel_size=1000, sample_points=10000, 
     att = delta_phi / sigma ** 2 * np.exp(-delta_phi ** 2 / (2 * sigma ** 2))
     rho_final = rho_o * att / rng ** 4
 
+    if debug:
+        debug_rays = inter_xyz
+        debug_raydirs = inter_bounce_dir
+        debug_raypower = rho_final
+
     for face in tqdm(range(0, inter_xyz.shape[0] - 1, 2)):
         sobs_pt = np.repeat(inter_xyz[face].reshape(1, 3), bounce_rays, axis=0)
         obs_bounce = np.repeat(inter_bounce_dir[face].reshape(1, 3), bounce_rays, axis=0)
         paz = np.arctan2(obs_bounce[:, 0], obs_bounce[:, 1])
         pel = -np.arcsin(obs_bounce[:, 2])
-        tvec = azelToVec(paz + np.random.normal(0, sigma[face] * .655, (bounce_rays,)),
-                  pel + np.random.normal(0, sigma[face] * .655, (bounce_rays,))).T
+        tvec = azelToVec(paz + np.random.normal(0, sigma[face] * RAYLEIGH_SIGMA_COEFF, (bounce_rays,)),
+                         pel + np.random.normal(0, sigma[face] * RAYLEIGH_SIGMA_COEFF, (bounce_rays,))).T
         rho_bounce = rho_final[face] * np.ones(bounce_rays)
         curr_sigma = sigma[face] * np.ones(bounce_rays)
 
@@ -321,7 +326,13 @@ def getRangeProfileFromMesh(mesh, obs_pt, voxel_size=1000, sample_points=10000, 
             rho_bounce = rho_bounce[valids]
             sobs_pt = sobs_pt[valids]
 
-            nb_xyz, nb_bounce_dir, nb_tri_idx = bounce(sobs_pt, tvec, boxes, quad_vertices, quad_triangles, quad_normals)
+            if debug:
+                debug_rays = np.concatenate((debug_rays, sobs_pt), axis=1)
+                debug_raydirs = np.concatenate((debug_raydirs, tvec), axis=1)
+                debug_raypower = np.concatenate((debug_raydirs, rho_bounce))
+
+            nb_xyz, nb_bounce_dir, nb_tri_idx = bounce(sobs_pt, tvec, boxes, quad_vertices, quad_triangles,
+                                                       quad_normals)
             valids = nb_tri_idx >= 0
             nb_xyz = nb_xyz[valids]
             nb_tri_idx = nb_tri_idx[valids]
@@ -329,17 +340,16 @@ def getRangeProfileFromMesh(mesh, obs_pt, voxel_size=1000, sample_points=10000, 
             sobs_pt = sobs_pt[valids]
             rho_bounce = rho_bounce[valids]
 
-
             b_sigma = np.ones(nb_xyz.shape[0]) * sigma[face]
 
             acc_rng = np.linalg.norm(nb_xyz - sobs_pt, axis=1)
 
             # Check for occlusion against the receiver and then accumulate the returns
-            check_dir = nb_xyz - obs_pt
+            check_dir = nb_xyz - a_obs_pt
             check_dir = check_dir / np.linalg.norm(check_dir, axis=1)[:, None]
 
             _, _, check_tri_idx = bounce(nb_xyz, check_dir, boxes, quad_vertices, quad_triangles,
-                                                                quad_normals)
+                                         quad_normals)
             valids = check_tri_idx >= 0
 
             # Get the range profile from the intersection-tested rays
@@ -354,14 +364,18 @@ def getRangeProfileFromMesh(mesh, obs_pt, voxel_size=1000, sample_points=10000, 
 
             genRangeProfileSinglePulse[max(1, int_gpu.shape[0] // threads_per_block[0] + 1),
             threads_per_block[0]](int_gpu, bounce_gpu, sigma_gpu, obs_pt_gpu, obs_pt_gpu, ray_dist_gpu, ray_power_gpu,
-                                  pointing_az, pointing_el, pointing_az, pointing_el, pd_r, pd_i, c0 / fc, standoff / c0,
+                                  pointing_az, pointing_el, pointing_az, pointing_el, pd_r, pd_i, c0 / fc,
+                                  standoff / c0,
                                   fs, bw_az, bw_el)
-            single_pulse += pd_r.get() + 1j * pd_r.get()
+            pulse_ret += pd_r.get() + 1j * pd_r.get()
             obs_bounce = tvec + 0.0
             sobs_pt = nb_xyz
             tvec = nb_bounce_dir
             curr_sigma = nb_tri_idx
-    return single_pulse
+    if debug:
+        return pulse_ret, debug_rays, debug_raydirs, debug_raypower
+    else:
+        return pulse_ret
 
 
 def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms):
@@ -401,10 +415,10 @@ def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms)
     return inter_xyz, inter_bounce_dir, inter_tri_idx
 
 
-
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
-    from simulation_functions import db, genChirp, azelToVec
+    import matplotlib.tri as mtri
+    from simulation_functions import db, genChirp
 
     mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=260000)
     # mesh = o3d.geometry.TriangleMesh.create_sphere(radius=100, resolution=50)
@@ -422,30 +436,19 @@ if __name__ == '__main__':
     up_fft_len = fft_len * 4
     chirp = genChirp(nr, fs, fc, 400e6)
 
-    single_rp = getRangeProfileFromMesh(mesh, obs_pt, num_bounces=1)
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(mesh, obs_pt, num_bounces=1, debug=True)
     single_pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len))[:nsam]
-    single_mf_pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len) * np.fft.fft(chirp, fft_len).conj())[:nsam]
+    single_mf_pulse = np.fft.ifft(
+        np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len) * np.fft.fft(chirp, fft_len).conj())[:nsam]
 
-    '''first_bounce_cloud = o3d.geometry.PointCloud()
-    first_bounce_cloud.points = o3d.utility.Vector3dVector(np.concatenate((face_centers, obs_pt.reshape(1, 3))))
-    first_bounce_cloud.normals = o3d.utility.Vector3dVector(
-        np.concatenate((bounce_vec, # * (rho_final / rho_scaling)[:, None],
-                        -(obs_pt - mesh.get_center()).reshape(1, 3))))
-
-
-
-    o3d.visualization.draw_geometries([mesh, first_bounce_cloud])'''
-
-
-    '''check = o3d.geometry.PointCloud()
-    check.points = o3d.utility.Vector3dVector(face_centers)
-
-    c2 = o3d.geometry.PointCloud()
-    c2.points = o3d.utility.Vector3dVector(face_second)
-    c2.normals = o3d.utility.Vector3dVector(bounce_sec)
-
-    o3d.visualization.draw_geometries([check, c2])'''
+    face_points = np.asarray(mesh.vertices)
+    face_tris = np.asarray(mesh.triangles)
+    triang = mtri.Triangulation(face_points[:, 0], face_points[:, 1], face_tris)
+    ax = plt.figure().add_subplot(projection='3d')
+    ax.plot_trisurf(triang, face_points[:, 2])
+    ax.quiver(ray_origins[:, 0], ray_origins[:, 1], ray_origins[:, 2], ray_directions[:, 0] * ray_powers,
+              ray_directions[:, 1] * ray_powers, ray_directions[:, 2] * ray_powers)
+    plt.show()
     px.scatter(db(single_rp)).show()
     px.scatter(db(single_pulse)).show()
     px.scatter(db(single_mf_pulse)).show()
-
