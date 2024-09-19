@@ -42,7 +42,7 @@ pvecs = np.zeros((sdr[0].nframes, 3))
 pmods = np.ones(sdr[0].nframes)
 norm = np.array([0., 0.])
 scat = 1.
-nper = 32
+nper = 16
 
 access_pts = []
 for t in tqdm(sdr[0].pulse_time):
