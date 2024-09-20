@@ -267,7 +267,7 @@ def getBoxesSamplesFromMesh(a_mesh, num_boxes=4, sample_points=10000):
 
 
 def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, sample_points, a_obs_pt,
-                            pointing_vec, bounce_rays=15, num_bounces=3, debug=False):
+                            pointing_vec, radar_equation_constant, bounce_rays=15, num_bounces=3, debug=False):
     # GPU device calculations
     threads_per_block = getMaxThreads()
     face_centers = np.asarray(sample_points.points)
@@ -283,7 +283,7 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
     el = -np.arcsin(initial_tvec[:, 2])
 
     rho_o = np.array([applyRadiationPatternCPU(e, a, pointing_az, pointing_el, pointing_az, pointing_el,
-                                               bw_az, bw_el) for e, a in zip(el, az)]) * 1e12
+                                               bw_az, bw_el) for e, a in zip(el, az)]) * radar_equation_constant
     obs_pt_vec = np.repeat(a_obs_pt.reshape(1, 3), initial_tvec.shape[0], axis=0)
     inter_xyz, inter_bounce_dir, inter_tri_idx = bounce(obs_pt_vec, initial_tvec, boxes, quad_vertices, quad_triangles,
                                                         quad_normals)
@@ -315,7 +315,7 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
     delta_phi = np.sum(initial_tvec * inter_bounce_dir, axis=1)
     delta_phi[delta_phi < 0] = 0.
     att = delta_phi / sigma ** 2 * np.exp(-delta_phi ** 2 / (2 * sigma ** 2))
-    rho_final = rho_o * att / rng ** 4
+    rho_final = rho_o * att / rng**2
 
     if debug:
         debug_rays = [inter_xyz]
@@ -359,11 +359,10 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
             nb_tri_idx = nb_tri_idx[valids]
             nb_bounce_dir = nb_bounce_dir[valids]
             sobs_pt = sobs_pt[valids]
-            rho_bounce = rho_bounce[valids]
+            acc_rng = np.linalg.norm(nb_xyz - sobs_pt, axis=1)
+            rho_bounce = rho_bounce[valids] / acc_rng**2
 
             b_sigma = np.ones(nb_xyz.shape[0]) * sigma[face]
-
-            acc_rng = np.linalg.norm(nb_xyz - sobs_pt, axis=1)
 
             # Check for occlusion against the receiver and then accumulate the returns
             check_dir = nb_xyz - a_obs_pt
@@ -440,7 +439,7 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
     import matplotlib.tri as mtri
-    from simulation_functions import db, genChirp
+    from simulation_functions import db, genChirp, upsamplePulse
 
     mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=260000)
     # mesh = o3d.geometry.TriangleMesh.create_sphere(radius=50, resolution=20)
@@ -449,37 +448,44 @@ if __name__ == '__main__':
     obs_pt = np.array([0., -800., 700.])
     nr = 512
     fc = 32.0e9
+    ant_gain = 22  # dB
+    ant_transmit_power = 100  # watts
+    ant_eff_aperture = .01 * .01  # m**2
     bw_az = 10 * DTR
     bw_el = 10 * DTR
     npulses = 32
+    upsample = 4
 
     ranges = np.linalg.norm(np.asarray(mesh.vertices) - obs_pt, axis=1)
     standoff = ranges.min()
+
+    # This is all the constants in the radar equation for this simulation
+    radar_coeff = ant_transmit_power * 10**(ant_gain / 10) * ant_eff_aperture / (4 * np.pi)**2
 
     pulse_obs = np.array([np.zeros(npulses), np.linspace(-5, 5, npulses) + obs_pt[1],
                           np.zeros(npulses) + obs_pt[2]]).T
 
     nsam = int(np.round(ranges.max() / c0 * fs / 2)) - int(np.round(ranges.min() / c0 * fs / 2))
     fft_len = findPowerOf2(nsam + nr)
-    up_fft_len = fft_len * 4
+    up_fft_len = fft_len * upsample
     chirp = genChirp(nr, fs, fc, 400e6)
-    pulses = np.zeros((npulses, nsam), dtype=np.complex128)
+    pulses = np.zeros((npulses, nsam * upsample), dtype=np.complex128)
 
     pointing_vec = np.array([0, 1., 0])
 
     box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=1)
 
     single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt,
-                                                                                 pointing_vec, num_bounces=1,
+                                                                                 pointing_vec, radar_coeff, num_bounces=1,
                                                                                  debug=True)
-    single_pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len))[:nsam]
-    single_mf_pulse = np.fft.ifft(
-        np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len) * np.fft.fft(chirp, fft_len).conj())[:nsam]
+    single_pulse = upsamplePulse(np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len), fft_len, upsample, is_freq=True)
+    single_mf_pulse = upsamplePulse(
+        np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len) * np.fft.fft(chirp, fft_len).conj(), fft_len, upsample, is_freq=True)
     for n in tqdm(range(npulses)):
-        rp = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt, pointing_vec, num_bounces=1)
-        pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len))[:nsam]
-        mf_pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len) *
-                               np.fft.fft(chirp, fft_len).conj())[:nsam]
+        rp = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt, pointing_vec, radar_coeff, num_bounces=1)
+        pulse = upsamplePulse(np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len), fft_len, upsample, is_freq=True)
+        mf_pulse = upsamplePulse(
+        np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len) * np.fft.fft(chirp, fft_len).conj(), fft_len, upsample, is_freq=True)
         pulses[n] = mf_pulse
 
     '''face_points = np.asarray(mesh.vertices)
