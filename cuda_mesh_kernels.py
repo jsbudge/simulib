@@ -1,5 +1,7 @@
 import cmath
 import math
+
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from tqdm import tqdm
 from numba import cuda
 import cupy
@@ -233,21 +235,41 @@ def checkBoxIntersection(ray, ray_origin, box_max, box_min):
     return tmax >= tmin and tmax >= 0
 
 
-def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=10000, bounce_rays=15, num_bounces=3,
-                            debug=False):
-    # GPU device calculations
-    threads_per_block = getMaxThreads()
-
+def getBoxesSamplesFromMesh(a_mesh, num_boxes=4, sample_points=10000):
     # Generate bounding box tree
-    full_box = o3d.geometry.VoxelGrid.create_from_triangle_mesh(a_mesh, voxel_size)
-    boxes = [o3d.geometry.AxisAlignedBoundingBox.create_from_points(full_box.get_voxel_bounding_points(t.grid_index))
-             for t in full_box.get_voxels()]
+    aabb = a_mesh.get_axis_aligned_bounding_box()
+    max_bound = aabb.get_max_bound()
+    min_bound = aabb.get_min_bound()
+    xes = np.linspace(min_bound[0], max_bound[0], num_boxes + 1)
+    yes = np.linspace(min_bound[1], max_bound[1], num_boxes + 1)
+    boxes = []
+    for x in range(1, len(xes)):
+        boxes.extend(
+            o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+                o3d.utility.Vector3dVector(
+                    np.array(
+                        [
+                            [xes[x - 1] - 1, yes[y - 1] - 1, min_bound[2] - 1],
+                            [xes[x] + 1, yes[y] + 1, max_bound[2] + 1],
+                        ]
+                    )
+                )
+            )
+            for y in range(1, len(yes))
+        )
     mesh_quads = [a_mesh.crop(b) for b in boxes]
     quad_triangles = [np.asarray(m.triangles) for m in mesh_quads]
     quad_vertices = [np.asarray(m.vertices) for m in mesh_quads]
     quad_normals = [np.asarray(m.triangle_normals) for m in mesh_quads]
 
-    sample_points = a_mesh.sample_points_poisson_disk(sample_points)
+    points = a_mesh.sample_points_poisson_disk(sample_points)
+    return (boxes, quad_triangles, quad_vertices, quad_normals), points
+
+
+def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, sample_points, a_obs_pt,
+                            pointing_vec, bounce_rays=15, num_bounces=3, debug=False):
+    # GPU device calculations
+    threads_per_block = getMaxThreads()
     face_centers = np.asarray(sample_points.points)
 
     initial_tvec = face_centers - a_obs_pt
@@ -255,9 +277,8 @@ def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=100
 
     # Generate the pointing vector for the antenna and the antenna pattern
     # that will affect the power received by the intersection point
-    ant_point = a_mesh.get_center() - a_obs_pt
-    pointing_az = np.arctan2(ant_point[0], ant_point[1])
-    pointing_el = -np.arcsin(ant_point[2] / np.linalg.norm(ant_point))
+    pointing_az = np.arctan2(pointing_vec[0], pointing_vec[1])
+    pointing_el = -np.arcsin(pointing_vec[2])
     az = np.arctan2(initial_tvec[:, 0], initial_tvec[:, 1])
     el = -np.arcsin(initial_tvec[:, 2])
 
@@ -269,7 +290,7 @@ def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=100
 
     # Get sigma values from colors (this will be changed with material parameters)
     sigma = np.asarray(sample_points.colors)
-    sigma = (sigma[:, 1] - (sigma[:, 0] + sigma[:, 2])**2) * np.pi / 2
+    sigma = (sigma[:, 1] - (sigma[:, 0] + sigma[:, 2])**2)  / sigma.max() * 5
     sigma[sigma <= 0] = .1
 
     # Get the range profile from the intersection-tested rays
@@ -297,9 +318,9 @@ def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=100
     rho_final = rho_o * att / rng ** 4
 
     if debug:
-        debug_rays = inter_xyz
-        debug_raydirs = inter_bounce_dir
-        debug_raypower = rho_final
+        debug_rays = [inter_xyz]
+        debug_raydirs = [inter_bounce_dir]
+        debug_raypower = [rho_final]
 
     for face in tqdm(range(0, inter_xyz.shape[0] - 1, 2)):
         sobs_pt = np.repeat(inter_xyz[face].reshape(1, 3), bounce_rays, axis=0)
@@ -319,7 +340,7 @@ def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=100
             rho_bounce = rho_bounce * att
 
             # Cull rays that are below a significant power
-            valids = rho_bounce < 1e-8
+            valids = rho_bounce > 1e-8
             if not np.any(valids):
                 break
             tvec = tvec[valids]
@@ -327,9 +348,9 @@ def getRangeProfileFromMesh(a_mesh, a_obs_pt, voxel_size=1000, sample_points=100
             sobs_pt = sobs_pt[valids]
 
             if debug:
-                debug_rays = np.concatenate((debug_rays, sobs_pt), axis=1)
-                debug_raydirs = np.concatenate((debug_raydirs, tvec), axis=1)
-                debug_raypower = np.concatenate((debug_raydirs, rho_bounce))
+                debug_rays += [sobs_pt]
+                debug_raydirs += [tvec]
+                debug_raypower += [rho_bounce]
 
             nb_xyz, nb_bounce_dir, nb_tri_idx = bounce(sobs_pt, tvec, boxes, quad_vertices, quad_triangles,
                                                        quad_normals)
@@ -417,38 +438,77 @@ def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms)
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
     import matplotlib.tri as mtri
     from simulation_functions import db, genChirp
 
     mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=260000)
-    # mesh = o3d.geometry.TriangleMesh.create_sphere(radius=100, resolution=50)
+    # mesh = o3d.geometry.TriangleMesh.create_sphere(radius=50, resolution=20)
     mesh = mesh.compute_triangle_normals()
     mesh = mesh.compute_vertex_normals()
     obs_pt = np.array([0., -800., 700.])
-    nr = 4096
+    nr = 512
     fc = 32.0e9
-    standoff = 700.
     bw_az = 10 * DTR
     bw_el = 10 * DTR
+    npulses = 32
 
-    nsam = int(np.round(standoff / c0 * fs))
+    ranges = np.linalg.norm(np.asarray(mesh.vertices) - obs_pt, axis=1)
+    standoff = ranges.min()
+
+    pulse_obs = np.array([np.zeros(npulses), np.linspace(-5, 5, npulses) + obs_pt[1],
+                          np.zeros(npulses) + obs_pt[2]]).T
+
+    nsam = int(np.round(ranges.max() / c0 * fs / 2)) - int(np.round(ranges.min() / c0 * fs / 2))
     fft_len = findPowerOf2(nsam + nr)
     up_fft_len = fft_len * 4
     chirp = genChirp(nr, fs, fc, 400e6)
+    pulses = np.zeros((npulses, nsam), dtype=np.complex128)
 
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(mesh, obs_pt, num_bounces=1, debug=True)
+    pointing_vec = np.array([0, 1., 0])
+
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=1)
+
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt,
+                                                                                 pointing_vec, num_bounces=1,
+                                                                                 debug=True)
     single_pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len))[:nsam]
     single_mf_pulse = np.fft.ifft(
         np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len) * np.fft.fft(chirp, fft_len).conj())[:nsam]
+    for n in tqdm(range(npulses)):
+        rp = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt, pointing_vec, num_bounces=1)
+        pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len))[:nsam]
+        mf_pulse = np.fft.ifft(np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len) *
+                               np.fft.fft(chirp, fft_len).conj())[:nsam]
+        pulses[n] = mf_pulse
 
-    face_points = np.asarray(mesh.vertices)
+    '''face_points = np.asarray(mesh.vertices)
     face_tris = np.asarray(mesh.triangles)
-    triang = mtri.Triangulation(face_points[:, 0], face_points[:, 1], face_tris)
+    face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
     ax = plt.figure().add_subplot(projection='3d')
-    ax.plot_trisurf(triang, face_points[:, 2])
+    polygons = []
+    for i in range(face_tris.shape[0]):
+        face = face_tris[i]
+        polygon = Poly3DCollection([face_points[face]], alpha=.75, facecolor=face_colors[i], linewidths=2)
+        polygons.append(polygon)
+        ax.add_collection3d(polygon)
     ax.quiver(ray_origins[:, 0], ray_origins[:, 1], ray_origins[:, 2], ray_directions[:, 0] * ray_powers,
               ray_directions[:, 1] * ray_powers, ray_directions[:, 2] * ray_powers)
+    plt.show()'''
+    ax = plt.figure().add_subplot(projection='3d')
+    scaling = (min([r.min() for r in ray_powers]), max([r.max() for r in ray_powers]))
+    sc_min = scaling[0]
+    sc = 1 / (scaling[1] - scaling[0])
+    for idx, (ro, rd, rp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
+        scaled_rp = (rp - sc_min) * sc * 10
+        ax.quiver(ro[:, 0], ro[:, 1], ro[:, 2], rd[:, 0],
+                  rd[:, 1], rd[:, 2], color=cm.jet(idx / len(ray_origins) * np.ones_like(rp)))
     plt.show()
     px.scatter(db(single_rp)).show()
     px.scatter(db(single_pulse)).show()
     px.scatter(db(single_mf_pulse)).show()
+
+    plt.figure('Data')
+    plt.imshow(db(np.fft.fft(pulses, axis=0)))
+    plt.axis('tight')
+    plt.show()
