@@ -93,7 +93,7 @@ def calcIntersection(ray_dir, ray_xyz, vert_xyz, tri_norm, tri_verts, int_xyz, i
 
         if (math.sqrt(abs(intx - rx) ** 2 + abs(inty - ry) ** 2 + abs(intz - rz) ** 2) <=
                 math.sqrt(abs(int_xyz[ray_idx, 0] - rx) ** 2 + abs(int_xyz[ray_idx, 1] - ry) ** 2 +
-                          abs(int_xyz[ray_idx, 2] - rz) ** 2)):
+                          abs(int_xyz[ray_idx, 2] - rz) ** 2)) or int_tri[ray_idx] < 0:
             # Calculate out the angles in azimuth and elevation for the bounce
             tx, ty, tz, vrng, _, _ = getRangeAndAngles(intx, inty, intz, rx, ry, rz)
 
@@ -267,7 +267,8 @@ def getBoxesSamplesFromMesh(a_mesh, num_boxes=4, sample_points=10000):
 
 
 def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, sample_points, a_obs_pt,
-                            pointing_vec, radar_equation_constant, bounce_rays=15, num_bounces=3, debug=False):
+                            pointing_vec, radar_equation_constant, bw_az, bw_el, nsam, fc, standoff, bounce_rays=15,
+                            num_bounces=3, debug=False):
     # GPU device calculations
     threads_per_block = getMaxThreads()
     face_centers = np.asarray(sample_points.points)
@@ -289,9 +290,12 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
                                                         quad_normals)
 
     # Get sigma values from colors (this will be changed with material parameters)
-    sigma = np.asarray(sample_points.colors)
-    sigma = (sigma[:, 1] - (sigma[:, 0] + sigma[:, 2])**2)  / sigma.max() * 5
-    sigma[sigma <= 0] = .1
+    try:
+        sigma = np.asarray(sample_points.colors)
+        sigma = (sigma[:, 1] - (sigma[:, 0] + sigma[:, 2])**2)  / sigma.max() * 5
+        sigma[sigma <= 0] = .1
+    except ValueError:
+        sigma = np.ones(face_centers.shape[0]) * 1
 
     # Get the range profile from the intersection-tested rays
     rng = np.linalg.norm(inter_xyz - a_obs_pt[None, :], axis=1)
@@ -322,7 +326,7 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
         debug_raydirs = [inter_bounce_dir]
         debug_raypower = [rho_final]
 
-    for face in tqdm(range(0, inter_xyz.shape[0] - 1, 2)):
+    for face in range(0, inter_xyz.shape[0] - 1, 2):
         sobs_pt = np.repeat(inter_xyz[face].reshape(1, 3), bounce_rays, axis=0)
         obs_bounce = np.repeat(inter_bounce_dir[face].reshape(1, 3), bounce_rays, axis=0)
         paz = np.arctan2(obs_bounce[:, 0], obs_bounce[:, 1])
@@ -354,12 +358,13 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
 
             nb_xyz, nb_bounce_dir, nb_tri_idx = bounce(sobs_pt, tvec, boxes, quad_vertices, quad_triangles,
                                                        quad_normals)
-            valids = nb_tri_idx >= 0
+            acc_rng = np.linalg.norm(nb_xyz - sobs_pt, axis=1)
+            valids = np.logical_and(nb_tri_idx >= 0, acc_rng > 1e-6)
             nb_xyz = nb_xyz[valids]
             nb_tri_idx = nb_tri_idx[valids]
             nb_bounce_dir = nb_bounce_dir[valids]
             sobs_pt = sobs_pt[valids]
-            acc_rng = np.linalg.norm(nb_xyz - sobs_pt, axis=1)
+            acc_rng = acc_rng[valids]
             rho_bounce = rho_bounce[valids] / acc_rng**2
 
             b_sigma = np.ones(nb_xyz.shape[0]) * sigma[face]
@@ -421,7 +426,7 @@ def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms)
             tri_norm_gpu = cupy.array(tri_norms[b_idx], dtype=np.float32)
             tri_idxes_gpu = cupy.array(tri_idxes[b_idx], dtype=np.int32)
             tri_verts_gpu = cupy.array(tri_verts[b_idx], dtype=np.float32)
-            int_tri_gpu = cupy.zeros(int_gpu.shape[0], dtype=np.int32)
+            int_tri_gpu = cupy.array(inter_tri_idx, dtype=np.int32)
             bounce_gpu = cupy.zeros_like(ray_dir_gpu)
 
             bprun = (max(1, int_gpu.shape[0] // threads_per_block[0] + 1),
@@ -436,85 +441,5 @@ def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms)
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-    import matplotlib.tri as mtri
-    from simulation_functions import db, genChirp, upsamplePulse
 
     mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=260000)
-    # mesh = o3d.geometry.TriangleMesh.create_sphere(radius=50, resolution=20)
-    mesh = mesh.compute_triangle_normals()
-    mesh = mesh.compute_vertex_normals()
-    obs_pt = np.array([0., -800., 700.])
-    nr = 512
-    fc = 32.0e9
-    ant_gain = 22  # dB
-    ant_transmit_power = 100  # watts
-    ant_eff_aperture = .01 * .01  # m**2
-    bw_az = 10 * DTR
-    bw_el = 10 * DTR
-    npulses = 32
-    upsample = 4
-
-    ranges = np.linalg.norm(np.asarray(mesh.vertices) - obs_pt, axis=1)
-    standoff = ranges.min()
-
-    # This is all the constants in the radar equation for this simulation
-    radar_coeff = ant_transmit_power * 10**(ant_gain / 10) * ant_eff_aperture / (4 * np.pi)**2
-
-    pulse_obs = np.array([np.zeros(npulses), np.linspace(-5, 5, npulses) + obs_pt[1],
-                          np.zeros(npulses) + obs_pt[2]]).T
-
-    nsam = int(np.round(ranges.max() / c0 * fs / 2)) - int(np.round(ranges.min() / c0 * fs / 2))
-    fft_len = findPowerOf2(nsam + nr)
-    up_fft_len = fft_len * upsample
-    chirp = genChirp(nr, fs, fc, 400e6)
-    pulses = np.zeros((npulses, nsam * upsample), dtype=np.complex128)
-
-    pointing_vec = np.array([0, 1., 0])
-
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=1)
-
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt,
-                                                                                 pointing_vec, radar_coeff, num_bounces=1,
-                                                                                 debug=True)
-    single_pulse = upsamplePulse(np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len), fft_len, upsample, is_freq=True)
-    single_mf_pulse = upsamplePulse(
-        np.fft.fft(chirp, fft_len) * np.fft.fft(single_rp, fft_len) * np.fft.fft(chirp, fft_len).conj(), fft_len, upsample, is_freq=True)
-    for n in tqdm(range(npulses)):
-        rp = getRangeProfileFromMesh(*box_tree, sample_points, obs_pt, pointing_vec, radar_coeff, num_bounces=1)
-        pulse = upsamplePulse(np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len), fft_len, upsample, is_freq=True)
-        mf_pulse = upsamplePulse(
-        np.fft.fft(chirp, fft_len) * np.fft.fft(rp, fft_len) * np.fft.fft(chirp, fft_len).conj(), fft_len, upsample, is_freq=True)
-        pulses[n] = mf_pulse
-
-    '''face_points = np.asarray(mesh.vertices)
-    face_tris = np.asarray(mesh.triangles)
-    face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
-    ax = plt.figure().add_subplot(projection='3d')
-    polygons = []
-    for i in range(face_tris.shape[0]):
-        face = face_tris[i]
-        polygon = Poly3DCollection([face_points[face]], alpha=.75, facecolor=face_colors[i], linewidths=2)
-        polygons.append(polygon)
-        ax.add_collection3d(polygon)
-    ax.quiver(ray_origins[:, 0], ray_origins[:, 1], ray_origins[:, 2], ray_directions[:, 0] * ray_powers,
-              ray_directions[:, 1] * ray_powers, ray_directions[:, 2] * ray_powers)
-    plt.show()'''
-    ax = plt.figure().add_subplot(projection='3d')
-    scaling = (min([r.min() for r in ray_powers]), max([r.max() for r in ray_powers]))
-    sc_min = scaling[0]
-    sc = 1 / (scaling[1] - scaling[0])
-    for idx, (ro, rd, rp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
-        scaled_rp = (rp - sc_min) * sc * 10
-        ax.quiver(ro[:, 0], ro[:, 1], ro[:, 2], rd[:, 0],
-                  rd[:, 1], rd[:, 2], color=cm.jet(idx / len(ray_origins) * np.ones_like(rp)))
-    plt.show()
-    px.scatter(db(single_rp)).show()
-    px.scatter(db(single_pulse)).show()
-    px.scatter(db(single_mf_pulse)).show()
-
-    plt.figure('Data')
-    plt.imshow(db(np.fft.fft(pulses, axis=0)))
-    plt.axis('tight')
-    plt.show()

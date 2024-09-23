@@ -865,17 +865,17 @@ def resampleGoogleMap(lats, lons, mpp):
     return map_img, im_x, im_y
 
 
-def upsamplePulse(p, fft_len, upsample, is_freq=False):
+def upsamplePulse(p, fft_len, upsample, is_freq=False, out_freq=False, time_len=0):
     if len(p.shape) == 1:
-        op = np.fft.fft(p, fft_len) if not is_freq else p
+        op = p if is_freq else np.fft.fft(p, fft_len)
         up = np.zeros(fft_len * upsample, dtype=op.dtype)
         up[:fft_len // 2] = op[:fft_len // 2]
         up[-fft_len // 2:] = op[-fft_len // 2:]
-        up = np.fft.ifft(up)[:p.shape[1] * upsample]
+        up = np.fft.ifft(up)[:time_len * upsample] if not out_freq else up
     else:
-        op = np.fft.fft(p, axis=1) if not is_freq else p
+        op = p if is_freq else np.fft.fft(p, axis=1)
         up = np.zeros((op.shape[1], fft_len * upsample), dtype=op.dtype)
         up[:, :fft_len // 2] = op[:, :fft_len // 2]
         up[:, -fft_len // 2:] = op[:, -fft_len // 2:]
-        up = np.fft.ifft(up, axis=1)[:, :p.shape[1] * upsample]
+        up = np.fft.ifft(up, axis=1)[:, :time_len * upsample] if not out_freq else up
     return up
