@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from simulation_functions import azelToVec
 from tqdm import tqdm
 import plotly.io as pio
+import open3d as o3d
 
 pio.renderers.default = 'browser'
 
@@ -23,8 +24,7 @@ ant_gain = 25
 transmit_power = 100
 pixel_to_m = .25
 upsample = 4
-
-ref_pt = [50, 40]
+nper = 10
 
 # Prep the background ASI image
 bg = SDREnvironment(sdr)
@@ -35,76 +35,91 @@ mfilt = sdr.genMatchedFilter(0, fft_len=fft_len)
 
 gx, gy, gz = bg.getGrid()
 asi_data = bg.getRefGrid()
-pt_pos = np.array([gx[*ref_pt], gy[*ref_pt], gz[*ref_pt]])
 
-rngs = np.zeros(sdr[0].nframes)
-pvecs = np.zeros((sdr[0].nframes, 3))
-pmods = np.ones(sdr[0].nframes)
-norm = np.array([0., 0.])
-scat = 1.
-nper = 256
+is_opted = np.zeros_like(asi_data).astype(bool)
+grid_optscat = np.zeros_like(asi_data)
+grid_optnorm = np.zeros((*gx.shape, 3))
 
-access_pts = []
-for t in tqdm(sdr[0].pulse_time[:nper]):
-    vecs = np.array([gx - rp.txpos(t)[0], gy - rp.txpos(t)[1],
-                     gz - rp.txpos(t)[2]])
-    bins = np.round((np.linalg.norm(vecs, axis=0) / c0 - 2 * near_range_s) * fs * upsample).astype(int)
-    access_pts.append([(a, b) for a, b in zip(*np.where(bins == bins[*ref_pt]))])
-all_pts = np.array(list(set([x for xs in access_pts for x in xs])))
+for _ in range(45):
+    all_pts = []
+    pt_it = 0
+    while len(all_pts) == 0 and pt_it < 15:
+        ref_pt = [np.random.randint(0, gx.shape[0] - 1), np.random.randint(0, gx.shape[1] - 1)]
+        pt_pos = np.array([gx[*ref_pt], gy[*ref_pt], gz[*ref_pt]])
 
-rho_matrix = np.zeros((all_pts.shape[0], nper)).astype(np.complex128)
-rngs = np.zeros_like(rho_matrix)
-pmods = np.zeros_like(rho_matrix)
-pvecs = np.zeros((*rho_matrix.shape, 3))
+        rngs = np.zeros(sdr[0].nframes)
+        pvecs = np.zeros((sdr[0].nframes, 3))
+        pmods = np.ones(sdr[0].nframes)
+        norm = np.array([0., 0.])
+        scat = 1.
+        pt_it += 1
 
-for n in tqdm(range(nper)):
-    vec = np.array([gx[all_pts[:, 0], all_pts[:, 1]] - rp.txpos(sdr[0].pulse_time[n])[0],
-                    gy[all_pts[:, 0], all_pts[:, 1]] - rp.txpos(sdr[0].pulse_time[n])[1],
-                    gz[all_pts[:, 0], all_pts[:, 1]] - rp.txpos(sdr[0].pulse_time[n])[2]]).T
-    tmp_rngs = np.linalg.norm(vec, axis=1)
-    rng_bin = np.round((tmp_rngs / c0 - 2 * near_range_s) * fs * upsample).astype(int)
-    _, pdata = sdr.getPulses([sdr[0].frame_num[n]], 0)
-    mfdata = np.fft.fft(pdata, fft_len, axis=0) * mfilt[:, None]
-    updata = np.zeros((up_fft_len, 1), dtype=np.complex128)
-    updata[:fft_len // 2, :] = mfdata[:fft_len // 2, :]
-    updata[-fft_len // 2:, :] = mfdata[-fft_len // 2:, :]
-    updata = np.fft.ifft(updata, axis=0)[:nsam * upsample, :].T
-    dmag = updata[0, rng_bin]
-    rho_matrix[:, n] = dmag
-    rngs[:, n] = tmp_rngs
-    pvecs[:, n, :] = vec / tmp_rngs[:, None]
-    azes = np.arctan2(pvecs[:, n, 0], pvecs[:, n, 1])
-    eles = -np.arcsin(pvecs[:, n, 2])
-    pmods[:, n] = [applyRadiationPatternCPU(eles[i], azes[i], rp.pan(sdr[0].pulse_time[n]),
-                                            rp.tilt(sdr[0].pulse_time[n]), rp.pan(sdr[0].pulse_time[n]),
-                                            rp.tilt(sdr[0].pulse_time[n]), rp.az_half_bw, rp.el_half_bw)
-                   for i in range(rho_matrix.shape[0])]
+        access_pts = []
+        for t in tqdm(sdr[0].pulse_time[np.round(np.linspace(0, sdr[0].nframes, nper, endpoint=False)).astype(int)]):
+            vecs = np.array([gx - rp.txpos(t)[0], gy - rp.txpos(t)[1],
+                             gz - rp.txpos(t)[2]])
+            bins = np.round((np.linalg.norm(vecs, axis=0) / c0 - 2 * near_range_s) * fs * upsample).astype(int)
+            access_pts.append([(a, b) for a, b in zip(*np.where(bins == bins[*ref_pt])) if not is_opted[a, b]])
+        all_pts = np.array(list(set([x for xs in access_pts for x in xs])))
+    if all_pts.shape[0] == 0:
+        break
 
-coeff = 1 / rngs ** 4
-coeff = coeff / coeff.max()
-rhos_scaled = rho_matrix / abs(rho_matrix).max() * coeff.max()
+    rho_matrix = np.zeros((all_pts.shape[0], nper)).astype(np.complex128)
+    rngs = np.zeros_like(rho_matrix)
+    pmods = np.zeros_like(rho_matrix)
+    pvecs = np.zeros((*rho_matrix.shape, 3))
 
-x0 = np.ones(rho_matrix.shape[0] + 2 * rho_matrix.shape[0])
+    for n in tqdm(range(nper)):
+        vec = np.array([gx[all_pts[:, 0], all_pts[:, 1]] - rp.txpos(sdr[0].pulse_time[n])[0],
+                        gy[all_pts[:, 0], all_pts[:, 1]] - rp.txpos(sdr[0].pulse_time[n])[1],
+                        gz[all_pts[:, 0], all_pts[:, 1]] - rp.txpos(sdr[0].pulse_time[n])[2]]).T
+        tmp_rngs = np.linalg.norm(vec, axis=1)
+        rng_bin = np.round((tmp_rngs / c0 - 2 * near_range_s) * fs * upsample).astype(int)
+        valids = np.logical_and(rng_bin >= 0, rng_bin < nsam * upsample)
+        rng_bin = rng_bin[valids]
+        _, pdata = sdr.getPulses([sdr[0].frame_num[n]], 0)
+        mfdata = np.fft.fft(pdata, fft_len, axis=0) * mfilt[:, None]
+        updata = np.zeros((up_fft_len, 1), dtype=np.complex128)
+        updata[:fft_len // 2, :] = mfdata[:fft_len // 2, :]
+        updata[-fft_len // 2:, :] = mfdata[-fft_len // 2:, :]
+        updata = np.fft.ifft(updata, axis=0)[:nsam * upsample, :].T
+        dmag = updata[0, rng_bin]
+        rho_matrix[valids, n] = dmag
+        rngs[:, n] = tmp_rngs
+        pvecs[:, n, :] = vec / tmp_rngs[:, None]
+        azes = np.arctan2(pvecs[:, n, 0], pvecs[:, n, 1])
+        eles = -np.arcsin(pvecs[:, n, 2])
+        pmods[:, n] = [applyRadiationPatternCPU(eles[i], azes[i], rp.pan(sdr[0].pulse_time[n]),
+                                                rp.tilt(sdr[0].pulse_time[n]), rp.pan(sdr[0].pulse_time[n]),
+                                                rp.tilt(sdr[0].pulse_time[n]), rp.az_half_bw, rp.el_half_bw)
+                       for i in range(rho_matrix.shape[0])]
+
+    coeff = 1 / rngs ** 4
+    coeff = coeff / coeff.max()
+    rhos_scaled = rho_matrix / abs(rho_matrix).max() * coeff.max()
+
+    x0 = np.ones(rho_matrix.shape[0] + 2 * rho_matrix.shape[0])
 
 
-def minfunc(x):
-    mnorm = azelToVec(x[1::3], x[2::3]).T
-    xr = np.sum(pvecs * (pvecs - 2 * np.einsum('ji,jk->jik',
-                                               np.sum(pvecs * mnorm[:, None, :], axis=2), mnorm)), axis=2)
-    xr[xr < 0] = 0
-    x_hat = coeff * xr / x[::3][:, None] ** 2 * np.exp(-(xr**2) / (2 * x[::3][:, None] ** 2)) * np.exp(-1j * 2 * np.pi / wavelength * rngs)
-    return np.linalg.norm(rhos_scaled - x_hat)
+    def minfunc(x):
+        mnorm = azelToVec(x[1::3], x[2::3]).T
+        xr = np.sum(pvecs * (pvecs - 2 * np.einsum('ji,jk->jik',
+                                                   np.sum(pvecs * mnorm[:, None, :], axis=2), mnorm)), axis=2)
+        xr[xr < 0] = 0
+        x_hat = coeff * xr / x[::3][:, None] ** 2 * np.exp(-(xr**2) / (2 * x[::3][:, None] ** 2)) * np.exp(-1j * 2 * np.pi / wavelength * rngs)
+        return np.linalg.norm(rhos_scaled - x_hat)
 
-opt_x = minimize(minfunc, x0)
+    opt_x = minimize(minfunc, x0)
 
-opt_norm = azelToVec(opt_x['x'][1::3], opt_x['x'][2::3]).T
-opt_scat = opt_x['x'][::3]
+    opt_norm = azelToVec(opt_x['x'][1::3], opt_x['x'][2::3]).T
+    opt_scat = opt_x['x'][::3]
 
-xr = np.sum(pvecs * (pvecs - 2 * np.einsum('ji,jk->jik',
-                                               np.sum(pvecs * opt_norm[:, None, :], axis=2), opt_norm)), axis=2)
-xr[xr < 0] = 0
-x_hat = coeff * xr / opt_scat[:, None] ** 2 * np.exp(-(xr**2) / (2 * opt_scat[:, None] ** 2)) * np.exp(-1j * 2 * np.pi / wavelength * rngs)
+    is_opted[all_pts[:, 0], all_pts[:, 1]] = True
+    grid_optscat[all_pts[:, 0], all_pts[:, 1]] = opt_scat
+    grid_optnorm[all_pts[:, 0], all_pts[:, 1]] = opt_norm
 
-plt.figure()
-plt.imshow(abs(rhos_scaled - x_hat))
-plt.show()
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(np.array([gx[is_opted], gy[is_opted], gz[is_opted]]).T)
+pcd.normals = o3d.utility.Vector3dVector(grid_optnorm[is_opted] * grid_optscat[is_opted][:, None])
+
+o3d.visualization.draw_geometries([pcd])

@@ -153,6 +153,80 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
     return r_bpj_final, r_debug_data
 
 
+def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavelength, near_range_s, upsample_fs,
+                        az_half_bw, el_half_bw, a_debug: bool = False, a_poly_num: int = 0) -> np.ndarray:
+    nbpj_pts = gx.shape
+
+    # Calculate out points on the ground
+    gx_gpu = cupy.array(gx, dtype=np.float64)
+    gy_gpu = cupy.array(gy, dtype=np.float64)
+    gz_gpu = cupy.array(gz, dtype=np.float64)
+
+    if a_debug:
+        pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
+        angs_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
+    else:
+        pts_debug = cupy.zeros((1, 1), dtype=np.float64)
+        angs_debug = cupy.zeros((1, 1), dtype=np.float64)
+
+    # GPU device calculations
+    threads_per_block = getMaxThreads()
+    bpg_bpj = (max(1, nbpj_pts[0] // threads_per_block[0] + 1), nbpj_pts[1] // threads_per_block[1] + 1)
+    # rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
+
+    # Run through loop to get data simulated
+    r_debug_data = None
+    print('Backprojecting...')
+    # Data blocks for imaging
+    r_bpj_final = np.zeros(nbpj_pts, dtype=np.complex128)
+    panrx_gpu = cupy.array(panrx, dtype=np.float64)
+    elrx_gpu = cupy.array(elrx, dtype=np.float64)
+    posrx_gpu = cupy.array(posrx, dtype=np.float64)
+    postx_gpu = cupy.array(postx, dtype=np.float64)
+    bpj_grid = cupy.zeros(nbpj_pts, dtype=np.complex128)
+
+    # Reset the grid for truth data
+    rtdata = cupy.array(pulse_data, dtype=np.complex128)
+    cupy.cuda.Device().synchronize()
+
+    backproject[bpg_bpj, threads_per_block](
+        postx_gpu,
+        posrx_gpu,
+        gx_gpu,
+        gy_gpu,
+        gz_gpu,
+        panrx_gpu,
+        elrx_gpu,
+        panrx_gpu,
+        elrx_gpu,
+        rtdata,
+        bpj_grid,
+        wavelength,
+        near_range_s,
+        upsample_fs,
+        az_half_bw,
+        el_half_bw,
+        a_poly_num,
+        pts_debug,
+        angs_debug,
+        a_debug,
+    )
+    cupy.cuda.Device().synchronize()
+
+    r_bpj_final += bpj_grid.get()
+
+    del panrx_gpu
+    del postx_gpu
+    del posrx_gpu
+    del elrx_gpu
+    del rtdata
+    del bpj_grid
+    del gx_gpu
+    del gy_gpu
+    del gz_gpu
+
+    return r_bpj_final
+
 def genSimPulseData(a_rp: RadarPlatform,
                     a_bg: SDREnvironment,
                     a_fdelay: float = 0.,

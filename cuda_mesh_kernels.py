@@ -1,6 +1,6 @@
 import cmath
 import math
-
+from simulation_functions import factors
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from tqdm import tqdm
 from numba import cuda
@@ -215,33 +215,49 @@ def readCombineMeshFile(fnme, points=100000):
 
 
 def checkBoxIntersection(ray, ray_origin, box_max, box_min):
-    tmin = -np.inf
-    tmax = np.inf
-    if ray[0] != 0.:
-        tx1 = (box_min[0] - ray_origin[0]) / ray[0]
-        tx2 = (box_max[0] - ray_origin[0]) / ray[0]
-        tmin = max(tmin, min(tx1, tx2))
-        tmax = min(tmax, max(tx1, tx2))
-    if ray[1] != 0.:
-        ty1 = (box_min[1] - ray_origin[1]) / ray[1]
-        ty2 = (box_max[1] - ray_origin[1]) / ray[1]
-        tmin = max(tmin, min(ty1, ty2))
-        tmax = min(tmax, max(ty1, ty2))
-    if ray[2] != 0.:
-        tz1 = (box_min[2] - ray_origin[2]) / ray[2]
-        tz2 = (box_max[2] - ray_origin[2]) / ray[2]
-        tmin = max(tmin, min(tz1, tz2))
-        tmax = min(tmax, max(tz1, tz2))
-    return tmax >= tmin and tmax >= 0
+    if len(ray.shape) == 1:
+        tmin = -np.inf
+        tmax = np.inf
+        if ray[0] != 0.:
+            tx1 = (box_min[0] - ray_origin[0]) / ray[0]
+            tx2 = (box_max[0] - ray_origin[0]) / ray[0]
+            tmin = max(tmin, min(tx1, tx2))
+            tmax = min(tmax, max(tx1, tx2))
+        if ray[1] != 0.:
+            ty1 = (box_min[1] - ray_origin[1]) / ray[1]
+            ty2 = (box_max[1] - ray_origin[1]) / ray[1]
+            tmin = max(tmin, min(ty1, ty2))
+            tmax = min(tmax, max(ty1, ty2))
+        if ray[2] != 0.:
+            tz1 = (box_min[2] - ray_origin[2]) / ray[2]
+            tz2 = (box_max[2] - ray_origin[2]) / ray[2]
+            tmin = max(tmin, min(tz1, tz2))
+            tmax = min(tmax, max(tz1, tz2))
+        return tmax >= tmin and tmax >= 0
+    tmin = np.ones(ray.shape[0]) * -np.inf
+    tmax = np.ones(ray.shape[0]) * np.inf
+    for n in range(3):
+        tx1 = (box_min[n] - ray_origin[:, n]) / ray[:, n]
+        tx2 = (box_max[n] - ray_origin[:, n]) / ray[:, n]
+        tmin = np.maximum(tmin, np.minimum(tx1, tx2))
+        tmax = np.minimum(tmax, np.maximum(tx1, tx2))
+    return np.logical_and(tmax - tmin >= 0, tmax >= 0)
 
 
 def getBoxesSamplesFromMesh(a_mesh, num_boxes=4, sample_points=10000):
     # Generate bounding box tree
+    if np.sqrt(num_boxes) % 1 == 0:
+        nx = int(np.sqrt(num_boxes))
+        ny = int(np.sqrt(num_boxes))
+    else:
+        facts = factors(num_boxes)
+        nx = int(facts[len(facts) // 2])
+        ny = int(num_boxes // nx)
     aabb = a_mesh.get_axis_aligned_bounding_box()
     max_bound = aabb.get_max_bound()
     min_bound = aabb.get_min_bound()
-    xes = np.linspace(min_bound[0], max_bound[0], num_boxes + 1)
-    yes = np.linspace(min_bound[1], max_bound[1], num_boxes + 1)
+    xes = np.linspace(min_bound[0], max_bound[0], nx + 1)
+    yes = np.linspace(min_bound[1], max_bound[1], ny + 1)
     boxes = []
     for x in range(1, len(xes)):
         boxes.extend(
@@ -338,10 +354,13 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
 
         for _ in range(num_bounces):
             # Calulate out the angle and expected power of that angle
-            delta_phi = np.sum(tvec * obs_bounce, axis=1)
-            delta_phi[delta_phi < 0] = 0.
-            att = delta_phi / curr_sigma ** 2 * np.exp(-delta_phi ** 2 / (2 * curr_sigma ** 2))
-            rho_bounce = rho_bounce * att
+            try:
+                delta_phi = np.sum(tvec * obs_bounce, axis=1)
+                delta_phi[delta_phi < 0] = 0.
+                att = delta_phi / curr_sigma ** 2 * np.exp(-delta_phi ** 2 / (2 * curr_sigma ** 2))
+                rho_bounce = rho_bounce * att
+            except ValueError:
+                break
 
             # Cull rays that are below a significant power
             valids = rho_bounce > 1e-8
@@ -360,6 +379,9 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
                                                        quad_normals)
             acc_rng = np.linalg.norm(nb_xyz - sobs_pt, axis=1)
             valids = np.logical_and(nb_tri_idx >= 0, acc_rng > 1e-6)
+            if not np.any(valids):
+                break
+
             nb_xyz = nb_xyz[valids]
             nb_tri_idx = nb_tri_idx[valids]
             nb_bounce_dir = nb_bounce_dir[valids]
@@ -376,6 +398,8 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
             _, _, check_tri_idx = bounce(nb_xyz, check_dir, boxes, quad_vertices, quad_triangles,
                                          quad_normals)
             valids = check_tri_idx >= 0
+            if not np.any(valids):
+                break
 
             # Get the range profile from the intersection-tested rays
             bounce_gpu = cupy.array(nb_bounce_dir[valids], dtype=np.float32)
@@ -397,6 +421,14 @@ def getRangeProfileFromMesh(boxes, quad_triangles, quad_vertices, quad_normals, 
             sobs_pt = nb_xyz
             tvec = nb_bounce_dir
             curr_sigma = nb_tri_idx
+    del bounce_gpu
+    del sigma_gpu
+    del pd_r
+    del pd_i
+    del int_gpu
+    del ray_dist_gpu
+    del ray_power_gpu
+    del obs_pt_gpu
     if debug:
         return pulse_ret, debug_rays, debug_raydirs, debug_raypower
     else:
@@ -407,9 +439,9 @@ def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms)
     # GPU device calculations
     threads_per_block = getMaxThreads()
 
-    quad = np.array([[checkBoxIntersection(
-        d, o, np.asarray(b.get_max_bound()), np.asarray(b.get_min_bound())) for d, o in zip(ray_dir, ray_origin)]
-        for b in bounding_boxes])
+    quad = np.array([checkBoxIntersection(ray_dir, ray_origin, np.asarray(b.get_max_bound()),
+                                          np.asarray(b.get_min_bound())) for b in bounding_boxes])
+    np.sum(quad, axis=0)
 
     # Test triangles in correct quads to find intsersection triangles
     inter_xyz = np.zeros_like(ray_origin)
@@ -426,7 +458,7 @@ def bounce(ray_origin, ray_dir, bounding_boxes, tri_verts, tri_idxes, tri_norms)
             tri_norm_gpu = cupy.array(tri_norms[b_idx], dtype=np.float32)
             tri_idxes_gpu = cupy.array(tri_idxes[b_idx], dtype=np.int32)
             tri_verts_gpu = cupy.array(tri_verts[b_idx], dtype=np.float32)
-            int_tri_gpu = cupy.array(inter_tri_idx, dtype=np.int32)
+            int_tri_gpu = cupy.array(inter_tri_idx[poss_rays], dtype=np.int32)
             bounce_gpu = cupy.zeros_like(ray_dir_gpu)
 
             bprun = (max(1, int_gpu.shape[0] // threads_per_block[0] + 1),
