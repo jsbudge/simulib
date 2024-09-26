@@ -362,7 +362,7 @@ class RadarPlatform(Platform):
         pl_s = self.calcPulseLength(height, plp, nrange=None if ranges is None else ranges[0])
         nsam = int((np.ceil((2 * frange / c0 + pl_s) * TAC) -
                     np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
-        MPP = c0 / self.fs / upsample / 2
+        MPP = c0 / self.fs / upsample
         return nrange + np.arange(nsam * upsample) * MPP + c0 / self.fs
 
     def getRadarParams(self, fdelay, plp, upsample=1):

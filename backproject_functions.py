@@ -172,11 +172,15 @@ def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavel
     # GPU device calculations
     threads_per_block = getMaxThreads()
     bpg_bpj = (max(1, nbpj_pts[0] // threads_per_block[0] + 1), nbpj_pts[1] // threads_per_block[1] + 1)
+
+    # Clean everything out
+    cupy.get_default_memory_pool().free_all_blocks()
+    cupy.get_default_pinned_memory_pool().free_all_blocks()
     # rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
 
     # Run through loop to get data simulated
     r_debug_data = None
-    print('Backprojecting...')
+    # print('Backprojecting...')
     # Data blocks for imaging
     r_bpj_final = np.zeros(nbpj_pts, dtype=np.complex128)
     panrx_gpu = cupy.array(panrx, dtype=np.float64)
@@ -187,7 +191,7 @@ def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavel
 
     # Reset the grid for truth data
     rtdata = cupy.array(pulse_data, dtype=np.complex128)
-    cupy.cuda.Device().synchronize()
+    # cupy.cuda.Device().synchronize()
 
     backproject[bpg_bpj, threads_per_block](
         postx_gpu,

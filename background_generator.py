@@ -1,20 +1,12 @@
-import contextlib
-import cupy
 import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.spatial import ConvexHull
-from torch.nn import functional as tf
-from SDRParsing import load, loadASIFile, loadASHFile
-from cuda_mesh_kernels import readCombineMeshFile, calcInitSpread, calcIntersection
-from cuda_kernels import getMaxThreads, cpudiff, applyRadiationPatternCPU
-from grid_helper import SDREnvironment, mesh
+from SDRParsing import load
+from grid_helper import SDREnvironment
 from models import ImageSegmenter
-from platform_helper import SDRPlatform, RadarPlatform
-from image_segment_loader import prepImage
-from scipy.ndimage import sobel, gaussian_filter, binary_dilation, binary_erosion, binary_fill_holes
-from scipy.interpolate import interpn
+from platform_helper import SDRPlatform
+from scipy.ndimage import binary_dilation, binary_erosion
 from skimage.measure import label, find_contours
 from skimage.morphology import medial_axis
 from shapely.geometry import Polygon, Point
@@ -35,7 +27,7 @@ fs = 2e9
 DTR = np.pi / 180
 
 fnme = '/data6/SAR_DATA/2024/07082024/SAR_07082024_112333.sar'
-sdr = load(fnme, progress_tracker=True)
+sdr = load(fnme, import_pickle=False, progress_tracker=True)
 wavelength = c0 / 9.6e9
 ant_gain = 25
 transmit_power = 100
