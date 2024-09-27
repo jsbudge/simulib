@@ -106,7 +106,8 @@ for _ in range(45):
         xr = np.sum(pvecs * (pvecs - 2 * np.einsum('ji,jk->jik',
                                                    np.sum(pvecs * mnorm[:, None, :], axis=2), mnorm)), axis=2)
         xr[xr < 0] = 0
-        x_hat = coeff * xr / x[::3][:, None] ** 2 * np.exp(-(xr**2) / (2 * x[::3][:, None] ** 2)) * np.exp(-1j * 2 * np.pi / wavelength * rngs)
+        x_hat = (coeff * xr / x[::3][:, None] ** 2 * np.exp(-(xr**2) / (2 * x[::3][:, None] ** 2)) *
+                 np.exp(-1j * 2 * np.pi / wavelength * rngs))
         return np.linalg.norm(rhos_scaled - x_hat)
 
     opt_x = minimize(minfunc, x0)

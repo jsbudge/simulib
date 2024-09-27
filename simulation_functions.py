@@ -874,7 +874,7 @@ def upsamplePulse(p, fft_len, upsample, is_freq=False, out_freq=False, time_len=
         up = np.fft.ifft(up)[:time_len * upsample] if not out_freq else up
     else:
         op = p if is_freq else np.fft.fft(p, axis=1)
-        up = np.zeros((op.shape[1], fft_len * upsample), dtype=op.dtype)
+        up = np.zeros((op.shape[0], fft_len * upsample), dtype=op.dtype)
         up[:, :fft_len // 2] = op[:, :fft_len // 2]
         up[:, -fft_len // 2:] = op[:, -fft_len // 2:]
         up = np.fft.ifft(up, axis=1)[:, :time_len * upsample] if not out_freq else up

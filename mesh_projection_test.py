@@ -21,18 +21,19 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 50  # dB
+ant_gain = 150  # dB
 ant_transmit_power = 200  # watts
 ant_eff_aperture = 10. * 10.  # m**2
 bw_az = 4.5 * DTR
 bw_el = 11 * DTR
 npulses = 128
 plp = .75
-fdelay = 2.
+fdelay = 0.
 upsample = 4
 num_bounces = 1
-points_to_sample = 10000
-num_mesh_triangles = 260000
+nbounce_rays = 5
+points_to_sample = 1000
+num_mesh_triangles = 20000
 grid_origin = (40.138544, -111.664394, 1381.)
 fnme = '/home/jeff/SDR_DATA/RAW/08052024/SAR_08052024_110111.sar'
 
@@ -53,13 +54,25 @@ mesh = mesh.compute_triangle_normals()
 mesh = mesh.compute_vertex_normals()
 
 mesh_extent = mesh.get_max_bound() - mesh.get_min_bound()
-gx, gy, gz = bg.getGrid(grid_origin, 200, 200)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 400, nrows=200, ncols=200, az=np.pi / 4)
 
 grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
 
-mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean()]), relative=False).scale(
-    np.mean(grid_extent[:2] / mesh_extent[:2]), np.array([gx.mean(), gy.mean(), gz.mean()]))
+mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean()]), relative=False)
 face_points = np.asarray(mesh.vertices)
+
+# Calculate out the sigma values for triangles based on average of vertex colors
+face_tris = np.asarray(mesh.triangles)
+try:
+    face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
+except IndexError:
+    face_colors = np.zeros_like(face_tris)
+
+try:
+    sigma = (face_colors[:, 1] - (face_colors[:, 0] + face_colors[:, 2]) ** 2) / face_colors.max() * 5
+    sigma[sigma <= 0] = .1
+except ValueError:
+    sigma = np.ones(face_colors.shape[0]) * 1
 
 # This is all the constants in the radar equation for this simulation
 radar_coeff = ant_transmit_power * 10**(ant_gain / 10) * ant_eff_aperture / (4 * np.pi)**2
@@ -69,14 +82,15 @@ chirp = genChirp(nr, fs, fc, 400e6)
 fft_chirp = np.fft.fft(chirp, fft_len)
 
 # Load in boxes and meshes for speedup of ray tracing
-box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=4, sample_points=points_to_sample)
+box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=36, sample_points=points_to_sample)
 
 # Single pulse for debugging
-single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
-                                                                             rp.pos(data_t[npulses // 2]),
-                                                                             pointing_vec, radar_coeff, bw_az, bw_el,
-                                                                             nsam, fc, near_range_s * c0,
+single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points, sigma,
+                                                                             rp.pos(data_t[npulses // 2]).reshape((1, 3)),
+                                                                             pointing_vec.reshape((1, 3)), radar_coeff, bw_az, bw_el,
+                                                                             nsam, fc, near_range_s,
                                                                              num_bounces=num_bounces,
+                                                                             bounce_rays=nbounce_rays,
                                                                              debug=True)
 single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp, fft_len), fft_len, upsample,
                              is_freq=True, time_len=nsam)
@@ -85,21 +99,20 @@ single_mf_pulse = upsamplePulse(
     is_freq=True, time_len=nsam)
 bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
-for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
-    pulses = np.zeros((npulses, nsam * upsample), dtype=np.complex128)
-    dt = sdr_f[0].pulse_time[frame:frame + npulses]
-    for n in range(npulses):
-        trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.pos(dt[n]), rp.boresight(dt[n]).flatten(),
-                                      radar_coeff, bw_az, bw_el, nsam, fc, near_range_s * c0, num_bounces=num_bounces)
-        mf_pulse = upsamplePulse(
-        fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj(), fft_len, upsample,
-            is_freq=True, time_len=nsam)
-        pulses[n] = mf_pulse
 
+# MAIN LOOP
+for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
+    dt = sdr_f[0].pulse_time[frame:frame + npulses]
+    trp = getRangeProfileFromMesh(*box_tree, sample_points, sigma, rp.pos(dt), rp.boresight(dt),
+                                  radar_coeff, bw_az, bw_el, nsam, fc, near_range_s, num_bounces=num_bounces, bounce_rays=nbounce_rays)
+    mf_pulse = upsamplePulse(
+    fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj(), fft_len, upsample,
+        is_freq=True, time_len=nsam)
+    pulses = mf_pulse
     bpj_grid += backprojectPulseSet(pulses.T, rp.pan(dt), rp.tilt(dt), rp.rxpos(dt), rp.txpos(dt), gx, gy, gz,
                                    c0 / fc, near_range_s, fs * upsample, bw_az, bw_el)
 
-'''face_tris = np.asarray(mesh.triangles)
+'''
 try:
     face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
 except IndexError:
@@ -122,9 +135,9 @@ for idx, (ro, rd, nrp) in enumerate(zip(ray_origins, ray_directions, ray_powers)
     ax.quiver(ro[:, 0], ro[:, 1], ro[:, 2], rd[:, 0],
               rd[:, 1], rd[:, 2], color=cm.jet(idx / len(ray_origins) * np.ones_like(nrp)))
 plt.show()'''
-px.scatter(db(single_rp)).show()
-px.scatter(db(single_pulse)).show()
-px.scatter(db(single_mf_pulse)).show()
+px.scatter(db(single_rp.flatten())).show()
+px.scatter(db(single_pulse.flatten())).show()
+px.scatter(db(single_mf_pulse.flatten())).show()
 
 plt.figure('Data')
 plt.imshow(db(np.fft.fft(pulses, axis=0)))
