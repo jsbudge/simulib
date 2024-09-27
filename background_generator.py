@@ -31,12 +31,20 @@ sdr = load(fnme, import_pickle=False, progress_tracker=True)
 wavelength = c0 / 9.6e9
 ant_gain = 25
 transmit_power = 100
+upsample = 4
+nper = 10
 pixel_to_m = .25
 
 # Prep the background ASI image
 bg = SDREnvironment(sdr)
 rp = SDRPlatform(sdr, origin=bg.ref)
+nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
+    rp.getRadarParams(2., .75, upsample))
+mfilt = sdr.genMatchedFilter(0, fft_len=fft_len)
 
+'''
+====================SEGMENTATION=========================
+'''
 device = o3d.core.Device("CPU:0")
 
 # Load the segmentation model
@@ -48,7 +56,7 @@ segmenter.load_state_dict(torch.load('./model/inference_model.state'))
 segmenter.to('cuda:0')
 
 png_fnme = '/home/jeff/repo/simulib/data/base_SAR_07082024_112333.png'
-# bx, by, bz = bg.getGrid()
+gx, gy, gz = bg.getGrid()
 
 background = np.array(Image.open(png_fnme)) / 65535.
 chip = background[:512, :512]
@@ -61,38 +69,7 @@ for x in tqdm(range(0, background.shape[0] - 512, 256)):
                              device=segmenter.device).view(1, 1, 512, 512)
         segment[:, x:x + 512, y:y + 512] = segmenter(tense).cpu()[0, ...].data.numpy()
 
-'''activation = {}
-
-
-def get_activation(name):
-    def hook(model, input, output):
-        with contextlib.suppress(AttributeError):
-            activation[name] = output.detach()
-
-    return hook
-
-
-sample = torch.tensor(chip, dtype=torch.float32, device=segmenter.device).unsqueeze(0).unsqueeze(0)
-for name, module in segmenter.named_modules():
-    module.register_forward_hook(get_activation(name))
-output = segmenter(sample)
-
-plt.figure('Original')
-plt.imshow(sample[0, 0].cpu().data.numpy())
-plt.axis('off')
-
-for key, activ in activation.items():
-    if '.' not in key:
-        act = activ.squeeze(0).cpu().data.numpy()
-        ngrid = int(np.floor(np.sqrt(act.shape[0]))) + (1 if np.sqrt(act.shape[0]) % 1 != 0 else 0)
-        plt.figure(key)
-        for x in range(act.shape[0]):
-            plt.subplot(ngrid, ngrid, x + 1)
-            plt.imshow(act[x])
-            plt.axis('off')
-plt.show()'''
-
-pcd = o3d.geometry.TriangleMesh()
+mesh = o3d.geometry.TriangleMesh()
 
 '''
 ============================================================
@@ -107,20 +84,22 @@ blabels, nlabels = label(roads, return_num=True)
 # Take the roads and add them to the background
 bcld = o3d.geometry.PointCloud()
 xp, yp = np.where(blabels > 0)
-bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
+bpts = np.array([gx[xp, yp], gy[xp, yp], gz[xp, yp]])
 bcld.points = o3d.utility.Vector3dVector(bpts.T)
 bcld.estimate_normals()
 bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2., 20.]))
+bmesh.triangle_uvs = o3d.utility.Vector2dVector(np.random.rand(len(bmesh.triangles), 2))
+bmesh.triangle_material_ids = o3d.utility.IntVector([0 for _ in range(len(bmesh.triangles))])
 bmesh = bmesh.paint_uniform_color([0, 1., 0])
-pcd += bmesh
+mesh += bmesh
 print('Roads added to mesh.')
 
 '''
 ============================================================
 ==================FIELDS====================================
 '''
-# Get the roads
-'''fields = binary_dilation(binary_erosion(segment[3] > .9))
+# Get the fields
+fields = binary_dilation(binary_erosion(segment[3] > .9))
 
 # Blob them
 blabels = label(fields)
@@ -128,13 +107,15 @@ blabels = label(fields)
 # Take the fields and add them to the background
 bcld = o3d.geometry.PointCloud()
 xp, yp = np.where(blabels > 0)
-bpts = np.array([xp, yp, np.zeros_like(xp)]) * pixel_to_m
+bpts = np.array([gx[xp, yp], gy[xp, yp], gz[xp, yp]])
 bcld.points = o3d.utility.Vector3dVector(bpts.T)
 bcld.estimate_normals()
 bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
+bmesh.triangle_uvs = o3d.utility.Vector2dVector(np.random.rand(len(bmesh.triangles), 2))
+bmesh.triangle_material_ids = o3d.utility.IntVector([3 for _ in range(len(bmesh.triangles))])
 bmesh = bmesh.paint_uniform_color([1., 1, 0])
-pcd += bmesh
-print('Fields added to mesh.')'''
+mesh += bmesh
+print('Fields added to mesh.')
 
 '''
 ============================================================
@@ -184,8 +165,12 @@ for n in tqdm(range(1, nlabels)):
     bmesh = o3d.geometry.TriangleMesh()
     bmesh.triangles = o3d.utility.Vector3iVector(bmm.faces)
     bmesh.vertices = o3d.utility.Vector3dVector(bmm.vertices)
-    bmesh = bmesh.translate(np.array([(poly_s.centroid.x + xmin) * pixel_to_m, (poly_s.centroid.y + ymin) * pixel_to_m, 0.]))
-    pcd += bmesh
+    bmesh.triangle_uvs = o3d.utility.Vector2dVector(np.random.rand(len(bmesh.triangles), 2))
+    bmesh.triangle_material_ids = o3d.utility.IntVector([1 for _ in range(len(bmesh.triangles))])
+    bmesh = bmesh.translate(np.array([gx[poly_s.centroid.x + xmin, poly_s.centroid.y + ymin],
+                                      gy[poly_s.centroid.x + xmin, poly_s.centroid.y + ymin],
+                                      gz[poly_s.centroid.x + xmin, poly_s.centroid.y + ymin]]))
+    mesh += bmesh
 print('Buildings added to mesh.')
 
 '''
@@ -234,18 +219,32 @@ for n in tqdm(range(1, nlabels)):
     sk_dists = dists[skeleton]
 
     for n in range(0, len(xd), 5):
-        nm = o3d.geometry.TriangleMesh.create_sphere(sk_dists[n] * pixel_to_m)
+        nm = o3d.geometry.TriangleMesh.create_sphere(sk_dists[n] * pixel_to_m, create_uv_map=True)
+        nm.triangle_material_ids = o3d.utility.IntVector([2 for _ in range(len(nm.triangles))])
         nm = nm.paint_uniform_color(np.array([0, 1, 0]))
         trunk = o3d.geometry.TriangleMesh.create_cylinder(.5, mhght)
         trunk = trunk.translate(np.array([0, 0, -mhght / 2]))
         nm += trunk
-        nm = nm.translate(np.array([xd[n] * pixel_to_m, yd[n] * pixel_to_m, mhght]))
-        pcd += nm
+        nm = nm.translate(np.array([gx[xd[n], yd[n]], gy[xd[n], yd[n]], gz[xd[n], yd[n]] + mhght]))
+        mesh += nm
 print('Trees added to mesh.')
 
-pcd = pcd.compute_triangle_normals()
-pcd = pcd.compute_vertex_normals()
+mesh = mesh.compute_triangle_normals()
+mesh = mesh.compute_vertex_normals()
+
+'''
+====================================================================
+===============OPTIMIZATION ROUTINES================================
+====================================================================
+'''
+
+face_points = np.asarray(mesh.vertices)
+face_idxes = np.asarray(mesh.triangles)
+face_materials = np.asarray(mesh.triangle_material_ids)
+is_opted = np.zeros_like(gx).astype(bool)
+grid_optscat = np.zeros_like(gx)
+grid_optnorm = np.zeros((*gx.shape, 3))
+
+
 # o3d.visualization.draw_plotly([pcd])
-o3d.visualization.draw_geometries([pcd])
-plt.figure()
-plt.imshow(background)
+o3d.visualization.draw_geometries([mesh])
