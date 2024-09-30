@@ -30,10 +30,10 @@ npulses = 128
 plp = .75
 fdelay = 0.
 upsample = 4
-num_bounces = 1
+num_bounces = 2
 nbounce_rays = 5
-points_to_sample = 1000
-num_mesh_triangles = 20000
+points_to_sample = 100000
+num_mesh_triangles = 260000
 grid_origin = (40.138544, -111.664394, 1381.)
 fnme = '/home/jeff/SDR_DATA/RAW/08052024/SAR_08052024_110111.sar'
 
@@ -82,7 +82,7 @@ chirp = genChirp(nr, fs, fc, 400e6)
 fft_chirp = np.fft.fft(chirp, fft_len)
 
 # Load in boxes and meshes for speedup of ray tracing
-box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=36, sample_points=points_to_sample)
+box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=2, sample_points=points_to_sample)
 
 # Single pulse for debugging
 single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points, sigma,
