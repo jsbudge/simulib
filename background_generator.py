@@ -38,7 +38,7 @@ wavelength = c0 / sdr[0].fc
 ant_gain = 25
 transmit_power = 100
 upsample = 1
-nper = 128
+nper = 64
 pixel_to_m = .25
 
 # Prep the background ASI image

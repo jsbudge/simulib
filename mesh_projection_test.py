@@ -30,10 +30,11 @@ npulses = 128
 plp = .75
 fdelay = 0.
 upsample = 4
-num_bounces = 2
+num_bounces = 1
 nbounce_rays = 5
-points_to_sample = 100000
-num_mesh_triangles = 260000
+nboxes = 36
+points_to_sample = 10000
+num_mesh_triangles = 10000
 grid_origin = (40.138544, -111.664394, 1381.)
 fnme = '/home/jeff/SDR_DATA/RAW/08052024/SAR_08052024_110111.sar'
 
@@ -82,10 +83,10 @@ chirp = genChirp(nr, fs, fc, 400e6)
 fft_chirp = np.fft.fft(chirp, fft_len)
 
 # Load in boxes and meshes for speedup of ray tracing
-box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=2, sample_points=points_to_sample)
+box_tree, sample_points = getBoxesSamplesFromMesh(mesh, sigma, num_boxes=nboxes, sample_points=points_to_sample)
 
 # Single pulse for debugging
-single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points, sigma,
+single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
                                                                              rp.pos(data_t[npulses // 2]).reshape((1, 3)),
                                                                              pointing_vec.reshape((1, 3)), radar_coeff, bw_az, bw_el,
                                                                              nsam, fc, near_range_s,
@@ -103,7 +104,7 @@ bpj_grid = np.zeros_like(gx).astype(np.complex128)
 # MAIN LOOP
 for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
     dt = sdr_f[0].pulse_time[frame:frame + npulses]
-    trp = getRangeProfileFromMesh(*box_tree, sample_points, sigma, rp.pos(dt), rp.boresight(dt),
+    trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.pos(dt), rp.boresight(dt),
                                   radar_coeff, bw_az, bw_el, nsam, fc, near_range_s, num_bounces=num_bounces, bounce_rays=nbounce_rays)
     mf_pulse = upsamplePulse(
     fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj(), fft_len, upsample,
