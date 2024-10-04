@@ -129,7 +129,7 @@ def prepImage(asi_f: str | np.ndarray, nrows=6687, ncols=22000, scale=1e0, nbits
 
 
 if __name__ == '__main__':
-    asi_fnme = '/home/jeff/SDR_DATA/ARCHIVE/07082024/SAR_07082024_121552LVV_ch1_926500_20.asi'
+    asi_fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617LVV_ch1_929500_100.asi'
     ash_file = loadASHFile(f'{asi_fnme[:-4]}.ash')
 
     output_image = prepImage(asi_fnme, nrows=int(ash_file['image']['nRows']), ncols=int(ash_file['image']['nCols']))
@@ -151,7 +151,7 @@ if __name__ == '__main__':
                 continue
     print(f'Time done in {time.time() - start_time}')
 
-    renoised = prepImage(denoised[:, :7630], nbits=65535)
+    renoised = prepImage(denoised[:, :7000], nbits=65535)
 
     plt.figure('Renoised')
     plt.imshow(renoised, cmap='gray')
@@ -161,5 +161,5 @@ if __name__ == '__main__':
     plt.imshow(denoised, cmap='gray')
     plt.show()
 
-    # stem_name = Path(asi_fnme).stem[:19]
-    # imageio.imwrite(f'./data/base_{stem_name}.png', renoised.astype(np.uint16))
+    stem_name = Path(asi_fnme).stem[:19]
+    imageio.imwrite(f'./data/base_{stem_name}.png', renoised.astype(np.uint16))

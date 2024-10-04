@@ -2,6 +2,8 @@ import cmath
 import math
 from numba import cuda, njit
 from numba.cuda.random import xoroshiro128p_uniform_float64
+from numpy.lib.utils import source
+
 from simulation_functions import findPowerOf2
 import numpy as np
 
@@ -20,6 +22,11 @@ def diff(x, y):
 def cpudiff(x, y):
     a = y - x
     return (a + np.pi) - np.floor((a + np.pi) / (2 * np.pi)) * 2 * np.pi - np.pi
+
+
+@cuda.jit(device=True)
+def dot(ax, ay, az, bx, by, bz):
+    return ax * bx + ay * by + az * bz
 
 
 @cuda.jit(device=True)
@@ -360,6 +367,67 @@ def backproject_gmti(source_hght, source_vel, grange, gvel, pantx, pulse_data, f
         final_grid[px, py] = acc_val
 
 
+@cuda.jit()
+def calcOptParams(sample_points, source_xyz, mf_data, near_range_s, source_fs, rho_matrix, pvecs, rngs):
+    tt, pt = cuda.grid(ndim=2)
+    if pt < sample_points.shape[0] and tt < source_xyz.shape[0]:
+        tx = sample_points[pt, 0] - source_xyz[tt, 0]
+        ty = sample_points[pt, 1] - source_xyz[tt, 1]
+        tz = sample_points[pt, 2] - source_xyz[tt, 2]
+        tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+
+        rng_bin = (tx_rng * 2 / c0 - 2 * near_range_s) * source_fs
+        bi0 = int(rng_bin)
+
+        if bi0 < 0 or bi0 > mf_data.shape[1]:
+            return
+
+        rho_matrix[tt, pt] = mf_data[tt, bi0]
+        rngs[tt, pt] = tx_rng * 2
+        pvecs[tt, pt, 0] = tx / tx_rng
+        pvecs[tt, pt, 1] = ty / tx_rng
+        pvecs[tt, pt, 2] = tz / tx_rng
+
+
+@cuda.jit()
+def calcOptRho(pan, tilt, pd_r, pd_i, near_range_s, source_fs, az_bw, el_bw, sigma, pvecs, norms, beta, rngs, wavenumber):
+    tt, pt = cuda.grid(ndim=2)
+    if pt < pvecs.shape[1] and tt < pvecs.shape[0]:
+        tx = pvecs[tt, pt, 0]
+        ty = pvecs[tt, pt, 1]
+        tz = pvecs[tt, pt, 2]
+
+        vnx = norms[pt, 0]
+        vny = norms[pt, 1]
+        vnz = norms[pt, 2]
+
+        rng_bin = (rngs[tt, pt] / c0 - 2 * near_range_s) * source_fs
+        but = int(rng_bin)
+
+        if 0 > but > pd_r.shape[0]:
+            return
+
+        bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
+
+        bx = tx - vnx * bounce_dot
+        by = ty - vny * bounce_dot
+        bz = tz - vnz * bounce_dot
+        bounce_len = 1 / math.sqrt(bx * bx + by * by + bz * bz)
+
+        x = max(0., (tx * bx * bounce_len + ty * by * bounce_len + tz * bz * bounce_len) / rngs[tt, pt] / 2)
+        gamma = (x / (beta[pt] * beta[pt]) *
+                 math.exp(-(x * x) / (2 * beta[pt] * beta[pt])))
+
+        el = -math.asin(tz)
+        az = math.atan2(-ty, tx) + np.pi / 2
+
+        att = applyRadiationPattern(el, az, pan[tt], tilt[tt], pan[tt], tilt[tt], az_bw, el_bw) / (
+                rngs[tt, pt] * rngs[tt, pt])
+        acc_val = att * cmath.exp(-1j * wavenumber * rngs[tt, pt]) * gamma * sigma[pt] * pd_r.shape[0]**2
+        cuda.atomic.add(pd_r, but, acc_val.real)
+        cuda.atomic.add(pd_i, but, acc_val.imag)
+
+
 def ambiguity(s1, s2, prf, dopp_bins, a_fs, mag=True, normalize=True):
     fdopp = np.linspace(-prf / 2, prf / 2, dopp_bins)
     fft_sz = findPowerOf2(len(s1)) * 2
@@ -370,6 +438,35 @@ def ambiguity(s1, s2, prf, dopp_bins, a_fs, mag=True, normalize=True):
     if normalize:
         A = A / abs(A).max()
     return abs(A) if mag else A, fdopp, (np.arange(fft_sz) - fft_sz // 2) * c0 / a_fs
+
+@cuda.jit()
+def assocTriangle(points, triangles, vertices, tri_idx):
+    pt, tri = cuda.grid(ndim=2)
+    if pt < points.shape[0] and tri < triangles.shape[0]:
+        # Edge 1
+        v0_x = vertices[triangles[tri, 1], 0] - vertices[triangles[tri, 0], 0]
+        v0_y = vertices[triangles[tri, 1], 1] - vertices[triangles[tri, 0], 1]
+        v0_z = vertices[triangles[tri, 1], 2] - vertices[triangles[tri, 0], 2]
+        # Edge 2
+        v1_x = vertices[triangles[tri, 2], 0] - vertices[triangles[tri, 0], 0]
+        v1_y = vertices[triangles[tri, 2], 1] - vertices[triangles[tri, 0], 1]
+        v1_z = vertices[triangles[tri, 2], 2] - vertices[triangles[tri, 0], 2]
+        # Edge 3
+        v2_x = points[pt, 0] - vertices[triangles[tri, 0], 0]
+        v2_y = points[pt, 1] - vertices[triangles[tri, 0], 1]
+        v2_z = points[pt, 2] - vertices[triangles[tri, 0], 2]
+        dot00 = dot(v0_x, v0_y, v0_z, v0_x, v0_y, v0_z)
+        dot01 = dot(v0_x, v0_y, v0_z, v1_x, v1_y, v1_z)
+        dot02 = dot(v0_x, v0_y, v0_z, v2_x, v2_y, v2_z)
+        dot11 = dot(v1_x, v1_y, v1_z, v1_x, v1_y, v1_z)
+        dot12 = dot(v2_x, v2_y, v2_z, v1_x, v1_y, v1_z)
+
+        inv_den = 1 / (dot00 * dot11 - dot01 * dot01)
+        u = (dot11 * dot02 - dot01 * dot12) * inv_den
+        v = (dot00 * dot12 - dot01 * dot02) * inv_den
+
+        if (u >= 0) and (v >= 0) and (u + v < 1):
+            tri_idx[pt] = tri
 
 
 def getMaxThreads(pts_per_tri: int = 0):

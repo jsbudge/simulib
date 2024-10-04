@@ -21,8 +21,8 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 150  # dB
-ant_transmit_power = 200  # watts
+ant_gain = 22  # dB
+ant_transmit_power = 100  # watts
 ant_eff_aperture = 10. * 10.  # m**2
 bw_az = 4.5 * DTR
 bw_el = 11 * DTR
@@ -33,10 +33,10 @@ upsample = 4
 num_bounces = 1
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 10000
-num_mesh_triangles = 10000
+points_to_sample = 1000
+num_mesh_triangles = 1000
 grid_origin = (40.138544, -111.664394, 1381.)
-fnme = '/home/jeff/SDR_DATA/RAW/08052024/SAR_08052024_110111.sar'
+fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
 
 sdr_f = load(fnme)
@@ -62,19 +62,6 @@ grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.
 mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean()]), relative=False)
 face_points = np.asarray(mesh.vertices)
 
-# Calculate out the sigma values for triangles based on average of vertex colors
-face_tris = np.asarray(mesh.triangles)
-try:
-    face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
-except IndexError:
-    face_colors = np.zeros_like(face_tris)
-
-try:
-    sigma = (face_colors[:, 1] - (face_colors[:, 0] + face_colors[:, 2]) ** 2) / face_colors.max() * 5
-    sigma[sigma <= 0] = .1
-except ValueError:
-    sigma = np.ones(face_colors.shape[0]) * 1
-
 # This is all the constants in the radar equation for this simulation
 radar_coeff = ant_transmit_power * 10**(ant_gain / 10) * ant_eff_aperture / (4 * np.pi)**2
 
@@ -83,7 +70,7 @@ chirp = genChirp(nr, fs, fc, 400e6)
 fft_chirp = np.fft.fft(chirp, fft_len)
 
 # Load in boxes and meshes for speedup of ray tracing
-box_tree, sample_points = getBoxesSamplesFromMesh(mesh, sigma, num_boxes=nboxes, sample_points=points_to_sample)
+box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample)
 
 # Single pulse for debugging
 single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
