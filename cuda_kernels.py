@@ -271,7 +271,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
             rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
             bi0 = int(rng_bin)
             bi1 = bi0 + 1
-            if bi1 > n_samples:
+            if bi1 >= n_samples or bi1 < 0:
                 continue
 
             # Attenuation of beam in elevation and azimuth
@@ -368,40 +368,107 @@ def backproject_gmti(source_hght, source_vel, grange, gvel, pantx, pulse_data, f
 
 
 @cuda.jit()
-def calcOptParams(sample_points, source_xyz, mf_data, near_range_s, source_fs, rho_matrix, pvecs, rngs):
+def calcRangeProfile(vertices, source_xyz, pan, tilt, pd_r, pd_i, near_range_s, source_fs, az_bw, el_bw, sigma,
+               wavenumber, radar_coeff):
     tt, pt = cuda.grid(ndim=2)
-    if pt < sample_points.shape[0] and tt < source_xyz.shape[0]:
-        tx = sample_points[pt, 0] - source_xyz[tt, 0]
-        ty = sample_points[pt, 1] - source_xyz[tt, 1]
-        tz = sample_points[pt, 2] - source_xyz[tt, 2]
+    if pt < vertices.shape[0] and tt < source_xyz.shape[0]:
+        tx = vertices[pt, 0] - source_xyz[tt, 0]
+        ty = vertices[pt, 1] - source_xyz[tt, 1]
+        tz = vertices[pt, 2] - source_xyz[tt, 2]
         tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
         rng_bin = (tx_rng * 2 / c0 - 2 * near_range_s) * source_fs
-        bi0 = int(rng_bin)
+        but = int(rng_bin)
 
-        if bi0 < 0 or bi0 > mf_data.shape[1]:
+        if but < 0 or but > pd_r.shape[1]:
             return
 
-        rho_matrix[tt, pt] = mf_data[tt, bi0]
-        rngs[tt, pt] = tx_rng * 2
-        pvecs[tt, pt, 0] = tx / tx_rng
-        pvecs[tt, pt, 1] = ty / tx_rng
-        pvecs[tt, pt, 2] = tz / tx_rng
+        el = -math.asin(tz)
+        az = math.atan2(-ty, tx) + np.pi / 2
+
+        att = applyRadiationPattern(el, az, pan[tt], tilt[tt], pan[tt], tilt[tt], az_bw, el_bw) / (
+                tx_rng * tx_rng * 2) * radar_coeff
+        acc_val = att * cmath.exp(-1j * wavenumber * tx_rng * 2) * sigma[pt]
+        cuda.atomic.add(pd_r, (tt, but), acc_val.real)
+        cuda.atomic.add(pd_i, (tt, but), acc_val.imag)
+        cuda.syncthreads()
 
 
 @cuda.jit()
-def calcOptRho(pan, tilt, pd_r, pd_i, near_range_s, source_fs, az_bw, el_bw, sigma, pvecs, norms, beta, rngs, wavenumber):
+def calcRangeProfileScattering(vertices, source_xyz, pan, tilt, pd_r, pd_i, near_range_s, source_fs, az_bw, el_bw, sigma,
+               beta, normals, wavenumber, radar_coeff):
     tt, pt = cuda.grid(ndim=2)
-    if pt < pvecs.shape[1] and tt < pvecs.shape[0]:
-        tx = pvecs[tt, pt, 0]
-        ty = pvecs[tt, pt, 1]
-        tz = pvecs[tt, pt, 2]
+    if pt < vertices.shape[0] and tt < source_xyz.shape[0]:
+        tx = vertices[pt, 0] - source_xyz[tt, 0]
+        ty = vertices[pt, 1] - source_xyz[tt, 1]
+        tz = vertices[pt, 2] - source_xyz[tt, 2]
+        tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
-        vnx = norms[pt, 0]
-        vny = norms[pt, 1]
-        vnz = norms[pt, 2]
+        vnx = normals[pt, 0]
+        vny = normals[pt, 1]
+        vnz = normals[pt, 2]
 
-        rng_bin = (rngs[tt, pt] / c0 - 2 * near_range_s) * source_fs
+        rng_bin = (tx_rng * 2 / c0 - 2 * near_range_s) * source_fs
+        but = int(rng_bin)
+
+        if but < 0 or but > pd_r.shape[1]:
+            return
+
+        bounce_dot = (tx * vnx + ty * vny + tz * vnz) * 2.
+
+        bx = tx - vnx * bounce_dot
+        by = ty - vny * bounce_dot
+        bz = tz - vnz * bounce_dot
+        bounce_len = 1 / math.sqrt(bx * bx + by * by + bz * bz)
+
+        x = max(0., (tx * bx * bounce_len + ty * by * bounce_len + tz * bz * bounce_len) / tx_rng)
+        gamma = (x / (beta[pt] * beta[pt]) *
+                 math.exp(-(x * x) / (2 * beta[pt] * beta[pt])))
+
+        el = -math.asin(tz)
+        az = math.atan2(-ty, tx) + np.pi / 2
+
+        att = applyRadiationPattern(el, az, pan[tt], tilt[tt], pan[tt], tilt[tt], az_bw, el_bw) / (
+                tx_rng * tx_rng * 2) * radar_coeff
+        acc_val = att * cmath.exp(-1j * wavenumber * tx_rng * 2) * sigma[pt] * gamma
+        cuda.atomic.add(pd_r, (tt, but), acc_val.real)
+        cuda.atomic.add(pd_i, (tt, but), acc_val.imag)
+        cuda.syncthreads()
+
+
+@cuda.jit()
+def calcOptRho(vertices, tri_idx, source_xyz, pan, tilt, pd_r, pd_i, near_range_s, source_fs, az_bw, el_bw, sigma, beta,
+               wavenumber, radar_coeff):
+    tt, tri = cuda.grid(ndim=2)
+    if tt < source_xyz.shape[0] and tri < tri_idx.shape[0]:
+        # Calculate normal vector
+        Ax = vertices[tri_idx[tri, 1], 0] - vertices[tri_idx[tri, 0], 0]
+        Ay = vertices[tri_idx[tri, 1], 1] - vertices[tri_idx[tri, 0], 1]
+        Az = vertices[tri_idx[tri, 1], 2] - vertices[tri_idx[tri, 0], 2]
+        Bx = vertices[tri_idx[tri, 2], 0] - vertices[tri_idx[tri, 0], 0]
+        By = vertices[tri_idx[tri, 2], 1] - vertices[tri_idx[tri, 0], 1]
+        Bz = vertices[tri_idx[tri, 2], 2] - vertices[tri_idx[tri, 0], 2]
+        vnx = Ay * Bz - Az * By
+        vny = Az * Bx - Ax * Bz
+        vnz = Ax * By - Ay * Bz
+        det = 1 / math.sqrt(vnx * vnx + vny * vny + vnz * vnz)
+
+        vnx *= det
+        vny *= det
+        vnz += det
+
+        # Calculate barycentric coordinates here
+        px = .33 * vertices[tri_idx[tri, 0], 0] + .33 * vertices[tri_idx[tri, 1], 0] + .33 * vertices[tri_idx[tri, 2], 0]
+        py = .33 * vertices[tri_idx[tri, 0], 1] + .33 * vertices[tri_idx[tri, 1], 1] + .33 * vertices[tri_idx[tri, 2], 1]
+        pz = .33 * vertices[tri_idx[tri, 0], 2] + .33 * vertices[tri_idx[tri, 1], 2] + .33 * vertices[tri_idx[tri, 2], 2]
+
+        tx = px - source_xyz[tt, 0]
+        ty = py - source_xyz[tt, 1]
+        tz = pz - source_xyz[tt, 2]
+
+        tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
+
+        rng_bin = (tx_rng * 2 / c0 - 2 * near_range_s) * source_fs
         but = int(rng_bin)
 
         if 0 > but > pd_r.shape[0]:
@@ -414,18 +481,19 @@ def calcOptRho(pan, tilt, pd_r, pd_i, near_range_s, source_fs, az_bw, el_bw, sig
         bz = tz - vnz * bounce_dot
         bounce_len = 1 / math.sqrt(bx * bx + by * by + bz * bz)
 
-        x = max(0., (tx * bx * bounce_len + ty * by * bounce_len + tz * bz * bounce_len) / rngs[tt, pt] / 2)
-        gamma = (x / (beta[pt] * beta[pt]) *
-                 math.exp(-(x * x) / (2 * beta[pt] * beta[pt])))
+        x = max(0., (tx * bx * bounce_len + ty * by * bounce_len + tz * bz * bounce_len) / tx_rng)
+        gamma = (x / (beta[tri] * beta[tri]) *
+                 math.exp(-(x * x) / (2 * beta[tri] * beta[tri])))
 
         el = -math.asin(tz)
         az = math.atan2(-ty, tx) + np.pi / 2
 
         att = applyRadiationPattern(el, az, pan[tt], tilt[tt], pan[tt], tilt[tt], az_bw, el_bw) / (
-                rngs[tt, pt] * rngs[tt, pt])
-        acc_val = att * cmath.exp(-1j * wavenumber * rngs[tt, pt]) * gamma * sigma[pt] * pd_r.shape[0]**2
-        cuda.atomic.add(pd_r, but, acc_val.real)
-        cuda.atomic.add(pd_i, but, acc_val.imag)
+                tx_rng * tx_rng * 2) * radar_coeff
+        acc_val = att * cmath.exp(-1j * wavenumber * tx_rng * 2) * gamma * sigma[tri]
+        cuda.atomic.add(pd_r, (tt, but), acc_val.real)
+        cuda.atomic.add(pd_i, (tt, but), acc_val.imag)
+        cuda.syncthreads()
 
 
 def ambiguity(s1, s2, prf, dopp_bins, a_fs, mag=True, normalize=True):

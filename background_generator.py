@@ -4,8 +4,9 @@ import torch
 import yaml
 from PIL import Image
 from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
 from triangle.plot import vertices
-
+from scipy.spatial import Delaunay
 from SDRParsing import load
 from cuda_kernels import applyRadiationPatternCPU, calcOptRho, calcOptParams, getMaxThreads, assocTriangle
 from grid_helper import SDREnvironment
@@ -33,12 +34,15 @@ DTR = np.pi / 180
 ROAD_ID = 0
 BUILDING_ID = 1
 TREE_ID = 2
+FIELD_ID = 3
+UNKNOWN_ID = 4
 
 fnme = '/home/jeff/SDR_DATA/RAW/08072024/SAR_08072024_111617.sar'
 sdr = load(fnme, progress_tracker=True)
 wavelength = c0 / sdr[0].fc
 ant_gain = 25
 transmit_power = 100
+eff_aperture = 10. * 10.
 upsample = 1
 pixel_to_m = .25
 
@@ -48,6 +52,9 @@ rp = SDRPlatform(sdr, origin=bg.ref)
 nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
     rp.getRadarParams(2., .75, upsample))
 mfilt = sdr.genMatchedFilter(0, fft_len=fft_len)
+
+# This is all the constants in the radar equation for this simulation
+radar_coeff = transmit_power * 10**(ant_gain / 10) * eff_aperture / (4 * np.pi)**2
 
 '''
 ====================SEGMENTATION=========================
@@ -63,14 +70,22 @@ segmenter.load_state_dict(torch.load('./model/inference_model.state'))
 segmenter.to('cuda:0')
 
 png_fnme = '/home/jeff/repo/simulib/data/base_SAR_07082024_112333.png'
+chip_pos = (206, 2000)
+chip_shape = (768, 768)
 
 
 background = np.array(Image.open(png_fnme)) / 65535.
-chip = background[206:206 + 512, 2000:2000 + 512]
+chip = background[chip_pos[0]:chip_pos[0]+ chip_shape[0], chip_pos[1]:chip_pos[1] + chip_shape[1]]
+segment = np.zeros((5, *chip.shape))
 
-tense = torch.tensor(chip, dtype=torch.float32,
-                             device=segmenter.device).view(1, 1, 512, 512)
-segment = segmenter(tense).cpu()[0, ...].data.numpy()
+if chip.shape[0] > 512 or chip.shape[1] > 512:
+    for x in range(0, chip.shape[0], 512):
+        for y in range(0, chip.shape[1], 512):
+            xrng = (x if x + 512 < chip.shape[0] else x - (x + 512 - chip.shape[0]), x + min(chip.shape[0] - x, 512))
+            yrng = (y if y + 512 < chip.shape[1] else y - (y + 512 - chip.shape[1]), y + min(chip.shape[1] - y, 512))
+            tense = torch.tensor(chip[xrng[0]:xrng[1], yrng[0]:yrng[1]], dtype=torch.float32,
+                                         device=segmenter.device).view(1, 1, 512, 512)
+            segment[:, xrng[0]:xrng[1], yrng[0]:yrng[1]] = segmenter(tense).cpu()[0, ...].data.numpy()
 
 mesh = o3d.geometry.TriangleMesh()
 material_ids = o3d.utility.IntVector()
@@ -79,10 +94,35 @@ colors = o3d.utility.Vector3dVector()
 flight_path = rp.rxpos(rp.gpst)
 
 # Get grid position of chip
-chip_edge = bg.getPos(206 + 256, 2000 + 256)
+chip_edge = bg.getPos(chip_pos[0] + chip_shape[0] // 2, chip_pos[1] + chip_shape[1] // 2)
 
 gx, gy, gz = bg.getGrid(bg.origin, chip.shape[0] * pixel_to_m, chip.shape[1] * pixel_to_m, *chip.shape)
 grid_id = np.zeros_like(gx) - 1
+'''
+============================================================
+==================UNKNOWNS=====================================
+'''
+# Get the unclassified stuff
+roads = binary_dilation(binary_erosion(segment[4] > .9))
+
+# Blob them
+blabels = label(roads)
+
+# Take the roads and add them to the background
+xp, yp = np.where(blabels > 0)
+del_tri = Delaunay(np.array([xp, yp]).T)
+del_idx = np.round(del_tri.points).astype(int).T
+bmesh = o3d.geometry.TriangleMesh()
+bmesh.vertices = o3d.utility.Vector3dVector(np.array([gx[*del_idx], gy[*del_idx], gz[*del_idx]]).T)
+bmesh.triangles = o3d.utility.Vector3iVector(del_tri.simplices)
+bmesh = bmesh.merge_close_vertices(2.)
+bmesh = bmesh.remove_degenerate_triangles()
+bmesh = bmesh.remove_duplicated_triangles()
+material_ids.extend(o3d.utility.IntVector([UNKNOWN_ID for _ in range(len(bmesh.triangles))]))
+colors.extend(o3d.utility.Vector3dVector(np.repeat(np.array([[0., 0, 0]]), len(bmesh.vertices), 0)))
+grid_id[xp, yp] = UNKNOWN_ID
+mesh += bmesh
+print('Unknowns added to mesh.')
 '''
 ============================================================
 ==================ROADS=====================================
@@ -94,13 +134,15 @@ roads = binary_dilation(binary_erosion(segment[2] > .9))
 blabels = label(roads)
 
 # Take the roads and add them to the background
-bcld = o3d.geometry.PointCloud()
 xp, yp = np.where(blabels > 0)
-bpts = np.array([gx[xp, yp], gy[xp, yp], gz[xp, yp]])
-bcld.points = o3d.utility.Vector3dVector(bpts.T)
-bcld.estimate_normals()
-bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2., 20.]))
-bmesh = bmesh.simplify_vertex_clustering(1.)
+contours = np.concatenate(find_contours(blabels.astype(int), .9))
+poly = Polygon(contours)
+poly_s = poly.simplify(2)
+del_tri = Delaunay(np.array(poly_s.exterior.xy).T)
+del_idx = np.round(del_tri.points).astype(int).T
+bmesh = o3d.geometry.TriangleMesh()
+bmesh.vertices = o3d.utility.Vector3dVector(np.array([gx[*del_idx], gy[*del_idx], gz[*del_idx]]).T)
+bmesh.triangles = o3d.utility.Vector3iVector(del_tri.simplices)
 material_ids.extend(o3d.utility.IntVector([ROAD_ID for _ in range(len(bmesh.triangles))]))
 colors.extend(o3d.utility.Vector3dVector(np.repeat(np.array([[1., 0, 0]]), len(bmesh.vertices), 0)))
 grid_id[xp, yp] = ROAD_ID
@@ -112,23 +154,28 @@ print('Roads added to mesh.')
 ==================FIELDS====================================
 '''
 # Get the fields
-'''fields = binary_dilation(binary_erosion(segment[3] > .9))
+fields = binary_dilation(binary_erosion(segment[3] > .9))
 
 # Blob them
-blabels = label(fields)
+blabels, nlabels = label(fields, return_num=True)
 
 # Take the fields and add them to the background
-bcld = o3d.geometry.PointCloud()
-xp, yp = np.where(blabels > 0)
-bpts = np.array([gx[xp, yp], gy[xp, yp], gz[xp, yp]])
-bcld.points = o3d.utility.Vector3dVector(bpts.T)
-bcld.estimate_normals()
-bmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bcld, o3d.utility.DoubleVector([2.]))
-bmesh.triangle_uvs = o3d.utility.Vector2dVector(np.random.rand(len(bmesh.triangles), 2))
-bmesh.triangle_material_ids = o3d.utility.IntVector([3 for _ in range(len(bmesh.triangles))])
-bmesh = bmesh.paint_uniform_color([1., 1, 0])
-mesh += bmesh
-print('Fields added to mesh.')'''
+for n in range(1, nlabels):
+    bfield = blabels == n
+    xp, yp = np.where(bfield)
+    contours = np.concatenate(find_contours(bfield.astype(int), .9))
+    poly = Polygon(contours)
+    poly_s = poly.simplify(2)
+    del_tri = Delaunay(np.array(poly_s.exterior.xy).T)
+    del_idx = np.round(del_tri.points).astype(int).T
+    bmesh = o3d.geometry.TriangleMesh()
+    bmesh.vertices = o3d.utility.Vector3dVector(np.array([gx[*del_idx], gy[*del_idx], gz[*del_idx]]).T)
+    bmesh.triangles = o3d.utility.Vector3iVector(del_tri.simplices)
+    material_ids.extend(o3d.utility.IntVector([FIELD_ID for _ in range(len(bmesh.triangles))]))
+    colors.extend(o3d.utility.Vector3dVector(np.repeat(np.array([[1., 1., 0]]), len(bmesh.vertices), 0)))
+    grid_id[xp, yp] = FIELD_ID
+    mesh += bmesh
+print('Fields added to mesh.')
 
 '''
 ============================================================
@@ -164,18 +211,16 @@ for n in tqdm(range(1, nlabels)):
     foreshortening = mhght / np.tan(perp_dep_ang)**2
 
     contours = np.concatenate(find_contours(bding.astype(int), .9))
-    poly = Polygon(contours)
+    grid_contours = np.array([gx[contours[:, 1].astype(int), contours[:, 0].astype(int)], gy[contours[:, 1].astype(int), contours[:, 0].astype(int)]]).T
+    poly = Polygon(grid_contours)
     poly_s = poly.simplify(2)
     bmm = extrude_polygon(poly_s, bding_height, engine='triangle')
     bmesh = o3d.geometry.TriangleMesh()
     bmesh.triangles = o3d.utility.Vector3iVector(bmm.faces)
     bmesh.vertices = o3d.utility.Vector3dVector(bmm.vertices)
     material_ids.extend(o3d.utility.IntVector([BUILDING_ID for _ in range(len(bmesh.triangles))]))
-    grid_id[[[int(np.round(x)), int(np.round(y))] for x, y in zip(*poly_s.exterior.coords.xy)]] = BUILDING_ID
+    grid_id[bding] = BUILDING_ID
     colors.extend(o3d.utility.Vector3dVector(np.repeat(np.array([[0, 0, 1.]]), len(bmesh.vertices), 0)))
-    bmesh = bmesh.translate(np.array([gx[int(poly_s.centroid.x), int(poly_s.centroid.y)],
-                                      gy[int(poly_s.centroid.x), int(poly_s.centroid.y)],
-                                      gz[int(poly_s.centroid.x), int(poly_s.centroid.y)]]))
     mesh += bmesh
 print('Buildings added to mesh.')
 
@@ -223,16 +268,40 @@ for n in tqdm(range(1, nlabels)):
 
     yd, xd = np.where(skeleton)
     sk_dists = dists[skeleton]
+    dmm = squareform(pdist(np.array([yd, xd]).T))
+    dist_mat = abs(dmm - sk_dists)
+    rep_pts = [np.where(dmm == dmm.max())[0][0]]
+    taken = np.zeros(dist_mat.shape[0]).astype(bool)
+    taken[rep_pts[-1]] = True
+
+    while not np.all(taken):
+        close_ones = np.argsort(dist_mat[rep_pts[-1]])
+        idx = 0
+        close = 0
+        while idx < len(close_ones):
+            if not taken[close_ones[idx]]:
+                close = close_ones[idx]
+                break
+            idx += 1
+        if idx >= len(close_ones):
+            break
+        rep_pts.append(close)
+        taken[dist_mat[rep_pts[-2]] <= sk_dists[rep_pts[-2]]] = True
+
+
 
     tree_total = o3d.geometry.TriangleMesh()
-    for n in range(0, len(xd), 5):
+    for n in rep_pts:
         nm = o3d.geometry.TriangleMesh.create_sphere(sk_dists[n] * pixel_to_m, create_uv_map=True)
         nm = nm.translate(np.array([gx[xd[n], yd[n]], gy[xd[n], yd[n]], gz[xd[n], yd[n]] + mhght]))
         tree_total += nm
     tree_total = tree_total.compute_convex_hull()[0]
+    tree_total = tree_total.merge_close_vertices(2.)
+    tree_total = tree_total.remove_degenerate_triangles()
+    tree_total = tree_total.remove_duplicated_triangles()
 
     colors.extend(o3d.utility.Vector3dVector(np.repeat(np.array([[0, 1., 0]]), len(tree_total.vertices), 0)))
-    for n in range(0, len(xd), 5):
+    for n in rep_pts:
         trunk = o3d.geometry.TriangleMesh.create_cylinder(.5, mhght)
         colors.extend(o3d.utility.Vector3dVector(np.repeat(np.array([[.66, .66, .66]]), len(trunk.vertices), 0)))
         trunk = trunk.translate(np.array([0, 0, -mhght / 2]) +
@@ -250,11 +319,11 @@ mesh.triangle_uvs = o3d.utility.Vector2dVector(np.random.rand(len(mesh.triangles
 mesh.triangle_material_ids = material_ids
 mesh.vertex_colors = colors
 
-mesh = mesh.remove_duplicated_vertices()
+'''mesh = mesh.remove_duplicated_vertices()
 mesh = mesh.remove_unreferenced_vertices()
 mesh = mesh.remove_degenerate_triangles()
 mesh = mesh.remove_duplicated_triangles()
-mesh = mesh.merge_close_vertices(.1)
+mesh = mesh.merge_close_vertices(.1)'''
 
 '''
 ====================================================================
@@ -268,193 +337,256 @@ face_points = np.asarray(mesh.vertices)
 face_idxes = np.asarray(mesh.triangles)
 face_materials = np.asarray(mesh.triangle_material_ids)
 face_triangles = face_points[face_idxes]
-
-n_samples = 1000
-
-sample_points = mesh.sample_points_poisson_disk(n_samples)
-snorms = np.asarray(sample_points.normals)
-spts = np.asarray(sample_points.points)
+n_tri = len(mesh.triangles)
 
 print('Getting material triangle indexes...')
-spts_gpu = cupy.array(spts, dtype=np.float32)
 triangles_gpu = cupy.array(face_idxes, dtype=np.int32)
 vertices_gpu = cupy.array(face_points, dtype=np.float32)
-tri_idx_gpu = cupy.zeros(n_samples, dtype=np.int32)
-
-bprun = (max(1, n_samples // threads_per_block[0] + 1),
-             face_triangles.shape[0] // threads_per_block[1] + 1)
-assocTriangle[bprun, threads_per_block](spts_gpu, triangles_gpu, vertices_gpu, tri_idx_gpu)
-
-sample_triangles = tri_idx_gpu.get()
-del spts_gpu
-del triangles_gpu
-del tri_idx_gpu
-del vertices_gpu
-
 road_scat = 5.
 road_rcs = 5.
-road_normal = np.array([0., 0., 1.])
+road_normal = np.array([0., 0., -1.])
 tree_rcs = 10.
 tree_scat = 10.
+field_scat = 5.
+field_rcs = 10.
 
-pt_ids = face_materials[sample_triangles.astype(int)]
-is_opted = np.zeros_like(pt_ids)
-opt_norm = np.zeros((n_samples, 3))
-opt_norm[pt_ids == ROAD_ID] = np.array([0, 0, 1.])
-opt_norm[pt_ids == TREE_ID] = snorms[pt_ids == TREE_ID]
-opt_scat = np.ones(n_samples)
-opt_rcs = np.ones(n_samples)
+opt_norm = np.zeros((n_tri, 3))
+opt_scat = np.ones(n_tri)
+opt_rcs = np.ones(n_tri)
 
-prog_bar = tqdm(total=n_samples)
+prog_bar = tqdm(total=n_tri)
 boresight = rp.boresight(sdr[0].pulse_time).mean(axis=0)
 pointing_az = np.arctan2(boresight[0], boresight[1])
 pointing_el = -np.arcsin(boresight[2] / np.linalg.norm(boresight))
 
-print('Optimizing points...')
-while np.any(np.logical_not(is_opted)):
-    all_pts = []
-    inbeam_times = []
-    while len(all_pts) == 0:
-        ref_pt = np.random.choice(np.arange(n_samples)[np.logical_not(is_opted)])
-        pt_pos = spts[ref_pt]
+# Get vertex classifications
+vertex_ids = np.zeros(face_points.shape[0])
+for i in range(face_idxes.shape[0]):
+    vertex_ids[face_idxes[i]] = face_materials[i]
 
-        vecs = np.array([pt_pos[0] - rp.txpos(sdr[0].pulse_time)[:, 0], pt_pos[1] - rp.txpos(sdr[0].pulse_time)[:, 1],
-                         pt_pos[2] - rp.txpos(sdr[0].pulse_time)[:, 2]])
+
+print('Optimizing points...')
+times = [3788]
+prog_bar.update(times[-1])
+while times[-1] < sdr[0].nframes:
+    opt_vars = 0
+    rng_support = 0
+    rng_span = (0, np.inf)
+    can_opt_tri = np.zeros(face_idxes.shape[0]).astype(bool)
+    can_opt_vert = np.zeros(face_points.shape[0]).astype(bool)
+    while True:
+        plat_pos = rp.txpos(sdr[0].pulse_time[times[-1]])
+        vecs = np.array([face_points[:, 0] - plat_pos[0], face_points[:, 1] - plat_pos[1],
+                         face_points[:, 2] - plat_pos[2]])
         pt_az = np.arctan2(vecs[0, :], vecs[1, :])
         pt_el = -np.arcsin(vecs[2, :] / np.linalg.norm(vecs, axis=0))
-        inbeam_times = np.logical_and(abs(pt_az - pointing_az) < rp.az_half_bw, abs(pt_el - pointing_el) < rp.el_half_bw)
+        can_opt_vert[np.logical_and(abs(pt_az - pointing_az) < rp.az_half_bw * 2,
+                                    abs(pt_el - pointing_el) < rp.el_half_bw * 2)] = True
+        can_opt_tri = np.logical_or(can_opt_tri, np.array([np.any([can_opt_vert[f] for f in i]) for i in face_idxes]))
+        rng_bins = ((np.linalg.norm(vecs, axis=0) * 2 / c0 - 2 * near_range_s) * fs * upsample).astype(int)
+        rng_span = (max(rng_span[0], rng_bins.max()), min(rng_span[1], rng_bins.min()))
 
-        access_pts = []
-        for t in sdr[0].pulse_time[inbeam_times]:
-            vecs = np.array([spts[:, 0] - rp.txpos(t)[0], spts[:, 1] - rp.txpos(t)[1],
-                             spts[:, 2] - rp.txpos(t)[2]])
-            bins = np.round((np.linalg.norm(vecs, axis=0) / c0 - 2 * near_range_s) * fs * upsample).astype(int)
-            access_pts.append([a for a in zip(*np.where(bins == bins[ref_pt]))])
-        all_pts = np.array(list({x for xs in access_pts for x in xs})).flatten()
-    pre_opt_pts = all_pts[is_opted[all_pts].astype(bool)]
-    to_opt = all_pts[np.logical_not(is_opted[all_pts].astype(bool))]
-    nper = sum(inbeam_times)
+        opt_num = (np.any(face_materials[can_opt_tri] == TREE_ID) * 2 +
+                   np.any(face_materials[can_opt_tri] == ROAD_ID) * 2 +
+                   np.any(face_materials[can_opt_tri] == FIELD_ID) * 2 +
+                   np.sum(face_materials[can_opt_tri] == BUILDING_ID) * 2 +
+                   np.sum(face_materials[can_opt_tri] == UNKNOWN_ID) * 2 + np.sum(vertex_ids[can_opt_vert] != TREE_ID))
+        rng_support += len(list(set(rng_bins[can_opt_vert])))
+        if opt_num < 30:
+            times[-1] = times[-1] + 1
+            rng_support = 0
+            continue
+        if opt_num > rng_support or rng_support < 150:
+            times.append(times[-1] + 1)
+        else:
+            break
 
-    rho_matrix = cupy.zeros((nper, all_pts.shape[0]), dtype=np.complex128)
-    rngs = cupy.zeros((nper, all_pts.shape[0]), dtype=np.float32)
-    pvecs = cupy.zeros((*rho_matrix.shape, 3), dtype=np.float32)
+    nper = len(times)
+    ntri = sum(can_opt_tri)
+    nvert = sum(can_opt_vert)
 
-    _, pdata = sdr.getPulses(sdr[0].frame_num[inbeam_times], 0)
+    _, pdata = sdr.getPulses(sdr[0].frame_num[times], 0)
     mfdata = np.fft.fft(pdata, fft_len, axis=0) * mfilt[:, None]
     updata = np.zeros((up_fft_len, mfdata.shape[1]), dtype=np.complex128)
     updata[:fft_len // 2, :] = mfdata[:fft_len // 2, :]
     updata[-fft_len // 2:, :] = mfdata[-fft_len // 2:, :]
     updata = np.fft.ifft(updata, axis=0)[:nsam * upsample, :].T
 
-    updata_gpu = cupy.array(updata, dtype=np.complex128)
-    spts_gpu = cupy.array(spts[all_pts], dtype=np.float32)
-    source_gpu = cupy.array(rp.txpos(sdr[0].pulse_time[inbeam_times]), dtype=np.float32)
-    pan_gpu = cupy.array(rp.pan(sdr[0].pulse_time[inbeam_times]), dtype=np.float32)
-    tilt_gpu = cupy.array(rp.tilt(sdr[0].pulse_time[inbeam_times]), dtype=np.float32)
+    source_gpu = cupy.array(rp.txpos(sdr[0].pulse_time[times]), dtype=np.float32)
+    pan_gpu = cupy.array(rp.pan(sdr[0].pulse_time[times]), dtype=np.float32)
+    tilt_gpu = cupy.array(rp.tilt(sdr[0].pulse_time[times]), dtype=np.float32)
 
     bprun = (max(1, nper // threads_per_block[0] + 1),
-             len(all_pts) // threads_per_block[1] + 1)
-
-    calcOptParams[bprun, threads_per_block](spts_gpu, source_gpu, updata_gpu, near_range_s, fs * upsample, rho_matrix,
-                                            pvecs, rngs)
-
-    coeff = 1 / rngs.get() ** 4
-    coeff = coeff / coeff.max()
-    scaling_coeff = coeff.max() / abs(rho_matrix.get()).max()
-    rhos_scaled = rho_matrix.get() * scaling_coeff
+             sum(can_opt_tri) // threads_per_block[1] + 1)
 
     # Get the expected values to optimize for
     # Roads, then buildings, then trees
-
+    print('Building x0...')
     x0 = []
     bounds = []
     is_roads = False
     is_trees = False
     is_buildings = False
-    if np.any(pt_ids[to_opt] == ROAD_ID):
+    is_fields = False
+    is_unknown = False
+    # Triangle optimization variables
+    nvar = sum(can_opt_tri)
+    if np.any(face_materials[can_opt_tri] == ROAD_ID):
         x0 = np.array([road_scat, road_rcs])
         is_roads = True
         bounds += [(1e-9, 15), (1e-9, 100)]
-    if np.any(pt_ids[to_opt] == TREE_ID):
+    if np.any(face_materials[can_opt_tri] == TREE_ID):
         x0 = np.concatenate((x0, np.array([tree_scat, tree_rcs])))
         bounds += [(1e-9, 15), (1e-9, 100)]
         is_trees = True
-    if np.any(pt_ids[to_opt] == BUILDING_ID):
-        for bd_pt in to_opt[pt_ids[to_opt] == BUILDING_ID]:
-            bd_az = np.arctan2(snorms[bd_pt, 0], snorms[bd_pt, 1])
-            bd_el = -np.arcsin(snorms[bd_pt, 2])
-            bd_x0 = np.array([1., 100., bd_az, bd_el])
-            x0 = np.concatenate((x0, bd_x0))
-            bounds += [(1e-9, 15), (1e-9, 1e6), (bd_az - np.pi / 2, bd_az + np.pi / 2),
-                       (bd_el - np.pi / 2, bd_el + np.pi / 2)]
+    if np.any(face_materials[can_opt_tri] == FIELD_ID):
+        is_fields = True
+        x0 = np.concatenate((x0, np.array([field_scat, field_rcs])))
+        bounds += [(1e-9, 15), (1e-9, 100)]
+    if np.any(face_materials[can_opt_tri] == BUILDING_ID):
         is_buildings = True
+        for idx, bd_pt in enumerate(can_opt_tri):
+            if bd_pt:
+                bd_x0 = np.array([opt_scat[idx], opt_rcs[idx]])
+                x0 = np.concatenate((x0, bd_x0))
+                bounds += [(1e-9, 15.), (1e-9, 1e6)]
+    if np.any(face_materials[can_opt_tri] == UNKNOWN_ID):
+        is_unknown = True
+        for idx, bd_pt in enumerate(can_opt_tri):
+            if bd_pt:
+                bd_x0 = np.array([opt_scat[idx], opt_rcs[idx]])
+                x0 = np.concatenate((x0, bd_x0))
+                bounds += [(1e-9, 15.), (1e-9, 1e6)]
 
-    rng_bins = ((rngs.get() / c0 - 2 * near_range_s) * fs * upsample).astype(int)
+    # Vertex optimization variables
+    x0 = np.concatenate((x0, face_points[np.logical_and(vertex_ids != TREE_ID, can_opt_vert), 2]))
+    bounds += [(f[2] - 10., f[2] + 10) for f in face_points[np.logical_and(vertex_ids != TREE_ID, can_opt_vert)]]
 
     def minfunc(x):
-        mnorm = np.zeros((len(all_pts), 3))
-        mscat = np.ones(len(all_pts))
-        mrcs = np.ones(len(all_pts))
+        mscat = np.zeros(ntri)
+        mrcs = np.zeros(ntri)
+        mz = np.zeros(nvert)
+        vertex_start = (is_roads * 2 + is_trees * 2 + is_fields * 2 +
+                        is_buildings * sum(face_materials[can_opt_tri] == BUILDING_ID) * 2 +
+                        is_unknown * sum(face_materials[can_opt_tri] == UNKNOWN_ID) * 2)
+        btri_end = (is_roads * 2 + is_trees * 2 + is_fields * 2 + is_buildings *
+                    sum(face_materials[can_opt_tri] == BUILDING_ID) * 2)
         if is_roads:
-            mnorm[pt_ids[all_pts] == ROAD_ID] = np.array([0, 0, 1.])
-            mscat[pt_ids[all_pts] == ROAD_ID] = x[0]
-            mrcs[pt_ids[all_pts] == ROAD_ID] = x[1]
+            mscat[face_materials[can_opt_tri] == ROAD_ID] = x[0]
+            mrcs[face_materials[can_opt_tri] == ROAD_ID] = x[1]
         if is_trees:
-            mnorm[pt_ids[all_pts] == TREE_ID] = snorms[all_pts[pt_ids[all_pts] == TREE_ID]]
-            mscat[pt_ids[all_pts] == TREE_ID] = x[is_roads * 2 + 0]
-            mrcs[pt_ids[all_pts] == TREE_ID] = x[is_roads * 2 + 1]
+            mscat[face_materials[can_opt_tri] == TREE_ID] = x[is_roads * 2]
+            mrcs[face_materials[can_opt_tri] == TREE_ID] = x[is_roads * 2 + 1]
+        if is_fields:
+            mscat[face_materials[can_opt_tri] == FIELD_ID] = x[is_roads * 2 + is_trees * 2]
+            mrcs[face_materials[can_opt_tri] == FIELD_ID] = x[is_roads * 2 + is_trees * 2 + 1]
         if is_buildings:
-            not_opted = np.logical_and(pt_ids[all_pts] == BUILDING_ID, np.logical_not(is_opted[all_pts]))
-            mnorm[not_opted] = azelToVec(x[is_roads * 2 + is_trees * 2 + 2::4],
-                                                              x[
-                                                              is_roads * 2 + is_trees * 2 + 3::4]).T
-            mscat[not_opted] = x[is_roads * 2 + is_trees * 2::4]
-            mrcs[not_opted] = x[is_roads * 2 + is_trees * 2 + 1::4]
-            build_opted = np.logical_and(pt_ids[all_pts] == BUILDING_ID, is_opted[all_pts].astype(bool))
-            mnorm[build_opted] = snorms[all_pts][build_opted]
-            mscat[build_opted] = opt_scat[all_pts][build_opted]
-            mrcs[build_opted] = opt_rcs[all_pts][build_opted]
+            mscat[face_materials[can_opt_tri] == BUILDING_ID] = x[is_roads * 2 + is_trees * 2 + is_fields * 2:btri_end:2]
+            mrcs[face_materials[can_opt_tri] == BUILDING_ID] = x[is_roads * 2 + is_trees * 2 + is_fields * 2 + 1:btri_end:2]
+        if is_unknown:
+            mscat[face_materials[can_opt_tri] == UNKNOWN_ID] = x[btri_end:vertex_start:2]
+            mrcs[face_materials[can_opt_tri] == UNKNOWN_ID] = x[btri_end + 1:vertex_start:2]
 
-        mnorm_gpu = cupy.array(mnorm, dtype=np.float32)
-        mscat_gpu = cupy.array(mscat, dtype=np.float32)
-        mrcs_gpu = cupy.array(mrcs, dtype=np.float32)
-        pd_r = cupy.zeros(nsam, dtype=np.float64)
-        pd_i = cupy.zeros(nsam, dtype=np.float64)
-        calcOptRho[bprun, threads_per_block](pan_gpu, tilt_gpu, pd_r, pd_i, near_range_s, fs, rp.az_half_bw,
-                                             rp.el_half_bw, mrcs_gpu, pvecs, mnorm_gpu, mscat_gpu, rngs,
-                                             2 * np.pi / wavelength)
-        x_hat = np.fft.fft(pd_r.get() + 1j * pd_i.get(), fft_len) * chirp_filt
-        upx = np.zeros(up_fft_len, dtype=np.complex128)
-        upx[:fft_len // 2] = x_hat[:fft_len // 2]
-        upx[-fft_len // 2:] = x_hat[-fft_len // 2:]
-        upx = np.fft.ifft(upx)[:nsam * upsample]
+        # Add in vertex unknowns
+        if is_roads:
+            vertex_add = sum(vertex_ids[can_opt_vert] == ROAD_ID)
+            mz[vertex_ids[can_opt_vert] == ROAD_ID] = x[vertex_start:vertex_start + vertex_add]
+            vertex_start += vertex_add
+        if is_fields:
+            vertex_add = sum(vertex_ids[can_opt_vert] == FIELD_ID)
+            mz[vertex_ids[can_opt_vert] == FIELD_ID] = x[vertex_start:vertex_start + vertex_add]
+            vertex_start += vertex_add
+        if is_buildings:
+            vertex_add = sum(vertex_ids[can_opt_vert] == BUILDING_ID)
+            mz[vertex_ids[can_opt_vert] == BUILDING_ID] = x[vertex_start:vertex_start + vertex_add]
+            vertex_start += vertex_add
+        if is_unknown:
+            vertex_add = sum(vertex_ids[can_opt_vert] == UNKNOWN_ID)
+            mz[vertex_ids[can_opt_vert] == UNKNOWN_ID] = x[vertex_start:vertex_start + vertex_add]
+            vertex_start += vertex_add
+        # Vertices optimization
+        spts = face_points + 0.0
+        spts[can_opt_vert, 2] = mz
+        spts_gpu = cupy.array(spts, dtype=np.float32)
 
-        return np.linalg.norm(rhos_scaled - upx[rng_bins] * scaling_coeff)
+        mfinalscat = opt_scat + 0.0
+        mfinalscat[can_opt_tri] = mscat
+        mscat_gpu = cupy.array(mfinalscat, dtype=np.float32)
+        mfinalrcs = opt_rcs + 0.0
+        mfinalrcs[can_opt_tri] = mrcs
+        mrcs_gpu = cupy.array(mfinalrcs, dtype=np.float32)
+
+        pd_r = cupy.zeros((nper, nsam), dtype=np.float64)
+        pd_i = cupy.zeros((nper, nsam), dtype=np.float64)
+        calcOptRho[bprun, threads_per_block](spts_gpu, triangles_gpu, source_gpu, pan_gpu, tilt_gpu, pd_r, pd_i, near_range_s, fs, rp.az_half_bw,
+                                             rp.el_half_bw, mscat_gpu, mrcs_gpu, 2 * np.pi / wavelength, radar_coeff)
+        x_hat = np.fft.fft(pd_r.get() + 1j * pd_i.get(), fft_len, axis=1) * chirp_filt
+        upx = np.zeros((nper, up_fft_len), dtype=np.complex128)
+        upx[:, fft_len // 2] = x_hat[:, fft_len // 2]
+        upx[:, -fft_len // 2:] = x_hat[:, -fft_len // 2:]
+        upx = np.fft.ifft(upx, axis=1)[:, :nsam * upsample]
+
+        return np.linalg.norm(updata[:, rng_span[1]:rng_span[0]] - upx[:, rng_span[1]:rng_span[0]])
 
     opt_x = minimize(minfunc, x0, bounds=bounds)
 
+    vertex_start = (is_roads * 2 + is_trees * 2 + is_fields * 2 + is_buildings *
+                    sum(face_materials[can_opt_tri] == BUILDING_ID) * 2 +
+                    is_unknown * sum(face_materials[can_opt_tri] == UNKNOWN_ID) * 2)
+    vertex_add = 0
+    btri_end = (is_roads * 2 + is_trees * 2 + is_fields * 2 + is_buildings *
+                sum(face_materials[can_opt_tri] == BUILDING_ID) * 2)
     if is_roads:
-        opt_scat[all_pts[pt_ids[all_pts] == ROAD_ID]] = opt_x['x'][0]
-        opt_rcs[all_pts[pt_ids[all_pts] == ROAD_ID]] = opt_x['x'][1]
+        opt_scat[face_materials == ROAD_ID] = opt_x['x'][0]
+        opt_rcs[face_materials == ROAD_ID] = opt_x['x'][1]
         road_scat = opt_x['x'][0]
         road_rcs = opt_x['x'][1]
     if is_trees:
-        opt_scat[all_pts[pt_ids[all_pts] == TREE_ID]] = opt_x['x'][is_roads * 2 + 0]
-        opt_rcs[all_pts[pt_ids[all_pts] == TREE_ID]] = opt_x['x'][is_roads * 2 + 1]
+        opt_scat[face_materials == TREE_ID] = opt_x['x'][is_roads * 2 + 0]
+        opt_rcs[face_materials == TREE_ID] = opt_x['x'][is_roads * 2 + 1]
         tree_scat = opt_x['x'][is_roads * 2 + 0]
         tree_rcs = opt_x['x'][is_roads * 2 + 1]
+    if is_fields:
+        opt_scat[face_materials == FIELD_ID] = opt_x['x'][is_roads * 2 + is_trees * 2]
+        opt_rcs[face_materials == FIELD_ID] = opt_x['x'][is_roads * 2 + is_trees * 2 + 1]
+        field_scat = opt_x['x'][is_roads * 2 + is_trees * 2]
+        field_rcs = opt_x['x'][is_roads * 2 + is_trees * 2 + 1]
     if is_buildings:
-        opt_norm[to_opt[pt_ids[to_opt] == BUILDING_ID]] = azelToVec(opt_x['x'][is_roads * 2 + is_trees * 2 + 2::4],
-                                                          opt_x['x'][
-                                                          is_roads * 2 + is_trees * 2 + 3::4]).T
-        opt_scat[to_opt[pt_ids[to_opt] == BUILDING_ID]] = opt_x['x'][is_roads * 2 + is_trees * 2::4]
-        opt_rcs[to_opt[pt_ids[to_opt] == BUILDING_ID]] = opt_x['x'][is_roads * 2 + is_trees * 2 + 1::4]
-    is_opted[to_opt] = True
-    prog_bar.update(len(to_opt))
+        opt_scat[np.logical_and(face_materials == BUILDING_ID, can_opt_tri)] = opt_x['x'][is_roads * 2 + is_trees * 2 + is_fields * 2:btri_end:2]
+        opt_rcs[np.logical_and(face_materials == BUILDING_ID, can_opt_tri)] = opt_x['x'][is_roads * 2 + is_trees * 2 + is_fields * 2 + 1:btri_end:2]
+    if is_unknown:
+        opt_scat[np.logical_and(face_materials == UNKNOWN_ID, can_opt_tri)] = opt_x['x'][btri_end:vertex_start:2]
+        opt_rcs[np.logical_and(face_materials == UNKNOWN_ID, can_opt_tri)] = opt_x['x'][btri_end + 1:vertex_start:2]
+
+    # Add in vertex unknowns
+    mz = np.zeros(nvert)
+    if is_roads:
+        vertex_add = sum(vertex_ids[can_opt_vert] == ROAD_ID)
+        mz[vertex_ids[can_opt_vert] == ROAD_ID] = opt_x['x'][vertex_start:vertex_start + vertex_add]
+        vertex_start += vertex_add
+    if is_fields:
+        vertex_add = sum(vertex_ids[can_opt_vert] == FIELD_ID)
+        mz[vertex_ids[can_opt_vert] == FIELD_ID] = opt_x['x'][vertex_start:vertex_start + vertex_add]
+        vertex_start += vertex_add
+    if is_buildings:
+        vertex_add = sum(vertex_ids[can_opt_vert] == BUILDING_ID)
+        mz[vertex_ids[can_opt_vert] == BUILDING_ID] = opt_x['x'][vertex_start:vertex_start + vertex_add]
+        vertex_start += vertex_add
+    if is_unknown:
+        vertex_add = sum(vertex_ids[can_opt_vert] == UNKNOWN_ID)
+        mz[vertex_ids[can_opt_vert] == UNKNOWN_ID] = opt_x['x'][vertex_start:vertex_start + vertex_add]
+        vertex_start += vertex_add
+
+    face_points[can_opt_vert, 2] = mz
+
+    # See if a triangle is fully optimized
+    prog_bar.update(times[-1] - times[0] + 1)
+    times = [times[-1] + 1]
+
 
 opt_pcd = o3d.geometry.PointCloud()
-opt_pcd.points = sample_points.points
-opt_pcd.normals = o3d.utility.Vector3dVector(opt_norm)
+opt_pcd.points = o3d.utility.Vector3dVector(face_points)
+# opt_pcd.normals = o3d.utility.Vector3dVector(opt_norm)
 
 # o3d.visualization.draw_plotly([pcd])
 o3d.visualization.draw_geometries([mesh, opt_pcd])

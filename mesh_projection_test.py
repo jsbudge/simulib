@@ -21,20 +21,20 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 22  # dB
+ant_gain = 52  # dB
 ant_transmit_power = 100  # watts
 ant_eff_aperture = 10. * 10.  # m**2
 bw_az = 4.5 * DTR
 bw_el = 11 * DTR
-npulses = 128
+npulses = 32
 plp = .75
 fdelay = 0.
 upsample = 4
 num_bounces = 1
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 1000
-num_mesh_triangles = 1000
+points_to_sample = 10000
+num_mesh_triangles = 10000
 grid_origin = (40.138544, -111.664394, 1381.)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
