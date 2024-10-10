@@ -26,15 +26,15 @@ ant_transmit_power = 100  # watts
 ant_eff_aperture = 10. * 10.  # m**2
 bw_az = 4.5 * DTR
 bw_el = 11 * DTR
-npulses = 32
+npulses = 128
 plp = .75
 fdelay = 0.
 upsample = 4
-num_bounces = 1
+num_bounces = 0
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 10000
-num_mesh_triangles = 10000
+points_to_sample = 10
+num_mesh_triangles = 100000
 grid_origin = (40.138544, -111.664394, 1381.)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -49,13 +49,16 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 print('Loading mesh...')
-mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=num_mesh_triangles)  # Has just over 243000 points in the file
+mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=num_mesh_triangles)  # Has just over 500000 points in the file
 # mesh = o3d.geometry.TriangleMesh.create_sphere(radius=150, resolution=10)
 mesh = mesh.compute_triangle_normals()
 mesh = mesh.compute_vertex_normals()
 
 mesh_extent = mesh.get_max_bound() - mesh.get_min_bound()
-gx, gy, gz = bg.getGrid(grid_origin, 400, 400, nrows=200, ncols=200, az=np.pi / 4)
+face_points = np.asarray(mesh.vertices)
+grid_vec = face_points[face_points[:, 0] == face_points[:, 0].max()] - face_points[face_points[:, 1] == face_points[:, 1].min()]
+head_ang = np.arctan2(grid_vec[0, 0], grid_vec[0, 1])
+gx, gy, gz = bg.getGrid(grid_origin, mesh_extent.max(), mesh_extent.max(), nrows=100, ncols=100, az=head_ang)
 
 grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
 
@@ -89,10 +92,11 @@ bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
 
 # MAIN LOOP
-for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
+for frame in tqdm(range(idx_t[0], sdr_f[0].nframes - npulses, npulses)):
     dt = sdr_f[0].pulse_time[frame:frame + npulses]
     trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.pos(dt), rp.boresight(dt),
-                                  radar_coeff, bw_az, bw_el, nsam, fc, near_range_s, num_bounces=num_bounces, bounce_rays=nbounce_rays)
+                                  radar_coeff, bw_az, bw_el, nsam, fc, near_range_s, num_bounces=num_bounces,
+                                  bounce_rays=nbounce_rays)
     mf_pulse = upsamplePulse(
     fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj(), fft_len, upsample,
         is_freq=True, time_len=nsam)
@@ -100,7 +104,7 @@ for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
     bpj_grid += backprojectPulseSet(pulses.T, rp.pan(dt), rp.tilt(dt), rp.rxpos(dt), rp.txpos(dt), gx, gy, gz,
                                    c0 / fc, near_range_s, fs * upsample, bw_az, bw_el)
 
-'''
+face_tris = np.asarray(mesh.triangles)
 try:
     face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
 except IndexError:
@@ -116,13 +120,16 @@ for i in range(face_tris.shape[0]):
 scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
 sc_min = scaling[0]
 sc = 1 / (scaling[1] - scaling[0])
-ax.quiver([obs_pt[0]], [obs_pt[1]], [obs_pt[2]],
-          [pointing_vec[0] * 100], [pointing_vec[1] * 100], [pointing_vec[2]* 100])
+'''ax.quiver([obs_pt[0]], [obs_pt[1]], [obs_pt[2]],
+          [pointing_vec[0] * 100], [pointing_vec[1] * 100], [pointing_vec[2]* 100])'''
 for idx, (ro, rd, nrp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
     scaled_rp = (nrp - sc_min) * sc * 10
-    ax.quiver(ro[:, 0], ro[:, 1], ro[:, 2], rd[:, 0],
-              rd[:, 1], rd[:, 2], color=cm.jet(idx / len(ray_origins) * np.ones_like(nrp)))
-plt.show()'''
+    ax.quiver(ro[:, :, 0], ro[:, :, 1], ro[:, :, 2], rd[:, :, 0] * scaled_rp,
+              rd[:, :, 1] * scaled_rp, rd[:, :, 2] * scaled_rp)
+ax.set_zlim(face_points[:, 2].min() - 15., face_points[:, 2].max() + 15)
+ax.set_ylim(face_points[:, 1].min() - 5., face_points[:, 1].max() + 5)
+ax.set_xlim(face_points[:, 0].min() - 5., face_points[:, 0].max() + 5)
+plt.show()
 px.scatter(db(single_rp.flatten())).show()
 px.scatter(db(single_pulse.flatten())).show()
 px.scatter(db(single_mf_pulse.flatten())).show()
