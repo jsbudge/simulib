@@ -8,7 +8,7 @@ from scipy.spatial.distance import pdist, squareform
 from triangle.plot import vertices
 from scipy.spatial import Delaunay
 from SDRParsing import load
-from cuda_kernels import applyRadiationPatternCPU, calcOptRho, calcOptParams, getMaxThreads, assocTriangle
+from cuda_kernels import applyRadiationPatternCPU, calcOptRho, calcRangeProfileScattering, getMaxThreads, assocTriangle
 from grid_helper import SDREnvironment
 from models import ImageSegmenter
 from platform_helper import SDRPlatform

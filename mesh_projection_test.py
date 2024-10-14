@@ -28,14 +28,14 @@ bw_az = 4.5 * DTR
 bw_el = 11 * DTR
 npulses = 128
 plp = .75
-fdelay = 0.
+fdelay = 10.
 upsample = 4
-num_bounces = 0
+num_bounces = 1
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 10
-num_mesh_triangles = 100000
-grid_origin = (40.138544, -111.664394, 1381.)
+points_to_sample = 1000
+num_mesh_triangles = 10000
+grid_origin = (40.139343, -111.663541, 1380.)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
 
@@ -49,20 +49,29 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 print('Loading mesh...')
-mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=num_mesh_triangles)  # Has just over 500000 points in the file
-# mesh = o3d.geometry.TriangleMesh.create_sphere(radius=150, resolution=10)
-mesh = mesh.compute_triangle_normals()
-mesh = mesh.compute_vertex_normals()
+mesh = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+                           points=num_mesh_triangles)  # Has just over 500000 points in the file
+mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+
 
 mesh_extent = mesh.get_max_bound() - mesh.get_min_bound()
 face_points = np.asarray(mesh.vertices)
 grid_vec = face_points[face_points[:, 0] == face_points[:, 0].max()] - face_points[face_points[:, 1] == face_points[:, 1].min()]
 head_ang = np.arctan2(grid_vec[0, 0], grid_vec[0, 1])
-gx, gy, gz = bg.getGrid(grid_origin, mesh_extent.max(), mesh_extent.max(), nrows=100, ncols=100, az=head_ang)
+gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+gpcd = o3d.geometry.PointCloud()
+gpcd.points = o3d.utility.Vector3dVector(np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T)
+gpcd.estimate_normals()
+ground = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(gpcd, radii=o3d.utility.DoubleVector(np.array([.08])))
+ground = ground.simplify_vertex_clustering(1.)
 
 grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
 
-mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean()]), relative=False)
+mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean() + 2.5]), relative=False)
+mesh_ids = np.asarray(mesh.triangle_material_ids)
+mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(ground.triangles))])))
+mesh += ground
+mesh.triangle_material_ids = o3d.utility.IntVector([int(m) for m in mesh_ids])
 face_points = np.asarray(mesh.vertices)
 
 # This is all the constants in the radar equation for this simulation
@@ -73,12 +82,22 @@ chirp = genChirp(nr, fs, fc, 400e6)
 fft_chirp = np.fft.fft(chirp, fft_len)
 
 # Load in boxes and meshes for speedup of ray tracing
-box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample)
+try:
+    msigmas = [1. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
+    msigmas[0] = msigmas[15] = 5  # seats
+    msigmas[6] = msigmas[13] = msigmas[17] = .1  # body
+    msigmas[12] = msigmas[4] = 5  # windshield
+    msigmas[28] = .1
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample,
+                                                      material_sigmas=msigmas)
+except ValueError:
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample)
 
 # Single pulse for debugging
 single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
-                                                                             rp.pos(data_t[npulses // 2]).reshape((1, 3)),
-                                                                             pointing_vec.reshape((1, 3)), radar_coeff, bw_az, bw_el,
+                                                                             rp.txpos(data_t),
+                                                                             rp.boresight(data_t), radar_coeff,
+                                                                             bw_az, bw_el,
                                                                              nsam, fc, near_range_s,
                                                                              num_bounces=num_bounces,
                                                                              bounce_rays=nbounce_rays,
@@ -92,9 +111,9 @@ bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
 
 # MAIN LOOP
-for frame in tqdm(range(idx_t[0], sdr_f[0].nframes - npulses, npulses)):
+for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
     dt = sdr_f[0].pulse_time[frame:frame + npulses]
-    trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.pos(dt), rp.boresight(dt),
+    trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.txpos(dt), rp.boresight(dt),
                                   radar_coeff, bw_az, bw_el, nsam, fc, near_range_s, num_bounces=num_bounces,
                                   bounce_rays=nbounce_rays)
     mf_pulse = upsamplePulse(
@@ -120,27 +139,25 @@ for i in range(face_tris.shape[0]):
 scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
 sc_min = scaling[0]
 sc = 1 / (scaling[1] - scaling[0])
-'''ax.quiver([obs_pt[0]], [obs_pt[1]], [obs_pt[2]],
-          [pointing_vec[0] * 100], [pointing_vec[1] * 100], [pointing_vec[2]* 100])'''
 for idx, (ro, rd, nrp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
     scaled_rp = (nrp - sc_min) * sc * 10
-    ax.quiver(ro[:, :, 0], ro[:, :, 1], ro[:, :, 2], rd[:, :, 0] * scaled_rp,
-              rd[:, :, 1] * scaled_rp, rd[:, :, 2] * scaled_rp)
+    ax.quiver(ro[0, :, 0], ro[0, :, 1], ro[0, :, 2], rd[0, :, 0] * scaled_rp[0, :],
+              rd[0, :, 1] * scaled_rp[0, :], rd[0, :, 2] * scaled_rp[0, :])
 ax.set_zlim(face_points[:, 2].min() - 15., face_points[:, 2].max() + 15)
 ax.set_ylim(face_points[:, 1].min() - 5., face_points[:, 1].max() + 5)
 ax.set_xlim(face_points[:, 0].min() - 5., face_points[:, 0].max() + 5)
 plt.show()
-px.scatter(db(single_rp.flatten())).show()
-px.scatter(db(single_pulse.flatten())).show()
-px.scatter(db(single_mf_pulse.flatten())).show()
+px.scatter(db(single_rp[0].flatten())).show()
+px.scatter(db(single_pulse[0].flatten())).show()
+px.scatter(db(single_mf_pulse[0].flatten())).show()
 
 plt.figure('Data')
-plt.imshow(db(np.fft.fft(pulses, axis=0)))
+plt.imshow(db(single_mf_pulse))
 plt.axis('tight')
 plt.show()
 
 plt.figure('Backprojection')
-plt.imshow(db(bpj_grid))
+plt.imshow(db(bpj_grid), cmap='gray', clim=[80., 125.])
 plt.axis('tight')
 plt.show()
 
@@ -150,6 +167,30 @@ plt.scatter(gx.flatten(), gy.flatten())
 plt.scatter(face_points[:, 0], face_points[:, 1])
 plt.scatter(points_plot[:, 0], points_plot[:, 1])
 plt.show()
+
+ax = plt.figure().add_subplot(projection='3d')
+polygons = []
+for i in range(face_tris.shape[0]):
+    face = face_tris[i]
+    polygon = Poly3DCollection([face_points[face]], alpha=.75, facecolor=face_colors[i], linewidths=2)
+    polygons.append(polygon)
+    ax.add_collection3d(polygon)
+for pt in range(ray_origins[0].shape[1]):
+    ax.plot([rp.txpos(data_t[0])[0], ray_origins[0][0, pt, 0]],
+            [rp.txpos(data_t[0])[1], ray_origins[0][0, pt, 1]],
+            [rp.txpos(data_t[0])[2], ray_origins[0][0, pt, 2]])
+scaled_rp = (ray_powers[0] - sc_min) * sc
+ax.quiver(ray_origins[0][0, :, 0], ray_origins[0][0, :, 1], ray_origins[0][0, :, 2], ray_directions[0][0, :, 0] * scaled_rp[0, :],
+          ray_directions[0][0, :, 1] * scaled_rp[0, :], ray_directions[0][0, :, 2] * scaled_rp[0, :])
+ax.set_zlim(face_points[:, 2].min(), face_points[:, 2].max())
+ax.set_ylim(face_points[:, 1].min(), face_points[:, 1].max())
+ax.set_xlim(face_points[:, 0].min(), face_points[:, 0].max())
+plt.show()
+
+ax = plt.figure().add_subplot(projection='3d')
+for idx, (ro, rd, nrp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
+    scaled_rp = (nrp - sc_min) * sc * 10
+    ax.scatter(ro[0, :, 0], ro[0, :, 1], ro[0, :, 2])
 
 '''ax = plt.figure().add_subplot(projection='3d')
 ax.scatter(rp.pos(rp.gpst)[:, 0], rp.pos(rp.gpst)[:, 1], rp.pos(rp.gpst)[:, 2])

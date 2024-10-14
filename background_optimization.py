@@ -26,34 +26,38 @@ from simulation_functions import db, llh2enu, getElevationMap, azelToVec, enu2ll
 from pywt import wavedec2
 from trimesh.creation import extrude_polygon
 import plotly.io as pio
+
 pio.renderers.default = 'browser'
 
 
 def solvey(x1, y1, z1, x0, y0, z0, R1, R0, z):
-    y = (4 * y1 ** 3 - 4 * y0 * y1 ** 2 + 4 * x1 ** 2 * y1 + 4 * z1 ** 2 * y1 + 4 * x0 ** 2 * y1 - 4 * y0 ** 2 * y1 - 4 * z0 ** 2 * y1 -
-            4 * R1 ** 2 * y1 + 4 * R0 ** 2 * y1 - 8 * x1 * x0 * y1 - 8 * z1 * z * y1 + 8 * z0 * z * y1 + 4 * y0 ** 3 + 4 * y0 * z0 ** 2 +
-            4 * y0 * R1 ** 2 - 4 * y0 * R0 ** 2 + 4 * x1 ** 2 * y0 - 4 * z1 ** 2 * y0 + 4 * x0 ** 2 * y0 - 8 * x1 * x0 * y0 + 8 * z1 * y0 * z -
-            8 * y0 * z0 * z - np.sqrt((-4 * y1 ** 3 + 4 * y0 * y1 ** 2 - 4 * x1 ** 2 * y1 - 4 * z1 ** 2 * y1 - 4 * x0 ** 2 * y1 +
-                                       4 * y0 ** 2 * y1 + 4 * z0 ** 2 * y1 + 4 * R1 ** 2 * y1 - 4 * R0 ** 2 * y1 + 8 * x1 * x0 * y1 + 8 * z1 * z * y1 -
-                                       8 * z0 * z * y1 - 4 * y0 ** 3 - 4 * y0 * z0 ** 2 - 4 * y0 * R1 ** 2 + 4 * y0 * R0 ** 2 - 4 * x1 ** 2 * y0 + 4 * z1 ** 2 * y0 -
-                                       4 * x0 ** 2 * y0 + 8 * x1 * x0 * y0 - 8 * z1 * y0 * z + 8 * y0 * z0 * z) ** 2 -
-                                      4 * (4 * x1 ** 2 - 8 * x0 * x1 + 4 * y1 ** 2 + 4 * x0 ** 2 + 4 * y0 ** 2 - 8 * y1 * y0) *
-                                      (x1 ** 4 - 4 * x0 * x1 ** 3 + 2 * y1 ** 2 * x1 ** 2 + 2 * z1 ** 2 * x1 ** 2 + 6 * x0 ** 2 * x1 ** 2 +
-                                       2 * y0 ** 2 * x1 ** 2 + 2 * z0 ** 2 * x1 ** 2 - 2 * R1 ** 2 * x1 ** 2 - 2 * R0 ** 2 * x1 ** 2 + 4 * z ** 2 * x1 ** 2 -
-                                       4 * z1 * z * x1 ** 2 - 4 * z0 * z * x1 ** 2 - 4 * x0 ** 3 * x1 - 4 * x0 * y0 ** 2 * x1 - 4 * x0 * z0 ** 2 * x1 +
-                                       4 * x0 * R1 ** 2 * x1 + 4 * x0 * R0 ** 2 * x1 - 8 * x0 * z ** 2 * x1 - 4 * y1 ** 2 * x0 * x1 - 4 * z1 ** 2 * x0 * x1 +
-                                       8 * z1 * x0 * z * x1 + 8 * x0 * z0 * z * x1 + y1 ** 4 + z1 ** 4 + x0 ** 4 + y0 ** 4 + z0 ** 4 + R1 ** 4 + R0 ** 4 +
-                                       2 * y1 ** 2 * z1 ** 2 + 2 * y1 ** 2 * x0 ** 2 + 2 * z1 ** 2 * x0 ** 2 - 2 * y1 ** 2 * y0 ** 2 - 2 * z1 ** 2 * y0 ** 2 +
-                                       2 * x0 ** 2 * y0 ** 2 - 2 * y1 ** 2 * z0 ** 2 - 2 * z1 ** 2 * z0 ** 2 + 2 * x0 ** 2 * z0 ** 2 + 2 * y0 ** 2 * z0 ** 2 -
-                                       2 * y1 ** 2 * R1 ** 2 - 2 * z1 ** 2 * R1 ** 2 - 2 * x0 ** 2 * R1 ** 2 + 2 * y0 ** 2 * R1 ** 2 + 2 * z0 ** 2 * R1 ** 2 +
-                                       2 * y1 ** 2 * R0 ** 2 + 2 * z1 ** 2 * R0 ** 2 - 2 * x0 ** 2 * R0 ** 2 - 2 * y0 ** 2 * R0 ** 2 - 2 * z0 ** 2 * R0 ** 2 -
-                                       2 * R1 ** 2 * R0 ** 2 + 4 * z1 ** 2 * z ** 2 + 4 * x0 ** 2 * z ** 2 + 4 * z0 ** 2 * z ** 2 - 8 * z1 * z0 * z ** 2 -
-                                       4 * z1 ** 3 * z - 4 * z0 ** 3 * z - 4 * z1 * x0 ** 2 * z + 4 * z1 * y0 ** 2 * z + 4 * z1 * z0 ** 2 * z +
-                                       4 * z1 * R1 ** 2 * z - 4 * z0 * R1 ** 2 * z - 4 * z1 * R0 ** 2 * z + 4 * z0 * R0 ** 2 * z - 4 * y1 ** 2 * z1 * z +
-                                       4 * y1 ** 2 * z0 * z + 4 * z1 ** 2 * z0 * z - 4 * x0 ** 2 * z0 * z - 4 * y0 ** 2 * z0 * z))) / (
-        2 * (4 * x1 ** 2 - 8 * x0 * x1 + 4 * y1 ** 2 + 4 * x0 ** 2 + 4 * y0 ** 2 - 8 * y1 * y0))
-    x = x1 + np.sqrt(-y1**2 + 2 * y1 * y - z1**2 + 2 * z1 * z + R0**2 - y**2 -z**2)
+    y = (
+                    4 * y1 ** 3 - 4 * y0 * y1 ** 2 + 4 * x1 ** 2 * y1 + 4 * z1 ** 2 * y1 + 4 * x0 ** 2 * y1 - 4 * y0 ** 2 * y1 - 4 * z0 ** 2 * y1 -
+                    4 * R1 ** 2 * y1 + 4 * R0 ** 2 * y1 - 8 * x1 * x0 * y1 - 8 * z1 * z * y1 + 8 * z0 * z * y1 + 4 * y0 ** 3 + 4 * y0 * z0 ** 2 +
+                    4 * y0 * R1 ** 2 - 4 * y0 * R0 ** 2 + 4 * x1 ** 2 * y0 - 4 * z1 ** 2 * y0 + 4 * x0 ** 2 * y0 - 8 * x1 * x0 * y0 + 8 * z1 * y0 * z -
+                    8 * y0 * z0 * z - np.sqrt(
+                (-4 * y1 ** 3 + 4 * y0 * y1 ** 2 - 4 * x1 ** 2 * y1 - 4 * z1 ** 2 * y1 - 4 * x0 ** 2 * y1 +
+                 4 * y0 ** 2 * y1 + 4 * z0 ** 2 * y1 + 4 * R1 ** 2 * y1 - 4 * R0 ** 2 * y1 + 8 * x1 * x0 * y1 + 8 * z1 * z * y1 -
+                 8 * z0 * z * y1 - 4 * y0 ** 3 - 4 * y0 * z0 ** 2 - 4 * y0 * R1 ** 2 + 4 * y0 * R0 ** 2 - 4 * x1 ** 2 * y0 + 4 * z1 ** 2 * y0 -
+                 4 * x0 ** 2 * y0 + 8 * x1 * x0 * y0 - 8 * z1 * y0 * z + 8 * y0 * z0 * z) ** 2 -
+                4 * (4 * x1 ** 2 - 8 * x0 * x1 + 4 * y1 ** 2 + 4 * x0 ** 2 + 4 * y0 ** 2 - 8 * y1 * y0) *
+                (x1 ** 4 - 4 * x0 * x1 ** 3 + 2 * y1 ** 2 * x1 ** 2 + 2 * z1 ** 2 * x1 ** 2 + 6 * x0 ** 2 * x1 ** 2 +
+                 2 * y0 ** 2 * x1 ** 2 + 2 * z0 ** 2 * x1 ** 2 - 2 * R1 ** 2 * x1 ** 2 - 2 * R0 ** 2 * x1 ** 2 + 4 * z ** 2 * x1 ** 2 -
+                 4 * z1 * z * x1 ** 2 - 4 * z0 * z * x1 ** 2 - 4 * x0 ** 3 * x1 - 4 * x0 * y0 ** 2 * x1 - 4 * x0 * z0 ** 2 * x1 +
+                 4 * x0 * R1 ** 2 * x1 + 4 * x0 * R0 ** 2 * x1 - 8 * x0 * z ** 2 * x1 - 4 * y1 ** 2 * x0 * x1 - 4 * z1 ** 2 * x0 * x1 +
+                 8 * z1 * x0 * z * x1 + 8 * x0 * z0 * z * x1 + y1 ** 4 + z1 ** 4 + x0 ** 4 + y0 ** 4 + z0 ** 4 + R1 ** 4 + R0 ** 4 +
+                 2 * y1 ** 2 * z1 ** 2 + 2 * y1 ** 2 * x0 ** 2 + 2 * z1 ** 2 * x0 ** 2 - 2 * y1 ** 2 * y0 ** 2 - 2 * z1 ** 2 * y0 ** 2 +
+                 2 * x0 ** 2 * y0 ** 2 - 2 * y1 ** 2 * z0 ** 2 - 2 * z1 ** 2 * z0 ** 2 + 2 * x0 ** 2 * z0 ** 2 + 2 * y0 ** 2 * z0 ** 2 -
+                 2 * y1 ** 2 * R1 ** 2 - 2 * z1 ** 2 * R1 ** 2 - 2 * x0 ** 2 * R1 ** 2 + 2 * y0 ** 2 * R1 ** 2 + 2 * z0 ** 2 * R1 ** 2 +
+                 2 * y1 ** 2 * R0 ** 2 + 2 * z1 ** 2 * R0 ** 2 - 2 * x0 ** 2 * R0 ** 2 - 2 * y0 ** 2 * R0 ** 2 - 2 * z0 ** 2 * R0 ** 2 -
+                 2 * R1 ** 2 * R0 ** 2 + 4 * z1 ** 2 * z ** 2 + 4 * x0 ** 2 * z ** 2 + 4 * z0 ** 2 * z ** 2 - 8 * z1 * z0 * z ** 2 -
+                 4 * z1 ** 3 * z - 4 * z0 ** 3 * z - 4 * z1 * x0 ** 2 * z + 4 * z1 * y0 ** 2 * z + 4 * z1 * z0 ** 2 * z +
+                 4 * z1 * R1 ** 2 * z - 4 * z0 * R1 ** 2 * z - 4 * z1 * R0 ** 2 * z + 4 * z0 * R0 ** 2 * z - 4 * y1 ** 2 * z1 * z +
+                 4 * y1 ** 2 * z0 * z + 4 * z1 ** 2 * z0 * z - 4 * x0 ** 2 * z0 * z - 4 * y0 ** 2 * z0 * z))) / (
+                2 * (4 * x1 ** 2 - 8 * x0 * x1 + 4 * y1 ** 2 + 4 * x0 ** 2 + 4 * y0 ** 2 - 8 * y1 * y0))
+    x = x1 + np.sqrt(-y1 ** 2 + 2 * y1 * y - z1 ** 2 + 2 * z1 * z + R0 ** 2 - y ** 2 - z ** 2)
     return np.array([x, y]).T
+
 
 c0 = 299792458.0
 fs = 2e9
@@ -84,7 +88,7 @@ chirp_filt = np.fft.fft(sdr[0].cal_chirp, fft_len) * mfilt
 threads_per_block = getMaxThreads()
 
 # This is all the constants in the radar equation for this simulation
-radar_coeff = transmit_power * 10**(ant_gain / 10) * eff_aperture / (4 * np.pi)**2
+radar_coeff = transmit_power * 10 ** (ant_gain / 10) * eff_aperture / (4 * np.pi) ** 2
 chip_shape = (768, 768)
 
 gx, gy, gz = bg.getGrid(bg.origin, chip_shape[0] * pixel_to_m, chip_shape[1] * pixel_to_m, *chip_shape)
@@ -102,7 +106,7 @@ pointing_el = -np.arcsin(boresight[2] / np.linalg.norm(boresight))
 
 plat_pos = rp.txpos(rp.gpst.mean())
 vecs = np.array([points[:, 0] - plat_pos[0], points[:, 1] - plat_pos[1],
-                         points[:, 2] - plat_pos[2]])
+                 points[:, 2] - plat_pos[2]])
 
 rng_bins = ((np.linalg.norm(vecs, axis=0) * 2 / c0 - 2 * near_range_s) * fs).astype(int)
 
@@ -124,7 +128,7 @@ for tt in tqdm(range(0, sdr[0].nframes, 16)):
         pt_az = np.arctan2(vecs[0, :], vecs[1, :])
         pt_el = -np.arcsin(vecs[2, :] / np.linalg.norm(vecs, axis=0))
         if sum(np.logical_and(abs(pt_az - pointing_az) < rp.az_half_bw * 2,
-                                    abs(pt_el - pointing_el) < rp.el_half_bw * 2)) >= tmp_pts.shape[0] - 2:
+                              abs(pt_el - pointing_el) < rp.el_half_bw * 2)) >= tmp_pts.shape[0] - 2:
             permission = True
             break
     if not permission:
@@ -136,7 +140,7 @@ for tt in tqdm(range(0, sdr[0].nframes, 16)):
         pt_az = np.arctan2(vecs[0, :], vecs[1, :])
         pt_el = -np.arcsin(vecs[2, :] / np.linalg.norm(vecs, axis=0))
         use_pts[np.logical_and(abs(pt_az - pointing_az) < rp.az_half_bw * 2,
-                                    abs(pt_el - pointing_el) < rp.el_half_bw * 2)] = True
+                               abs(pt_el - pointing_el) < rp.el_half_bw * 2)] = True
     use_pts[opt_pts] = False
     if sum(use_pts) < len(opt_pts):
         continue
@@ -172,16 +176,20 @@ for tt in tqdm(range(0, sdr[0].nframes, 16)):
     bounds = []
     for n in range(tmp_pts.shape[0]):
         x0 = np.concatenate((x0, np.array([tmp_pts[n, 2], tmp_betas[n], tmp_sigmas[n], tmp_az[n], tmp_el[n]])))
-        bounds += [(tmp_pts[n, 2] - 1., tmp_pts[n, 2] + 10.), (1e-9, 15), (1e-9, 1000.), (1e-9, 2 * np.pi), (-np.pi / 2, np.pi / 2)]
+        bounds += [(tmp_pts[n, 2] - 1., tmp_pts[n, 2] + 10.), (1e-9, 5), (1e-9, 1000.), (1e-9, 2 * np.pi),
+                   (-np.pi / 2, np.pi / 2)]
 
     bprun = (max(1, 16 // threads_per_block[0] + 1),
              tmp_pts.shape[0] // threads_per_block[1] + 1)
-    solve_rbins = np.array([np.linalg.norm(np.array([tmp_pts[:, 0] - rp.txpos(sdr[0].pulse_time[0])[0], tmp_pts[:, 1] - rp.txpos(sdr[0].pulse_time[0])[1],
-                     tmp_pts[:, 2] - rp.txpos(sdr[0].pulse_time[-1])[2]]), axis=0),
+    solve_rbins = np.array([np.linalg.norm(
+        np.array([tmp_pts[:, 0] - rp.txpos(sdr[0].pulse_time[0])[0], tmp_pts[:, 1] - rp.txpos(sdr[0].pulse_time[0])[1],
+                  tmp_pts[:, 2] - rp.txpos(sdr[0].pulse_time[-1])[2]]), axis=0),
                             np.linalg.norm(np.array([tmp_pts[:, 0] - rp.txpos(sdr[0].pulse_time[-1])[0],
                                                      tmp_pts[:, 1] - rp.txpos(sdr[0].pulse_time[-1])[1],
                                                      tmp_pts[:, 2] - rp.txpos(sdr[0].pulse_time[-1])[2]]), axis=0)])
     solve_ppts = np.array([rp.txpos(sdr[0].pulse_time[0]), rp.txpos(sdr[0].pulse_time[-1])])
+
+
     def minfunc(x):
         tmp_pts[:, 2] = x[::5]
         tmp_pts[:, :2] = solvey(*solve_ppts[0], *solve_ppts[1], solve_rbins[0], solve_rbins[1], tmp_pts[:, 2])
@@ -193,9 +201,9 @@ for tt in tqdm(range(0, sdr[0].nframes, 16)):
         pd_i = cupy.zeros((len(times), nsam), dtype=np.float64)
 
         calcRangeProfileScattering[bprun, threads_per_block](opt_pts_gpu, source_gpu, pan_gpu, tilt_gpu, pd_r, pd_i,
-                                                   near_range_s, fs, rp.az_half_bw, rp.el_half_bw, opt_sigma_gpu,
-                                                             opt_beta_gpu, opt_normal_gpu, 2 * np.pi / wavelength,
-                                                             radar_coeff)
+                                                             near_range_s, fs, rp.az_half_bw, rp.el_half_bw,
+                                                             opt_sigma_gpu, opt_beta_gpu, opt_normal_gpu,
+                                                             2 * np.pi / wavelength, radar_coeff)
 
         pulses = base_pulses + (pd_r.get() + pd_i.get() * 1j)
         x_hat = np.fft.fft(pulses, fft_len, axis=1) * chirp_filt
@@ -212,8 +220,5 @@ for tt in tqdm(range(0, sdr[0].nframes, 16)):
     sigma[opt_pts] = opt_x['x'][2::5]
     beta[opt_pts] = opt_x['x'][1::5]
     points[opt_pts, 2] = opt_x['x'][::5]
-    az[opt_pts] = opt_x[3::5]
-    el[opt_pts] = opt_x[4::5]
-
-
-
+    az[opt_pts] = opt_x['x'][3::5]
+    el[opt_pts] = opt_x['x'][4::5]
