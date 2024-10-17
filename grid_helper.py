@@ -73,8 +73,8 @@ class Environment(object):
     def getRefGrid(self, pos=None, width=None, height=None, nrows=0, ncols=0, az=0):
         x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az)
         irmat = np.linalg.pinv(self._transforms[0])
-        px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
-        py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
+        px = self.shape[1] - (irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2)
+        py = self.shape[0] - (irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2)
         pos_r = np.stack([px.ravel(), py.ravel()]).T
         return interpn((np.arange(self.refgrid.shape[1]),
                         np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,

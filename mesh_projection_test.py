@@ -1,8 +1,9 @@
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.tri as mtri
+from scipy.spatial import Delaunay
 from backproject_functions import getRadarAndEnvironment, backprojectPulseSet
-from simulation_functions import db, genChirp, upsamplePulse, enu2llh
+from simulation_functions import db, genChirp, upsamplePulse, enu2llh, llh2enu
 from cuda_mesh_kernels import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from tqdm import tqdm
@@ -21,20 +22,19 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 52  # dB
+ant_gain = 22  # dB
 ant_transmit_power = 100  # watts
 ant_eff_aperture = 10. * 10.  # m**2
-bw_az = 4.5 * DTR
-bw_el = 11 * DTR
 npulses = 128
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 1
+num_bounces = 0
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 1000
-num_mesh_triangles = 10000
+points_to_sample = 20000
+num_mesh_triangles = 5000
+num_rayrounds = 3
 grid_origin = (40.139343, -111.663541, 1380.)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -52,6 +52,7 @@ print('Loading mesh...')
 mesh = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
                            points=num_mesh_triangles)  # Has just over 500000 points in the file
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([0, 0, -45. * DTR])))
 
 
 mesh_extent = mesh.get_max_bound() - mesh.get_min_bound()
@@ -59,18 +60,66 @@ face_points = np.asarray(mesh.vertices)
 grid_vec = face_points[face_points[:, 0] == face_points[:, 0].max()] - face_points[face_points[:, 1] == face_points[:, 1].min()]
 head_ang = np.arctan2(grid_vec[0, 0], grid_vec[0, 1])
 gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gpcd = o3d.geometry.PointCloud()
-gpcd.points = o3d.utility.Vector3dVector(np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T)
-gpcd.estimate_normals()
-ground = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(gpcd, radii=o3d.utility.DoubleVector(np.array([.08])))
-ground = ground.simplify_vertex_clustering(1.)
+grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
+grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
+
+bpcd = o3d.geometry.PointCloud()
+heights = [15, 18]
+building_points = np.array([llh2enu(40.139148, -111.664156, 1380., bg.ref),
+                            llh2enu(40.139342, -111.664427, 1380., bg.ref),
+                            llh2enu(40.139148, -111.664156, 1380. + heights[0], bg.ref),
+                            llh2enu(40.139342, -111.664427, 1380. + heights[0], bg.ref),
+                            llh2enu(40.139729, -111.663969, 1380., bg.ref),
+                            llh2enu(40.139729, -111.663969, 1380. + heights[1], bg.ref),
+                            llh2enu(40.139729, -111.663969, 1380. + (heights[0] + heights[1]) / 2, bg.ref),
+                            llh2enu(40.139552, -111.663695, 1380., bg.ref),
+                            llh2enu(40.139552, -111.663695, 1380. + heights[1], bg.ref),
+                            llh2enu(40.139552, -111.663695, 1380. + (heights[0] + heights[1]) / 2, bg.ref),
+                            llh2enu(40.139977, -111.663158, 1380., bg.ref),
+                            llh2enu(40.140169, -111.663449, 1380., bg.ref),
+                            llh2enu(40.139977, -111.663158, 1380. + heights[0], bg.ref),
+                            llh2enu(40.140169, -111.663449, 1380. + heights[0], bg.ref),
+                            llh2enu(40.139759, -111.663427, 1380. + (heights[0] + heights[1]) / 2, bg.ref),
+                            llh2enu(40.139364, -111.663907, 1380. + (heights[0] + heights[1]) / 2, bg.ref),
+                            llh2enu(40.139575, -111.664150, 1380. + (heights[0] + heights[1]) / 2, bg.ref),
+                            llh2enu(40.139969, -111.663695, 1380. + (heights[0] + heights[1]) / 2, bg.ref)
+                            ])
+bpcd.points = o3d.utility.Vector3dVector(building_points)
+bnormals = building_points - building_points.mean(axis=0)
+bpcd.normals = o3d.utility.Vector3dVector(bnormals / np.linalg.norm(bnormals, axis=1)[:, None])
+building, _ = bpcd.compute_convex_hull()
+bpcd = building.sample_points_poisson_disk(20) + bpcd
+bpcd.normals = o3d.utility.Vector3dVector(np.asarray(bpcd.points) - building_points.mean(axis=0))
+bpcd.normalize_normals()
+building = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(bpcd, radii=o3d.utility.DoubleVector(np.array([1000, 100., 50., 5.])))
+building.compute_vertex_normals()
+building.compute_triangle_normals()
+building.normalize_normals()
+building = building.translate(np.array([0, 0, -16.]), relative=True)
+
+gpx, gpy, gpz = bg.getGrid(grid_origin, 400, 400, nrows=400, ncols=400)
+gnd_points = np.array([gpx.flatten(), gpy.flatten(), gpz.flatten()]).T
+gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
+gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std(), gnd_range < grid_ranges.max() + grid_ranges.std())]
+tri_ = Delaunay(gnd_points[:, :2])
+ground = o3d.geometry.TriangleMesh()
+ground.vertices = o3d.utility.Vector3dVector(gnd_points)
+ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
+ground = ground.simplify_vertex_clustering(30.)
+ground.remove_duplicated_vertices()
+ground.remove_unreferenced_vertices()
+ground.compute_vertex_normals()
+ground.compute_triangle_normals()
+ground.normalize_normals()
 
 grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
 
-mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean() + 2.5]), relative=False)
+mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean() + 2.5]), relative=False).scale(.6, center=np.array([gx.mean(), gy.mean(), gz.mean() + 2.5]))
 mesh_ids = np.asarray(mesh.triangle_material_ids)
-mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(ground.triangles))])))
+mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(ground.triangles))]), np.array([29 for _ in range(len(building.triangles))])))
+# mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(ground.triangles))])))
 mesh += ground
+mesh += building
 mesh.triangle_material_ids = o3d.utility.IntVector([int(m) for m in mesh_ids])
 face_points = np.asarray(mesh.vertices)
 
@@ -83,21 +132,38 @@ fft_chirp = np.fft.fft(chirp, fft_len)
 
 # Load in boxes and meshes for speedup of ray tracing
 try:
-    msigmas = [1. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-    msigmas[0] = msigmas[15] = 5  # seats
-    msigmas[6] = msigmas[13] = msigmas[17] = .1  # body
-    msigmas[12] = msigmas[4] = 5  # windshield
-    msigmas[28] = .1
+    msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
+    msigmas[0] = msigmas[15] = 2.  # seats
+    msigmas[6] = msigmas[13] = msigmas[17] = 1.  # body
+    msigmas[12] = msigmas[4] = 2.  # windshield
+    msigmas[28] = 1.
     box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample,
                                                       material_sigmas=msigmas)
 except ValueError:
     box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample)
 
+boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
+pointing_az = np.arctan2(boresight[0], boresight[1])
+
+# Locate the extrema to speed up the optimization
+flight_path = rp.txpos(sdr_f[0].pulse_time)
+pmax = sample_points.max(axis=0)
+vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
+                 pmax[2] - flight_path[:, 2]]).T
+pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
+max_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
+pmin = sample_points.min(axis=0)
+vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
+                 pmin[2] - flight_path[:, 2]]).T
+pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
+min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
+pulse_lims = [min(min(max_pts), min(min_pts)), max(max(max_pts), max(min_pts))]
+
 # Single pulse for debugging
 single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
                                                                              rp.txpos(data_t),
                                                                              rp.boresight(data_t), radar_coeff,
-                                                                             bw_az, bw_el,
+                                                                             rp.az_half_bw * 2, rp.el_half_bw * 2,
                                                                              nsam, fc, near_range_s,
                                                                              num_bounces=num_bounces,
                                                                              bounce_rays=nbounce_rays,
@@ -111,17 +177,18 @@ bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
 
 # MAIN LOOP
-for frame in tqdm(range(0, sdr_f[0].nframes - npulses, npulses)):
+for frame in tqdm(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)):
     dt = sdr_f[0].pulse_time[frame:frame + npulses]
     trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.txpos(dt), rp.boresight(dt),
-                                  radar_coeff, bw_az, bw_el, nsam, fc, near_range_s, num_bounces=num_bounces,
-                                  bounce_rays=nbounce_rays)
-    mf_pulse = upsamplePulse(
-    fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj(), fft_len, upsample,
+                                  radar_coeff, rp.az_half_bw * 2, rp.el_half_bw * 2, nsam, fc, near_range_s, num_bounces=num_bounces,
+                                  bounce_rays=nbounce_rays, num_rayrounds=num_rayrounds)
+    clean_pulse = fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj()
+    mf_pulse = upsamplePulse(clean_pulse + (np.random.normal(0, 1e-2, size=clean_pulse.shape) + 1j * np.random.normal(0, 1e-2, size=clean_pulse.shape))
+    , fft_len, upsample,
         is_freq=True, time_len=nsam)
     pulses = mf_pulse
     bpj_grid += backprojectPulseSet(pulses.T, rp.pan(dt), rp.tilt(dt), rp.rxpos(dt), rp.txpos(dt), gx, gy, gz,
-                                   c0 / fc, near_range_s, fs * upsample, bw_az, bw_el)
+                                   c0 / fc, near_range_s, fs * upsample, rp.az_half_bw * 2, rp.el_half_bw * 2)
 
 face_tris = np.asarray(mesh.triangles)
 try:
@@ -157,15 +224,15 @@ plt.axis('tight')
 plt.show()
 
 plt.figure('Backprojection')
-plt.imshow(db(bpj_grid), cmap='gray', clim=[80., 125.])
+db_bpj = db(bpj_grid)
+plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj) - np.std(db_bpj) * 2, np.mean(db_bpj) + np.std(db_bpj) * 3])
 plt.axis('tight')
 plt.show()
 
-points_plot = np.asarray(sample_points.points)
 plt.figure()
 plt.scatter(gx.flatten(), gy.flatten())
 plt.scatter(face_points[:, 0], face_points[:, 1])
-plt.scatter(points_plot[:, 0], points_plot[:, 1])
+plt.scatter(sample_points[:, 0], sample_points[:, 1])
 plt.show()
 
 ax = plt.figure().add_subplot(projection='3d')
@@ -175,10 +242,10 @@ for i in range(face_tris.shape[0]):
     polygon = Poly3DCollection([face_points[face]], alpha=.75, facecolor=face_colors[i], linewidths=2)
     polygons.append(polygon)
     ax.add_collection3d(polygon)
-for pt in range(ray_origins[0].shape[1]):
+'''for pt in range(ray_origins[0].shape[1]):
     ax.plot([rp.txpos(data_t[0])[0], ray_origins[0][0, pt, 0]],
             [rp.txpos(data_t[0])[1], ray_origins[0][0, pt, 1]],
-            [rp.txpos(data_t[0])[2], ray_origins[0][0, pt, 2]])
+            [rp.txpos(data_t[0])[2], ray_origins[0][0, pt, 2]])'''
 scaled_rp = (ray_powers[0] - sc_min) * sc
 ax.quiver(ray_origins[0][0, :, 0], ray_origins[0][0, :, 1], ray_origins[0][0, :, 2], ray_directions[0][0, :, 0] * scaled_rp[0, :],
           ray_directions[0][0, :, 1] * scaled_rp[0, :], ray_directions[0][0, :, 2] * scaled_rp[0, :])
