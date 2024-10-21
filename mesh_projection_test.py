@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.tri as mtri
+from scipy.signal.windows import taylor
 from scipy.spatial import Delaunay
 from backproject_functions import getRadarAndEnvironment, backprojectPulseSet
 from simulation_functions import db, genChirp, upsamplePulse, enu2llh, llh2enu
@@ -22,19 +23,19 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 22  # dB
+ant_gain = 42  # dB
 ant_transmit_power = 100  # watts
 ant_eff_aperture = 10. * 10.  # m**2
-npulses = 128
+npulses = 512
 plp = .75
 fdelay = 10.
 upsample = 4
 num_bounces = 0
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 20000
+points_to_sample = 1000
 num_mesh_triangles = 5000
-num_rayrounds = 3
+num_rayrounds = 1
 grid_origin = (40.139343, -111.663541, 1380.)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -49,8 +50,10 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 print('Loading mesh...')
-mesh = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
-                           points=num_mesh_triangles)  # Has just over 500000 points in the file
+mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/ram1500trx2021.gltf',
+                           points=num_mesh_triangles, scale=300)
+# mesh = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+#                            points=num_mesh_triangles)  # Has just over 500000 points in the file
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([0, 0, -45. * DTR])))
 
@@ -100,7 +103,7 @@ building = building.translate(np.array([0, 0, -16.]), relative=True)
 gpx, gpy, gpz = bg.getGrid(grid_origin, 400, 400, nrows=400, ncols=400)
 gnd_points = np.array([gpx.flatten(), gpy.flatten(), gpz.flatten()]).T
 gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
-gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std(), gnd_range < grid_ranges.max() + grid_ranges.std())]
+gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3, gnd_range < grid_ranges.max() + grid_ranges.std() * 3)]
 tri_ = Delaunay(gnd_points[:, :2])
 ground = o3d.geometry.TriangleMesh()
 ground.vertices = o3d.utility.Vector3dVector(gnd_points)
@@ -117,7 +120,7 @@ grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.
 mesh = mesh.translate(np.array([gx.mean(), gy.mean(), gz.mean() + 2.5]), relative=False).scale(.6, center=np.array([gx.mean(), gy.mean(), gz.mean() + 2.5]))
 mesh_ids = np.asarray(mesh.triangle_material_ids)
 mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(ground.triangles))]), np.array([29 for _ in range(len(building.triangles))])))
-# mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(ground.triangles))])))
+# mesh_ids = np.concatenate((mesh_ids, np.array([28 for _ in range(len(building.triangles))])))
 mesh += ground
 mesh += building
 mesh.triangle_material_ids = o3d.utility.IntVector([int(m) for m in mesh_ids])
@@ -129,14 +132,20 @@ radar_coeff = ant_transmit_power * 10**(ant_gain / 10) * ant_eff_aperture / (4 *
 # Generate a chirp
 chirp = genChirp(nr, fs, fc, 400e6)
 fft_chirp = np.fft.fft(chirp, fft_len)
+twin = taylor(int(np.round(400e6 / fs * fft_len)))
+taytay = np.zeros(fft_len, dtype=np.complex128)
+winloc = int((fc % fs) * fft_len / fs) - len(twin) // 2
+taytay[winloc:winloc + len(twin)] += twin
+mf_chirp = fft_chirp * fft_chirp.conj() * taytay
+
 
 # Load in boxes and meshes for speedup of ray tracing
 try:
     msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-    msigmas[0] = msigmas[15] = 2.  # seats
-    msigmas[6] = msigmas[13] = msigmas[17] = 1.  # body
-    msigmas[12] = msigmas[4] = 2.  # windshield
-    msigmas[28] = 1.
+    msigmas[0] = msigmas[15] = 1.  # seats
+    msigmas[6] = msigmas[13] = msigmas[17] = .1  # body
+    msigmas[12] = msigmas[4] = 1.  # windshield
+    msigmas[28] = 2.5
     box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample,
                                                       material_sigmas=msigmas)
 except ValueError:
@@ -171,7 +180,7 @@ single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*bo
 single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp, fft_len), fft_len, upsample,
                              is_freq=True, time_len=nsam)
 single_mf_pulse = upsamplePulse(
-    fft_chirp * np.fft.fft(single_rp, fft_len) * fft_chirp.conj(), fft_len, upsample,
+    mf_chirp * np.fft.fft(single_rp, fft_len), fft_len, upsample,
     is_freq=True, time_len=nsam)
 bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
@@ -182,12 +191,11 @@ for frame in tqdm(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)):
     trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.txpos(dt), rp.boresight(dt),
                                   radar_coeff, rp.az_half_bw * 2, rp.el_half_bw * 2, nsam, fc, near_range_s, num_bounces=num_bounces,
                                   bounce_rays=nbounce_rays, num_rayrounds=num_rayrounds)
-    clean_pulse = fft_chirp * np.fft.fft(trp, fft_len) * fft_chirp.conj()
-    mf_pulse = upsamplePulse(clean_pulse + (np.random.normal(0, 1e-2, size=clean_pulse.shape) + 1j * np.random.normal(0, 1e-2, size=clean_pulse.shape))
-    , fft_len, upsample,
-        is_freq=True, time_len=nsam)
-    pulses = mf_pulse
-    bpj_grid += backprojectPulseSet(pulses.T, rp.pan(dt), rp.tilt(dt), rp.rxpos(dt), rp.txpos(dt), gx, gy, gz,
+    clean_pulse = mf_chirp * np.fft.fft(trp, fft_len)
+    noise = (np.random.normal(0, 1e-1, size=clean_pulse.shape) +
+             1j * np.random.normal(0, 1e-1, size=clean_pulse.shape))
+    mf_pulse = upsamplePulse(clean_pulse + noise, fft_len, upsample, is_freq=True, time_len=nsam)
+    bpj_grid += backprojectPulseSet(mf_pulse.T, rp.pan(dt), rp.tilt(dt), rp.rxpos(dt), rp.txpos(dt), gx, gy, gz,
                                    c0 / fc, near_range_s, fs * upsample, rp.az_half_bw * 2, rp.el_half_bw * 2)
 
 face_tris = np.asarray(mesh.triangles)
@@ -225,7 +233,7 @@ plt.show()
 
 plt.figure('Backprojection')
 db_bpj = db(bpj_grid)
-plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj) - np.std(db_bpj) * 2, np.mean(db_bpj) + np.std(db_bpj) * 3])
+plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj) - np.std(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 3])
 plt.axis('tight')
 plt.show()
 

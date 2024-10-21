@@ -334,24 +334,31 @@ def bounceVector(x0, n0):
     return x0 - 2 * sum(x0 * n0) / sum(n0 * n0) * n0
 
 
-def readCombineMeshFile(fnme, points=100000):
+def readCombineMeshFile(fnme, points=100000, scale=None):
     full_mesh = o3d.io.read_triangle_model(fnme)
     mesh = o3d.geometry.TriangleMesh()
     num_tris = [len(me.mesh.triangles) for me in full_mesh.meshes]
     mids = []
     if sum(num_tris) > points:
         scaling = points / sum(num_tris)
-        target_tris = [int(t * scaling) for t in num_tris]
+        target_tris = [int(max(1, t * scaling)) for t in num_tris]
         for me_idx, me in enumerate(full_mesh.meshes):
-            vertex_size = .1
+            me.mesh.triangle_uvs = o3d.utility.Vector2dVector([])
+            pcd = o3d.geometry.PointCloud(me.mesh.vertices)
+            vertex_size = np.mean(pcd.compute_point_cloud_distance(
+                o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.mean(np.asarray(pcd.points), axis=0).reshape(1, -1))))) / 2
             tm = me.mesh.simplify_vertex_clustering(vertex_size)
             tm.remove_duplicated_vertices()
             tm.remove_unreferenced_vertices()
-            while len(tm.triangles) > target_tris[me_idx]:
-                vertex_size += .2
+            bounce = 1
+            while len(tm.triangles) > target_tris[me_idx] or len(tm.triangles) == 0:
+                vertex_size *= (2 if len(tm.triangles) > target_tris[me_idx] else .6) * bounce
                 tm = me.mesh.simplify_vertex_clustering(vertex_size)
                 tm.remove_duplicated_vertices()
                 tm.remove_unreferenced_vertices()
+                bounce -= .1
+                if bounce < .01:
+                    break
             mesh += tm
             mids += [me.material_idx for _ in range(len(tm.triangles))]
     else:
@@ -359,22 +366,9 @@ def readCombineMeshFile(fnme, points=100000):
             mesh += me.mesh
             mids += [me.material_idx for _ in range(len(me.mesh.triangles))]
     mesh.triangle_material_ids = o3d.utility.IntVector(mids)
-    '''
-    mesh = o3d.io.read_triangle_mesh(fnme)
 
-    mesh.remove_duplicated_vertices()
-    mesh.remove_unreferenced_vertices()
-    if len(mesh.triangles) > points:
-        vertex_size = .1
-        tmesh = mesh.simplify_vertex_clustering(vertex_size)
-        tmesh.remove_duplicated_vertices()
-        tmesh.remove_unreferenced_vertices()
-        while len(tmesh.triangles) > points:
-            vertex_size += .5
-            tmesh = mesh.simplify_vertex_clustering(vertex_size)
-            tmesh.remove_duplicated_vertices()
-            tmesh.remove_unreferenced_vertices()
-        mesh = tmesh'''
+    if scale:
+        mesh = mesh.scale(scale, mesh.get_center())
     mesh.compute_vertex_normals()
     mesh.compute_triangle_normals()
     mesh.normalize_normals()
@@ -439,7 +433,7 @@ def getBoxesSamplesFromMesh(a_mesh, num_boxes=4, sample_points=10000, material_s
         mesh_sigmas = np.ones(len(a_mesh.triangles))
 
     # Sample the mesh to get points for initial raycasting
-    points = a_mesh.sample_points_uniformly(sample_points)
+    points = a_mesh.sample_points_poisson_disk(sample_points)
     return (boxes, mesh_box_idx, mesh_tri_idx, mesh_vertices, mesh_normals, mesh_sigmas), np.asarray(points.points)
 
 @profile
@@ -478,7 +472,7 @@ def getRangeProfileFromMesh(bounding_boxes, tri_box_idxes, mesh_tri_idxes, mesh_
         inter_bounce_dir = np.zeros_like(r_obs_vec)
 
         int_gpu = cupy.array(inter_xyz, dtype=np.float32)
-        if i < num_rayrounds - 1:
+        if i == num_rayrounds - 1:
             ray_init_inter_xyz_gpu = cupy.array(sample_points, np.float32)
         else:
             ray_init_inter_xyz_gpu = cupy.array(sample_points + np.random.normal(0, .5, size=sample_points.shape), np.float32)
@@ -499,6 +493,8 @@ def getRangeProfileFromMesh(bounding_boxes, tri_box_idxes, mesh_tri_idxes, mesh_
         valids = face_sigma > 0
         if np.sum(valids) == 0:
             return
+        if not np.all(valids):
+            print('uh oh')
 
         # Remove points that just don't bounce again
         tvals = np.all(valids, axis=0)
