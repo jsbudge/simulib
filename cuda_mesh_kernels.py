@@ -493,8 +493,6 @@ def getRangeProfileFromMesh(bounding_boxes, tri_box_idxes, mesh_tri_idxes, mesh_
         valids = face_sigma > 0
         if np.sum(valids) == 0:
             return
-        if not np.all(valids):
-            print('uh oh')
 
         # Remove points that just don't bounce again
         tvals = np.all(valids, axis=0)

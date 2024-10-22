@@ -23,19 +23,19 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 42  # dB
+ant_gain = 102  # dB
 ant_transmit_power = 100  # watts
 ant_eff_aperture = 10. * 10.  # m**2
 npulses = 512
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 0
+num_bounces = 1
 nbounce_rays = 5
 nboxes = 36
-points_to_sample = 1000
+points_to_sample = 10000
 num_mesh_triangles = 5000
-num_rayrounds = 1
+num_rayrounds = 2
 grid_origin = (40.139343, -111.663541, 1380.)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -50,10 +50,10 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 print('Loading mesh...')
-mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/ram1500trx2021.gltf',
-                           points=num_mesh_triangles, scale=300)
-# mesh = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
-#                            points=num_mesh_triangles)  # Has just over 500000 points in the file
+# mesh = readCombineMeshFile('/home/jeff/Documents/target_meshes/ram1500trx2021.gltf',
+#                            points=num_mesh_triangles, scale=300)
+mesh = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+                           points=num_mesh_triangles)  # Has just over 500000 points in the file
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([0, 0, -45. * DTR])))
 
@@ -141,7 +141,7 @@ mf_chirp = fft_chirp * fft_chirp.conj() * taytay
 
 # Load in boxes and meshes for speedup of ray tracing
 try:
-    msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
+    msigmas = [2.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
     msigmas[0] = msigmas[15] = 1.  # seats
     msigmas[6] = msigmas[13] = msigmas[17] = .1  # body
     msigmas[12] = msigmas[4] = 1.  # windshield
