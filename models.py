@@ -502,3 +502,113 @@ class ImageSegmenter(FlatModule):
         self.log_dict({f'{kind}_loss': train_loss}, on_epoch=True,
                       prog_bar=True, rank_zero_only=True)
         return train_loss
+
+
+class PulseClassifier(FlatModule):
+    def __init__(self,
+                 in_dim: int,
+                 label_sz: int,
+                 params: dict,
+                 channel_sz: int = 32,
+                 **kwargs) -> None:
+        super(PulseClassifier, self).__init__()
+
+        self.params = params
+        self.channel_sz = channel_sz
+        self.in_channels = in_dim
+        self.automatic_optimization = False
+        self.label_sz = label_sz
+        out_sz = 512
+        self.feedthrough = nn.Sequential(
+            nn.Linear(),
+            nn.Conv1d(in_dim, channel_sz, 1, 1, 0),
+            nn.GELU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(channel_sz, channel_sz, 33, 1, 16),
+            nn.GELU(),
+        )
+
+        self.out_sz = out_sz
+        self.example_input_array = torch.randn((1, in_dim, out_sz, out_sz))
+        self.loss_weight = torch.tensor([.9, .9, .9, .01, .01], dtype=torch.float32)
+
+    def forward(self, inp: Tensor, **kwargs) -> Tensor:
+        Yl, Yh = self.dwt(inp)
+        inp = self.fusion_0(self.feedthrough(inp) + self.wavelet_0(Yh[0].squeeze(1)))
+        inp = self.fusion_1(inp + self.wavelet_1(Yh[1].squeeze(1)))
+        inp = self.fusion_2(inp + self.wavelet_2(Yh[2].squeeze(1)))
+        inp = self.inflate(inp)
+        inp = self.feedfinal(inp)
+        return self.crf(inp)
+
+    def loss_function(self, y, y_pred):
+        # overlap = torch.sum(torch.argmax(y, dim=1) == torch.argmax(y_pred, dim=1))
+        # return 1 - (overlap / (torch.sum(y_pred == 1) + torch.sum(y >= .25) - overlap)) / y.shape[0]
+        loss = 0.
+        for idx, l in enumerate(self.loss_weight):
+            loss += torch.nanmean((y[:, idx, :, :] - y_pred[:, idx, :, :])**2) * l
+        return loss
+
+    def on_fit_start(self) -> None:
+        if self.trainer.is_global_zero and self.logger:
+            self.logger.log_graph(self, self.example_input_array)
+
+    def training_step(self, batch, batch_idx):
+        opt = self.optimizers()
+        train_loss = self.train_val_get(batch, batch_idx)
+        opt.zero_grad()
+        self.manual_backward(train_loss)
+        opt.step()
+
+    def validation_step(self, batch, batch_idx):
+        self.train_val_get(batch, batch_idx, 'val')
+
+    def on_after_backward(self) -> None:
+        if self.trainer.is_global_zero and self.global_step % 100 == 0 and self.logger:
+            for name, params in self.named_parameters():
+                self.logger.experiment.add_histogram(name, params, self.global_step)
+
+    def on_validation_end(self) -> None:
+        if self.trainer.is_global_zero and not self.params['is_tuning']:
+            torch.save(self.state_dict(), './model/inference_model.state')
+            print('Model saved to disk.')
+
+            if self.current_epoch % 5 == 0:
+                pass
+
+    def on_train_epoch_end(self) -> None:
+        if self.trainer.is_global_zero and not self.params['is_tuning'] and self.params['loss_landscape']:
+            self.optim_path.append(self.model.get_flat_params())
+
+    def on_validation_epoch_end(self) -> None:
+        sch = self.lr_schedulers()
+
+        # If the selected scheduler is a ReduceLROnPlateau scheduler.
+        if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            sch.step(self.trainer.callback_metrics["val_loss"])
+            self.log('LR', sch.get_last_lr()[0], rank_zero_only=True)
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(),
+                                lr=self.params['LR'],
+                                weight_decay=self.params['weight_decay'],
+                                betas=self.params['betas'],
+                                eps=1e-7)
+        optims = [optimizer]
+        if self.params['scheduler_gamma'] is None:
+            return optims
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optims[0], cooldown=self.params['step_size'],
+                                                         factor=self.params['scheduler_gamma'], threshold=1e-5)
+        scheds = [scheduler]
+
+        return optims, scheds
+
+    def train_val_get(self, batch, batch_idx, kind='train'):
+        data, label = batch
+
+        results = self.forward(data)
+        train_loss = self.loss_function(results, label)
+
+        self.log_dict({f'{kind}_loss': train_loss}, on_epoch=True,
+                      prog_bar=True, rank_zero_only=True)
+        return train_loss
