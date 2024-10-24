@@ -462,7 +462,7 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_boxes: int=4,
 @profile
 def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarray, mesh_tri_idxes: np.ndarray,
                             mesh_vertices: np.ndarray, mesh_normals: np.ndarray, mesh_sigmas: np.ndarray,
-                            sample_points: np.ndarray, a_obs_pt: np.ndarray, pointing_vec: np.ndarray,
+                            rng_sequence: np.ndarray, a_obs_pt: np.ndarray, pointing_vec: np.ndarray,
                             radar_equation_constant: float, bw_az: float, bw_el: float, nsam: int, fc: float,
                             near_range_s: float, bounce_rays: int=15, num_bounces: int=3, debug: bool=False)\
         -> tuple[np.ndarray, list, list, list] | np.ndarray:
@@ -471,9 +471,6 @@ def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarra
     # that will affect the power received by the intersection point
     pointing_az = cupy.array(np.arctan2(pointing_vec[:, 0], pointing_vec[:, 1]), dtype=np.float32)
     pointing_el = cupy.array(-np.arcsin(pointing_vec[:, 2]), dtype=np.float32)
-
-    init_dir = sample_points[None, :, :] - a_obs_pt[:, None, :]
-    init_dir = init_dir / np.linalg.norm(init_dir, axis=2)[:, :, None]
 
     debug_rays = []
     debug_raydirs = []
@@ -493,44 +490,26 @@ def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarra
     tri_sigmas_gpu = cupy.array(mesh_sigmas, dtype=np.float32)
     tri_box_gpu = cupy.array(tri_box_idxes, dtype=bool)
     boxes_gpu = cupy.array(bounding_boxes, dtype=np.float32)
-    ray_origin_gpu = cupy.array(a_obs_pt[:, None, :] * np.ones(sample_points.shape[0])[None, :, None], dtype=np.float32)
     receive_xyz_gpu = cupy.array(a_obs_pt, dtype=np.float32)
     pd_r = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
     pd_i = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
-    bounce_dir_gpu = cupy.array(init_dir, dtype=np.float32)
-    bounce_rng_gpu = cupy.zeros((init_dir.shape[0], init_dir.shape[1]), dtype=np.float32)
-    bounce_power_gpu = cupy.array(np.ones((init_dir.shape[0], init_dir.shape[1])) * radar_equation_constant,
-                                  dtype=np.float32)
 
-    rng_states_gpu = create_xoroshiro128p_states(tri_box_idxes.shape[0], seed=1)
+    rng_sequence_gpu = cupy.array(rng_sequence, dtype=np.float32)
 
     for _ in range(num_bounces):
 
         # Test triangles in correct quads to find intersection triangles
-        '''calcBounceLoop[bprun, threads_per_block](ray_origin_gpu, bounce_dir_gpu, bounce_rng_gpu, bounce_power_gpu,
-                                                     boxes_gpu, tri_box_gpu, tri_verts_gpu, tri_idxes_gpu, tri_norm_gpu,
-                                                     tri_sigmas_gpu, pd_r, pd_i, receive_xyz_gpu, rng_states_gpu, bounce_rays, pointing_az, pointing_el,
-                                                     c0 / fc, near_range_s, fs, bw_az, bw_el)'''
         calcBounceLoop[bprun, threads_per_block](receive_xyz_gpu, radar_equation_constant,
                                                  boxes_gpu, tri_box_gpu, tri_verts_gpu, tri_idxes_gpu, tri_norm_gpu,
-                                                 tri_sigmas_gpu, pd_r, pd_i, receive_xyz_gpu, rng_states_gpu,
+                                                 tri_sigmas_gpu, pd_r, pd_i, receive_xyz_gpu, rng_sequence_gpu,
                                                  bounce_rays, pointing_az, pointing_el,
                                                  c0 / fc, near_range_s, fs, bw_az, bw_el)
-
-        if debug:
-            debug_rays.append(ray_origin_gpu.get())
-            debug_raydirs.append(bounce_dir_gpu.get())
-            debug_raypower.append(bounce_power_gpu.get())
 
     pulse_ret = pd_r.get() + 1j * pd_i.get()
     del pd_r
     del pd_i
     del pointing_el
     del pointing_az
-    del ray_origin_gpu
-    del bounce_dir_gpu
-    del bounce_rng_gpu
-    del bounce_power_gpu
     del boxes_gpu
     del tri_norm_gpu
     del tri_box_gpu
@@ -664,10 +643,28 @@ def getRayDir(x, y, z, ix, iy, iz):
     return occ_x, occ_y, occ_z
 
 
+@cuda.jit(device=True)
+def calcPower(rho, intx, inty, intz, rx, ry, rz, tx, ty, tz, sigma, add_rng):
+    px = intx - rx
+    py = inty - ry
+    pz = intz - rz
+    pnorm = math.sqrt(px**2 + py**2 + pz**2)
+    # Calculate out the bounce for delta
+    inv_pnorm = 1 / pnorm
+    bounce_dot = 2 * (px * inv_pnorm * tx + py * inv_pnorm * ty + pz * inv_pnorm * tz)
+    bx = px * inv_pnorm - tx * bounce_dot
+    by = py * inv_pnorm - ty * bounce_dot
+    bz = pz * inv_pnorm - tz * bounce_dot
+    delta = bx * px * inv_pnorm + by * py * inv_pnorm + bz * pz * inv_pnorm
+
+    exp_gamma = math.exp(-(1 + delta)**2 / (2 * sigma**2))
+    return rho / (add_rng + pnorm)**2 * (-.9 / 5 * sigma + 1 + .9 / 5 * sigma * exp_gamma - exp_gamma)
+
+
 @cuda.jit()
 def calcBounceLoop(source_xyz, ray_power, bounding_box, tri_box_idx, tri_vert, tri_idx,
-                   tri_norm, tri_sigma, pd_r, pd_i, receive_xyz, rng_state, bounce_rays, pan, tilt, wavelength, near_range_s, source_fs, bw_az,
-                   bw_el):
+                   tri_norm, tri_sigma, pd_r, pd_i, receive_xyz, rng_state, bounce_rays, pan, tilt, wavelength,
+                   near_range_s, source_fs, bw_az, bw_el):
     tt, ti = cuda.grid(ndim=2)
     if ti < tri_idx.shape[0] and tt < source_xyz.shape[0]:
         # Load in all the parameters that don't change
@@ -689,8 +686,8 @@ def calcBounceLoop(source_xyz, ray_power, bounding_box, tri_box_idx, tri_vert, t
         t2z = tri_vert[tri_idx[ti, 2], 2]
 
         for b_idx in range(bounce_rays):
-            u = xoroshiro128p_uniform_float32(rng_state, ti)
-            v = xoroshiro128p_uniform_float32(rng_state, ti)
+            u = rng_state[tt, b_idx, 0]
+            v = rng_state[tt, b_idx, 1]
             intx, inty, intz = selectPointOnTriangle(t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z, u, v)
             int_rng = np.inf
             rng = 0
