@@ -2,6 +2,7 @@ import cmath
 import math
 from profile import runctx
 
+from proj_kernels import calcProjectionReturn
 from simulation_functions import factors
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from tqdm import tqdm
@@ -205,53 +206,6 @@ def calcIntersectionCPU(ray_dir, ray_xyz, vert_xyz, tri_norm, tri_verts, int_tri
 
 
 @cuda.jit()
-def genRangeProfileSinglePulse(int_xyz, vert_bounce, vert_reflectivity, source_xyz, receive_xyz, ray_dist,
-                               ray_init_power, panrx, elrx, pantx, eltx, pd_r, pd_i, wavelength, near_range_s,
-                               source_fs, bw_az, bw_el):
-    # sourcery no-metrics
-    pidx = cuda.grid(ndim=1)
-    if pidx < int_xyz.shape[0]:
-        # Load in all the parameters that don't change
-        n_samples = pd_r.shape[0]
-        wavenumber = 2 * np.pi / wavelength
-
-        # Calculate the bounce vector for this time
-        vx = int_xyz[pidx, 0]
-        vy = int_xyz[pidx, 1]
-        vz = int_xyz[pidx, 2]
-        bx = vert_bounce[pidx, 0]
-        by = vert_bounce[pidx, 1]
-        bz = vert_bounce[pidx, 2]
-
-        # Calculate out the angles in azimuth and elevation for the bounce
-        _, _, _, rng, _, _ = getRangeAndAngles(vx, vy, vz, source_xyz[pidx, 0], source_xyz[pidx, 1],
-                                               source_xyz[pidx, 2])
-        rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(vx, vy, vz, receive_xyz[pidx, 0], receive_xyz[pidx, 1],
-                                                          receive_xyz[pidx, 2])
-
-        # Calculate bounce vector and strength
-        # Apply Rayleigh scattering with the sigma being the width of the distribution
-        x = max(0., (rx * bx + ry * by + rz * bz) / r_rng)
-        gamma = (x / (vert_reflectivity[pidx] * vert_reflectivity[pidx]) *
-                 math.exp(-(x * x) / (2 * vert_reflectivity[pidx] * vert_reflectivity[pidx])))
-
-        two_way_rng = ray_dist[pidx] + r_rng
-        rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
-        but = int(rng_bin)
-        if but > pd_r.shape[0] or but < 0:
-            return
-
-        if n_samples > but > 0:
-            att = applyRadiationPattern(r_el, r_az, panrx, elrx, pantx, eltx, bw_az, bw_el) / (
-                    two_way_rng * two_way_rng) * ray_init_power[pidx]
-            acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gamma
-            # print(abs(gamma))
-            cuda.atomic.add(pd_r, but, acc_val.real)
-            cuda.atomic.add(pd_i, but, acc_val.imag)
-        cuda.syncthreads()
-
-
-@cuda.jit()
 def genRangeProfileMesh(int_xyz, vert_bounce, vert_reflectivity, source_xyz, receive_xyz, ray_dist,
                                ray_init_power, valid, panrx, elrx, pantx, eltx, pd_r, pd_i, wavelength, near_range_s,
                                source_fs, bw_az, bw_el):
@@ -298,46 +252,6 @@ def genRangeProfileMesh(int_xyz, vert_bounce, vert_reflectivity, source_xyz, rec
         cuda.syncthreads()
 
 
-def barycentric(x0, x1, x2, a0, a1, a2):
-    return x0 * a0 + x1 * a1 + x2 * a2
-
-
-def cart2bary(p, a, b, c):
-    v0 = b - a
-    v1 = c - a
-    v2 = p - a
-    d00 = v0.dot(v0)
-    d01 = v0.dot(v1)
-    d11 = v1.dot(v1)
-    d20 = v2.dot(v0)
-    d21 = v2.dot(v1)
-    denom = d00 * d11 - d01 * d01
-    v = (d11 * d20 - d01 * d21) / denom
-    w = (d00 * d21 - d01 * d20) / denom
-    u = 1. - v - w
-    return u, v, w
-
-
-def triNormal(x0, x1, x2):
-    """
-    Calculate a unit normal vector for a triangle.
-    """
-    A = x1 - x0
-    B = x2 - x0
-    nx = A[1] * B[2] - A[2] * B[1]
-    ny = A[2] * B[0] - A[0] * B[2]
-    nz = A[0] * B[1] - A[1] * B[0]
-    det = 1 / math.sqrt(nx * nx + ny * ny + nz * nz)
-    return nx * det, ny * det, nz * det
-
-
-def bounceVector(x0, n0):
-    """
-    Returns the unit vector bouncing off of a normal vector.
-    """
-    return x0 - 2 * sum(x0 * n0) / sum(n0 * n0) * n0
-
-
 def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d.geometry.TriangleMesh:
     full_mesh = o3d.io.read_triangle_model(fnme)
     mesh = o3d.geometry.TriangleMesh()
@@ -378,9 +292,31 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
     mesh.normalize_normals()
     return mesh
 
+def genOctree(bounding_box: np.ndarray, num_levels: int = 3):
+    octree = np.zeros((sum(8**n for n in range(num_levels)), 2, 3))
+    octree[0, ...] = bounding_box
+    for level in range(num_levels):
+        init_idx = sum(int(8**(n - 1)) for n in range(level))
+        for parent in range(init_idx, init_idx + int(8**(level - 1))):
+            box_extent = np.diff(octree[parent], axis=0)[0]
+            box_min = octree[parent, 0]
+            child_idx = sum(8**n for n in range(level)) + (parent - init_idx) * 8
+            bidx = 0
+            for x in range(2):
+                for y in range(2):
+                    for z in range(2):
+                        octree[child_idx + bidx, :] = np.array([[box_min[0] + box_extent[0] * x / 2.,
+                                                                         box_min[1] + box_extent[1] * y / 2.,
+                                                                         box_min[2] + box_extent[2] * z / 2.],
+                                                                        [box_min[0] + box_extent[0] * (x + 1) / 2.,
+                                                                         box_min[1] + box_extent[1] * (y + 1) / 2.,
+                                                                         box_min[2] + box_extent[2] * (z + 1) / 2.]
+                                                                        ])
+                        bidx += 1
+    return octree
 
 def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_boxes: int=4, sample_points: int=10000,
-                            material_sigmas: list=None):
+                            material_sigmas: list=None, material_kd: list=None, material_ks: list = None):
     # Generate bounding box tree
     mesh_tri_idx = np.asarray(a_mesh.triangles)
     mesh_vertices = np.asarray(a_mesh.vertices)
@@ -397,7 +333,9 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_boxes: int=4,
     aabb = a_mesh.get_axis_aligned_bounding_box()
     max_bound = aabb.get_max_bound()
     min_bound = aabb.get_min_bound()
-    xes = np.linspace(min_bound[0], max_bound[0], nx + 1)
+    root_box = np.array([min_bound, max_bound])
+    boxes = genOctree(root_box, 4)
+    '''xes = np.linspace(min_bound[0], max_bound[0], nx + 1)
     yes = np.linspace(min_bound[1], max_bound[1], ny + 1)
     boxes = []
     for x in range(1, len(xes)):
@@ -428,7 +366,7 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_boxes: int=4,
                         [xes[x - 1] - BOX_CUSHION, yes[y - 1] - BOX_CUSHION, bpts[:, 2].min() - BOX_CUSHION],
                         [xes[x] + BOX_CUSHION, yes[y] + BOX_CUSHION, bpts[:, 2].max() + BOX_CUSHION],
                     ]
-                ))
+                ))'''
 
     mesh_box_idx = np.zeros((mesh_tri_idx.shape[0], len(boxes))).astype(bool)
     # Get the box index for each triangle, for exclusion in the GPU calculations
@@ -437,11 +375,6 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_boxes: int=4,
         for dim in range(1, 3):
             is_inside = is_inside & (box[0, dim] < mesh_tri_vertices[:, :, dim]) & (mesh_tri_vertices[:, :, dim] < box[1, dim])
         mesh_box_idx[:, b_idx] = np.any(is_inside, axis=1)
-
-    # Remove any degenerate boxes, those that have no triangles inside
-    deg_box = np.any(mesh_box_idx, axis=0)
-    mesh_box_idx = mesh_box_idx[:, deg_box]
-    boxes = np.array(boxes)[deg_box]
 
     # Simple calculation to get the grass and dirt with a bigger beta
     try:
@@ -455,14 +388,25 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_boxes: int=4,
         print('Could not extrapolate sigmas, setting everything to one.')
         mesh_sigmas = np.ones(len(a_mesh.triangles))
 
+    if material_kd is None:
+        mesh_kd = np.ones(len(a_mesh.triangles))
+    else:
+        mesh_kd = np.array([material_kd[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+
+    if material_ks is None:
+        mesh_ks = np.ones(len(a_mesh.triangles))
+    else:
+        mesh_ks = np.array([material_ks[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+
     # Sample the mesh to get points for initial raycasting
     points = a_mesh.sample_points_poisson_disk(sample_points)
-    return (boxes, mesh_box_idx, mesh_tri_idx, mesh_vertices, mesh_normals, mesh_sigmas), np.asarray(points.points)
+    return (boxes, mesh_box_idx, mesh_tri_idx, mesh_vertices, mesh_normals, mesh_sigmas, mesh_kd, mesh_ks), np.asarray(points.points)
 
 @profile
 def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarray, mesh_tri_idxes: np.ndarray,
                             mesh_vertices: np.ndarray, mesh_normals: np.ndarray, mesh_sigmas: np.ndarray,
-                            rng_sequence: np.ndarray, a_obs_pt: np.ndarray, pointing_vec: np.ndarray,
+                            mesh_kd: np.ndarray, mesh_ks: np.ndarray, sample_points: np.ndarray, a_obs_pt: np.ndarray,
+                            pointing_vec: np.ndarray,
                             radar_equation_constant: float, bw_az: float, bw_el: float, nsam: int, fc: float,
                             near_range_s: float, bounce_rays: int=15, num_bounces: int=3, debug: bool=False)\
         -> tuple[np.ndarray, list, list, list] | np.ndarray:
@@ -478,43 +422,54 @@ def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarra
 
     # GPU device calculations
     threads_per_block = getMaxThreads()
-    '''bprun = (max(1, a_obs_pt.shape[0] // threads_per_block[0] + 1),
-             sample_points.shape[0] // threads_per_block[1] + 1)'''
     bprun = (max(1, a_obs_pt.shape[0] // threads_per_block[0] + 1),
-             tri_box_idxes.shape[0] // threads_per_block[1] + 1)
+             sample_points.shape[0] // threads_per_block[1] + 1)
+
+    ray_origins = np.repeat(a_obs_pt.reshape((a_obs_pt.shape[0], 1, a_obs_pt.shape[1])), sample_points.shape[0], axis=1)
+    ray_dirs = sample_points[None, :, :] - ray_origins
+    ray_dirs /= np.linalg.norm(ray_dirs, axis=2)[:, :, None]
 
     # These are the mesh constants that don't change with intersection points
     tri_norm_gpu = cupy.array(mesh_normals, dtype=np.float32)
     tri_idxes_gpu = cupy.array(mesh_tri_idxes, dtype=np.int32)
     tri_verts_gpu = cupy.array(mesh_vertices, dtype=np.float32)
-    tri_sigmas_gpu = cupy.array(mesh_sigmas, dtype=np.float32)
+    tri_material_gpu = cupy.array(np.concatenate([mesh_sigmas.reshape((-1, 1)),
+                                                  mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1),
+                                  dtype=np.float32)
     tri_box_gpu = cupy.array(tri_box_idxes, dtype=bool)
     boxes_gpu = cupy.array(bounding_boxes, dtype=np.float32)
     receive_xyz_gpu = cupy.array(a_obs_pt, dtype=np.float32)
+    ray_origin_gpu = cupy.array(ray_origins, dtype=np.float32)
+    ray_dir_gpu = cupy.array(ray_dirs, dtype=np.float32)
+    ray_power_gpu = cupy.array(np.ones((a_obs_pt.shape[0], sample_points.shape[0])) * radar_equation_constant,
+                               dtype=np.float32)
+    ray_distance_gpu = cupy.zeros_like(ray_power_gpu)
     pd_r = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
     pd_i = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
 
-    rng_sequence_gpu = cupy.array(rng_sequence, dtype=np.float32)
+    rng_state = cupy.array(np.random.normal(0, .1, (sample_points.shape[0], bounce_rays)), dtype=np.float32)
 
-    for _ in range(num_bounces):
+    for b in range(num_bounces):
 
         # Test triangles in correct quads to find intersection triangles
-        calcBounceLoop[bprun, threads_per_block](receive_xyz_gpu, radar_equation_constant,
+        calcBounceLoop[bprun, threads_per_block](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu, ray_power_gpu,
                                                  boxes_gpu, tri_box_gpu, tri_verts_gpu, tri_idxes_gpu, tri_norm_gpu,
-                                                 tri_sigmas_gpu, pd_r, pd_i, receive_xyz_gpu, rng_sequence_gpu,
-                                                 bounce_rays, pointing_az, pointing_el,
-                                                 c0 / fc, near_range_s, fs, bw_az, bw_el)
+                                                 tri_material_gpu, pd_r, pd_i, receive_xyz_gpu, rng_state, bounce_rays,
+                                                 pointing_az, pointing_el, c0 / fc, near_range_s, fs, bw_az, bw_el, b == 0)
+
+        if debug:
+            debug_rays.append(ray_origin_gpu.get())
+            debug_raydirs.append(ray_dir_gpu.get())
+            debug_raypower.append(ray_power_gpu.get())
 
     pulse_ret = pd_r.get() + 1j * pd_i.get()
     del pd_r
     del pd_i
-    del pointing_el
-    del pointing_az
     del boxes_gpu
     del tri_norm_gpu
     del tri_box_gpu
     del tri_idxes_gpu
-    del tri_sigmas_gpu
+    del tri_material_gpu
     del tri_verts_gpu
 
     cupy.get_default_memory_pool().free_all_blocks()
@@ -544,7 +499,7 @@ def checkBox(ro_x, ro_y, ro_z, ray_x, ray_y, ray_z, boxminx, boxminy, boxminz, b
 
 
 @cuda.jit(device=True)
-def calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, vnx, vny, vnz):
+def calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, vnx, vny, vnz, get_bounce):
     e1x = v1x - v0x
     e1y = v1y - v0y
     e1z = v1z - v0z
@@ -581,6 +536,9 @@ def calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, v0x, v0y, v0z, v1x, v1y, v
     if t < 1e-9:
         return False, 0, 0, 0, 0, 0, 0
 
+    if not get_bounce:
+        return True, 0, 0, 0, 0, 0, 0
+
     intx = rx + t * rdx
     inty = ry + t * rdy
     intz = rz + t * rdz
@@ -598,15 +556,11 @@ def calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, v0x, v0y, v0z, v1x, v1y, v
 
 
 @cuda.jit(device=True)
-def calcReturnAndBin(intx, inty, intz, rex, rey, rez, bx, by, bz, inter_sigma, rng, near_range_s, source_fs, n_samples,
+def calcReturnAndBin(intx, inty, intz, rex, rey, rez, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
     rx, ry, rz, r_rng, r_az, r_el = getRangeAndAngles(intx, inty, intz, rex,
                                                    rey,
                                                    rez)
-    # Calculate return vector and strength
-    # Apply Rayleigh scattering with the sigma being the width of the distribution
-    x = max(0., (rx * bx + ry * by + rz * bz) / r_rng)
-    gamma = 1 - math.exp(-(1 + x)**2 / (2 * inter_sigma**2))
 
     two_way_rng = rng + r_rng
     rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
@@ -616,7 +570,7 @@ def calcReturnAndBin(intx, inty, intz, rex, rey, rez, bx, by, bz, inter_sigma, r
         att = applyRadiationPattern(r_el, r_az, pan, tilt, pan, tilt,
                                     bw_az, bw_el) / (
                       two_way_rng * two_way_rng) * rho
-        acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng) * gamma
+        acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
         return acc_val.real, acc_val.imag, but
 
     return 0, 0, -1
@@ -644,137 +598,32 @@ def getRayDir(x, y, z, ix, iy, iz):
 
 
 @cuda.jit(device=True)
-def calcPower(rho, intx, inty, intz, rx, ry, rz, tx, ty, tz, sigma, add_rng):
-    px = intx - rx
-    py = inty - ry
-    pz = intz - rz
-    pnorm = math.sqrt(px**2 + py**2 + pz**2)
-    # Calculate out the bounce for delta
-    inv_pnorm = 1 / pnorm
-    bounce_dot = 2 * (px * inv_pnorm * tx + py * inv_pnorm * ty + pz * inv_pnorm * tz)
-    bx = px * inv_pnorm - tx * bounce_dot
-    by = py * inv_pnorm - ty * bounce_dot
-    bz = pz * inv_pnorm - tz * bounce_dot
-    delta = bx * px * inv_pnorm + by * py * inv_pnorm + bz * pz * inv_pnorm
-
-    exp_gamma = math.exp(-(1 + delta)**2 / (2 * sigma**2))
-    return rho / (add_rng + pnorm)**2 * (-.9 / 5 * sigma + 1 + .9 / 5 * sigma * exp_gamma - exp_gamma)
+def findOctreeBox(rx, ry, rz, rdx, rdy, rdz, bounding_box, far_range):
+    closebox = 0
+    for level in range(1, 4):
+        closerng = np.inf
+        child_idx = closebox * 8
+        for n in range(level):
+            child_idx += 8**n
+        for box in range(child_idx, child_idx + 8):
+            boxxmin = bounding_box[box, 0, 0]
+            boxymin = bounding_box[box, 0, 1]
+            boxzmin = bounding_box[box, 0, 2]
+            boxxmax = bounding_box[box, 1, 0]
+            boxymax = bounding_box[box, 1, 1]
+            boxzmax = bounding_box[box, 1, 2]
+            clrng = math.sqrt((boxxmin - rx) ** 2 + (boxymin - ry) ** 2 + (boxzmin - rz) ** 2)
+            if closerng > clrng > far_range:
+                if checkBox(rx, ry, rz, rdx, rdy, rdz, boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
+                    closerng = clrng + 0.
+                    closebox = box
+    return closebox
 
 
 @cuda.jit()
-def calcBounceLoop(source_xyz, ray_power, bounding_box, tri_box_idx, tri_vert, tri_idx,
-                   tri_norm, tri_sigma, pd_r, pd_i, receive_xyz, rng_state, bounce_rays, pan, tilt, wavelength,
-                   near_range_s, source_fs, bw_az, bw_el):
-    tt, ti = cuda.grid(ndim=2)
-    if ti < tri_idx.shape[0] and tt < source_xyz.shape[0]:
-        # Load in all the parameters that don't change
-        n_samples = pd_r.shape[1]
-        wavenumber = 2 * np.pi / wavelength
-        nrho = -1
-
-        rx = source_xyz[tt, 0]
-        ry = source_xyz[tt, 1]
-        rz = source_xyz[tt, 2]
-        t0x = tri_vert[tri_idx[ti, 0], 0]
-        t0y = tri_vert[tri_idx[ti, 0], 1]
-        t0z = tri_vert[tri_idx[ti, 0], 2]
-        t1x = tri_vert[tri_idx[ti, 1], 0]
-        t1y = tri_vert[tri_idx[ti, 1], 1]
-        t1z = tri_vert[tri_idx[ti, 1], 2]
-        t2x = tri_vert[tri_idx[ti, 2], 0]
-        t2y = tri_vert[tri_idx[ti, 2], 1]
-        t2z = tri_vert[tri_idx[ti, 2], 2]
-
-        for b_idx in range(bounce_rays):
-            u = rng_state[tt, b_idx, 0]
-            v = rng_state[tt, b_idx, 1]
-            intx, inty, intz = selectPointOnTriangle(t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z, u, v)
-            int_rng = np.inf
-            rng = 0
-            did_intersect = False
-            rdx, rdy, rdz = getRayDir(intx, inty, intz, rx, ry, rz)
-            r_el = -math.asin(rdz)
-            r_az = math.atan2(rdx, rdy)
-            rho = ray_power * applyRadiationPattern(r_el, r_az, pan[tt], tilt[tt], pan[tt], tilt[tt],
-                                                    bw_az, bw_el)
-            for box in range(bounding_box.shape[0]):
-                boxxmin = bounding_box[box, 0, 0]
-                boxymin = bounding_box[box, 0, 1]
-                boxzmin = bounding_box[box, 0, 2]
-                boxxmax = bounding_box[box, 1, 0]
-                boxymax = bounding_box[box, 1, 1]
-                boxzmax = bounding_box[box, 1, 2]
-                if checkBox(rx, ry, rz, rdx, rdy, rdz, boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
-                    for t_idx in range(tri_box_idx.shape[0]):
-                        if tri_box_idx[t_idx, box]:
-                            curr_intersect, tbx, tby, tbz, tintx, tinty, tintz = (
-                                calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, tri_vert[tri_idx[t_idx, 0], 0],
-                                                       tri_vert[tri_idx[t_idx, 0], 1], tri_vert[tri_idx[t_idx, 0], 2],
-                                                       tri_vert[tri_idx[t_idx, 1], 0], tri_vert[tri_idx[t_idx, 1], 1],
-                                                       tri_vert[tri_idx[t_idx, 1], 2], tri_vert[tri_idx[t_idx, 2], 0],
-                                                       tri_vert[tri_idx[t_idx, 2], 1], tri_vert[tri_idx[t_idx, 2], 2],
-                                                       tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2]))
-                            if curr_intersect:
-                                tmp_rng = math.sqrt((rx - tintx)**2 + (ry - tinty)**2 + (rz - tintz)**2)
-                                if tmp_rng < int_rng:
-                                    int_rng = tmp_rng + 0.
-                                    inter_sigma = tri_sigma[t_idx]
-                                    bx = tbx + 0.
-                                    by = tby + 0.
-                                    bz = tbz + 0.
-                                    # This is a linear interpolation of attenuation based on inter_sigma
-                                    nrho = rho * (-.9 / 5 * inter_sigma + 1)
-                                    intx = tintx + 0.
-                                    inty = tinty + 0.
-                                    intz = tintz + 0.
-                                    did_intersect = True
-            if did_intersect:
-                rng += int_rng
-                curr_intersect = False
-                # Check for occlusion against the receiver
-                occ_x = intx - receive_xyz[tt, 0]
-                occ_y = inty - receive_xyz[tt, 1]
-                occ_z = intz - receive_xyz[tt, 2]
-                inv_occ = 1 / math.sqrt(occ_x**2 + occ_y**2 + occ_z**2)
-                occ_x *= inv_occ
-                occ_y *= inv_occ
-                occ_z *= inv_occ
-                for box in range(bounding_box.shape[0]):
-                    boxxmin = bounding_box[box, 0, 0]
-                    boxymin = bounding_box[box, 0, 1]
-                    boxzmin = bounding_box[box, 0, 2]
-                    boxxmax = bounding_box[box, 1, 0]
-                    boxymax = bounding_box[box, 1, 1]
-                    boxzmax = bounding_box[box, 1, 2]
-                    if checkBox(intx, inty, intz, occ_x, occ_y, occ_z,
-                                boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
-                        for t_idx in range(tri_box_idx.shape[0]):
-                            if tri_box_idx[t_idx, box]:
-                                curr_intersect, _, _, _, _, _, _ = (
-                                    calcSingleIntersection(occ_x, occ_y, occ_z, intx, inty, intz, tri_vert[tri_idx[t_idx, 0], 0],
-                                                           tri_vert[tri_idx[t_idx, 0], 1], tri_vert[tri_idx[t_idx, 0], 2],
-                                                           tri_vert[tri_idx[t_idx, 1], 0], tri_vert[tri_idx[t_idx, 1], 1],
-                                                           tri_vert[tri_idx[t_idx, 1], 2], tri_vert[tri_idx[t_idx, 2], 0],
-                                                           tri_vert[tri_idx[t_idx, 2], 1], tri_vert[tri_idx[t_idx, 2], 2],
-                                                           tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2]))
-                                if curr_intersect:
-                                    break
-
-                if not curr_intersect:
-                    acc_real, acc_imag, but = calcReturnAndBin(intx, inty, intz, receive_xyz[tt, 0], receive_xyz[tt, 1],
-                                                               receive_xyz[tt, 2], bx, by, bz, inter_sigma, rng, near_range_s,
-                                                               source_fs, n_samples, pan[tt], tilt[tt], bw_az, bw_el, wavenumber,
-                                                               nrho)
-                    if but >= 0:
-                        cuda.atomic.add(pd_r, (tt, but), acc_real)
-                        cuda.atomic.add(pd_i, (tt, but), acc_imag)
-        cuda.syncthreads()
-
-
-'''@cuda.jit()
 def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, tri_box_idx, tri_vert, tri_idx,
-                   tri_norm, tri_sigma, pd_r, pd_i, receive_xyz, rng_state, bounce_rays, pan, tilt, wavelength, near_range_s, source_fs, bw_az,
-                   bw_el):
+                   tri_norm, tri_material, pd_r, pd_i, receive_xyz, rng_state, bounce_rays, pan, tilt, wavelength,
+                   near_range_s, source_fs, bw_az, bw_el, is_origin):
     tt, ray_idx = cuda.grid(ndim=2)
     if ray_idx < ray_dir.shape[1] and tt < ray_dir.shape[0]:
         # Load in all the parameters that don't change
@@ -798,75 +647,67 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
                 rdy = rdy_i + 0.
                 rdz = rdz_i + 0.
             else:
-                rdx = rdx_i + xoroshiro128p_normal_float32(rng_state, ray_idx) / 100.
-                rdy = rdy_i + xoroshiro128p_normal_float32(rng_state, ray_idx) / 100.
-                rdz = rdz_i + xoroshiro128p_normal_float32(rng_state, ray_idx) / 100.
-            for box in range(bounding_box.shape[0]):
-                boxxmin = bounding_box[box, 0, 0]
-                boxymin = bounding_box[box, 0, 1]
-                boxzmin = bounding_box[box, 0, 2]
-                boxxmax = bounding_box[box, 1, 0]
-                boxymax = bounding_box[box, 1, 1]
-                boxzmax = bounding_box[box, 1, 2]
-                if checkBox(rx, ry, rz, rdx, rdy, rdz, boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
+                rdx = rdx_i + rng_state[ray_idx, b_idx]
+                rdy = rdy_i + rng_state[ray_idx, b_idx]
+                rdz = rdz_i + rng_state[ray_idx, b_idx]
+            far_range = 0
+            box = findOctreeBox(rx, ry, rz, rdx, rdy, rdz, bounding_box)
+            for t_idx in range(tri_box_idx.shape[0]):
+                if tri_box_idx[t_idx, box]:
+                    curr_intersect, tbx, tby, tbz, tintx, tinty, tintz = (
+                        calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, tri_vert[tri_idx[t_idx, 0], 0],
+                                               tri_vert[tri_idx[t_idx, 0], 1], tri_vert[tri_idx[t_idx, 0], 2],
+                                               tri_vert[tri_idx[t_idx, 1], 0], tri_vert[tri_idx[t_idx, 1], 1],
+                                               tri_vert[tri_idx[t_idx, 1], 2], tri_vert[tri_idx[t_idx, 2], 0],
+                                               tri_vert[tri_idx[t_idx, 2], 1], tri_vert[tri_idx[t_idx, 2], 2],
+                                               tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2], True))
+                    if curr_intersect:
+                        tmp_rng = math.sqrt((rx - tintx)**2 + (ry - tinty)**2 + (rz - tintz)**2)
+                        if tmp_rng < int_rng:
+                            int_rng = tmp_rng + 0.
+                            inv_rng = 1 / tmp_rng
+                            bx = tbx + 0.
+                            by = tby + 0.
+                            bz = tbz + 0.
+                            # This is the phong reflection model to get nrho
+                            tdotn = ((rx - tintx) * inv_rng * tri_norm[t_idx, 0] +
+                                     (ry - tinty) * inv_rng * tri_norm[t_idx, 1] +
+                                     (rz - tintz) * inv_rng * tri_norm[t_idx, 2])
+                            reflection = (bx * rx + by * ry + bz * rz) * inv_rng
+                            nrho = (tri_material[t_idx, 1] * max(tdotn, 0) * rho / 100. +
+                                    tri_material[t_idx, 2] * max(reflection, 0) ** tri_material[t_idx, 0] * rho)
+                            intx = tintx + 0.
+                            inty = tinty + 0.
+                            intz = tintz + 0.
+                            did_intersect = True
+            if did_intersect:
+                rng += int_rng
+                curr_intersect = False
+                if not is_origin:
+                    # Check for occlusion against the receiver
+                    occ_x = intx - receive_xyz[tt, 0]
+                    occ_y = inty - receive_xyz[tt, 1]
+                    occ_z = intz - receive_xyz[tt, 2]
+                    inv_occ = 1 / math.sqrt(occ_x**2 + occ_y**2 + occ_z**2)
+                    occ_x *= inv_occ
+                    occ_y *= inv_occ
+                    occ_z *= inv_occ
+                    box = findOctreeBox(intx, inty, intz, occ_x, occ_y, occ_z, bounding_box)
                     for t_idx in range(tri_box_idx.shape[0]):
                         if tri_box_idx[t_idx, box]:
-                            curr_intersect, tbx, tby, tbz, tintx, tinty, tintz = (
-                                calcSingleIntersection(rdx, rdy, rdz, rx, ry, rz, tri_vert[tri_idx[t_idx, 0], 0],
+                            curr_intersect, _, _, _, _, _, _ = (
+                                calcSingleIntersection(occ_x, occ_y, occ_z, intx, inty, intz, tri_vert[tri_idx[t_idx, 0], 0],
                                                        tri_vert[tri_idx[t_idx, 0], 1], tri_vert[tri_idx[t_idx, 0], 2],
                                                        tri_vert[tri_idx[t_idx, 1], 0], tri_vert[tri_idx[t_idx, 1], 1],
                                                        tri_vert[tri_idx[t_idx, 1], 2], tri_vert[tri_idx[t_idx, 2], 0],
                                                        tri_vert[tri_idx[t_idx, 2], 1], tri_vert[tri_idx[t_idx, 2], 2],
-                                                       tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2]))
+                                                       tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2], False))
                             if curr_intersect:
-                                tmp_rng = math.sqrt((rx - tintx)**2 + (ry - tinty)**2 + (rz - tintz)**2)
-                                if tmp_rng < int_rng:
-                                    int_rng = tmp_rng + 0.
-                                    inter_sigma = tri_sigma[t_idx]
-                                    bx = tbx + 0.
-                                    by = tby + 0.
-                                    bz = tbz + 0.
-                                    # This is a linear interpolation of attenuation based on inter_sigma
-                                    nrho = rho * (-.9 / 5 * inter_sigma + 1)
-                                    intx = tintx + 0.
-                                    inty = tinty + 0.
-                                    intz = tintz + 0.
-                                    did_intersect = True
-            if did_intersect:
-                rng += int_rng
-                curr_intersect = False
-                # Check for occlusion against the receiver
-                occ_x = intx - receive_xyz[tt, 0]
-                occ_y = inty - receive_xyz[tt, 1]
-                occ_z = intz - receive_xyz[tt, 2]
-                inv_occ = 1 / math.sqrt(occ_x**2 + occ_y**2 + occ_z**2)
-                occ_x *= inv_occ
-                occ_y *= inv_occ
-                occ_z *= inv_occ
-                for box in range(bounding_box.shape[0]):
-                    boxxmin = bounding_box[box, 0, 0]
-                    boxymin = bounding_box[box, 0, 1]
-                    boxzmin = bounding_box[box, 0, 2]
-                    boxxmax = bounding_box[box, 1, 0]
-                    boxymax = bounding_box[box, 1, 1]
-                    boxzmax = bounding_box[box, 1, 2]
-                    if checkBox(intx, inty, intz, occ_x, occ_y, occ_z,
-                                boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
-                        for t_idx in range(tri_box_idx.shape[0]):
-                            if tri_box_idx[t_idx, box]:
-                                curr_intersect, _, _, _, _, _, _ = (
-                                    calcSingleIntersection(occ_x, occ_y, occ_z, intx, inty, intz, tri_vert[tri_idx[t_idx, 0], 0],
-                                                           tri_vert[tri_idx[t_idx, 0], 1], tri_vert[tri_idx[t_idx, 0], 2],
-                                                           tri_vert[tri_idx[t_idx, 1], 0], tri_vert[tri_idx[t_idx, 1], 1],
-                                                           tri_vert[tri_idx[t_idx, 1], 2], tri_vert[tri_idx[t_idx, 2], 0],
-                                                           tri_vert[tri_idx[t_idx, 2], 1], tri_vert[tri_idx[t_idx, 2], 2],
-                                                           tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2]))
-                                if curr_intersect:
-                                    break
+                                break
 
                 if not curr_intersect:
                     acc_real, acc_imag, but = calcReturnAndBin(intx, inty, intz, receive_xyz[tt, 0], receive_xyz[tt, 1],
-                                                               receive_xyz[tt, 2], bx, by, bz, inter_sigma, rng, near_range_s,
+                                                               receive_xyz[tt, 2], rng, near_range_s,
                                                                source_fs, n_samples, pan[tt], tilt[tt], bw_az, bw_el, wavenumber,
                                                                nrho)
                     if but >= 0:
@@ -883,7 +724,14 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
                     ray_power[tt, ray_idx] = nrho
                     ray_distance[tt, ray_idx] = rng
 
-        cuda.syncthreads()'''
+        cuda.syncthreads()
+
+
+def makemat(az, el):
+    Rzx = np.array([[np.cos(az), -np.cos(el) * np.sin(az), np.sin(el) * np.sin(az)],
+                    [np.sin(az), np.cos(el) * np.cos(az), -np.sin(el) * np.cos(az)],
+                    [0, np.sin(el), np.cos(el)]])
+    return Rzx
 
 
 

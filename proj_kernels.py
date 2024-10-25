@@ -54,17 +54,23 @@ def cart2bary(x, y, v0x, v0y, v1x, v1y, v2x, v2y):
 
 @cuda.jit(device=True)
 def checkOcclusion(proj_verts, tri_idx, tri_occ_idx, px, py, pz):
-    if pz < proj_verts[tri_idx[tri_occ_idx, 0], 2] and pz < proj_verts[tri_idx[tri_occ_idx, 1], 2] and pz < proj_verts[tri_idx[tri_occ_idx, 2], 2]:
+    t0x = proj_verts[tri_idx[tri_occ_idx, 0], 0]
+    t0y = proj_verts[tri_idx[tri_occ_idx, 0], 1]
+    t0z = proj_verts[tri_idx[tri_occ_idx, 0], 2]
+    t1x = proj_verts[tri_idx[tri_occ_idx, 1], 0]
+    t1y = proj_verts[tri_idx[tri_occ_idx, 1], 1]
+    t1z = proj_verts[tri_idx[tri_occ_idx, 1], 2]
+    t2x = proj_verts[tri_idx[tri_occ_idx, 2], 0]
+    t2y = proj_verts[tri_idx[tri_occ_idx, 2], 1]
+    t2z = proj_verts[tri_idx[tri_occ_idx, 2], 2]
+    if pz < t0z and pz < t1z and pz < t2z:
         return False
-    v0x = proj_verts[tri_idx[tri_occ_idx, 0], 0]
-    v0y = proj_verts[tri_idx[tri_occ_idx, 0], 1]
-    v0z = proj_verts[tri_idx[tri_occ_idx, 0], 2]
-    v1x = proj_verts[tri_idx[tri_occ_idx, 1], 0]
-    v1y = proj_verts[tri_idx[tri_occ_idx, 1], 1]
-    v1z = proj_verts[tri_idx[tri_occ_idx, 1], 2]
-    v2x = proj_verts[tri_idx[tri_occ_idx, 2], 0]
-    v2y = proj_verts[tri_idx[tri_occ_idx, 2], 1]
-    v2z = proj_verts[tri_idx[tri_occ_idx, 2], 2]
+    v0x = t0x / t0z
+    v0y = t0y / t0z
+    v1x = t1x / t1z
+    v1y = t1y / t1z
+    v2x = t2x / t2z
+    v2y = t2y / t2z
 
     # Check to see if the point lies within the triangle
     as_x = px - v0x
@@ -76,8 +82,10 @@ def checkOcclusion(proj_verts, tri_idx, tri_occ_idx, px, py, pz):
         return False
 
     # Get interpolated depth and check against that
-    l0, l1, l2 = cart2bary(px, py, v0x, v0y, v1x, v1y, v2x, v2y)
-    if l0 * v0z + l1 * v1z + l2 * v2z > pz:
+    l0, l1, l2 = cart2bary(px, py, t0x, t0y,
+                           t1x, t1y,
+                           t2x, t2y)
+    if l0 * t0z + l1 * t1z + l2 * t2z > pz:
         return False
 
     # If it fails all the non-occlusion checks, return True
@@ -140,14 +148,33 @@ def checkBox(ro_x, ro_y, ro_z, ray_x, ray_y, ray_z, boxminx, boxminy, boxminz, b
     return tmax - tmin >= 0 and tmax >= 0
 
 
+@cuda.jit(device=True)
+def project(x, y, z, rx, ry, rz, pan, tilt, make_2d):
+    el = 3 * np.pi / 2 - tilt
+    az = -pan
+    sx = x - rx
+    sy = y - ry
+    sz = z - rz
+    px = math.cos(az) * sx + math.sin(az) * sy
+    py = -math.sin(az) * math.cos(el) * sx + math.cos(az) * math.cos(el) * sy + math.sin(el) * sz
+    pz = math.sin(az) * math.sin(el) * sx - math.cos(az) * math.sin(el) * sy + math.cos(el) * sz
+    if make_2d:
+        return px / pz, py / pz, 1
+    else:
+        return px, py, pz
+
+
 @cuda.jit()
-def calcProjectionReturn(source_xyz, ray_power, bounding_box, tri_box_idx, tri_vert, tri_idx,
-                   tri_norm, tri_sigma, pd_r, pd_i, wavelength,
-                   near_range_s, source_fs, bw_az, bw_el):
-    tt, ti = cuda.grid(ndim=2)
-    if ti < tri_idx.shape[0] and tt < pd_r.shape[0]:
+def calcProjectionReturn(source_xyz, ray_power, bounding_box, tri_box_idx, tri_vert, tri_proj_vert, tri_idx,
+                   tri_norm, tri_sigma, pd_r, pd_i, pan, tilt, wavelength,
+                   near_range_s, source_fs, bw_az, bw_el, tt):
+    box, ti = cuda.grid(ndim=2)
+    if ti < tri_idx.shape[0] and box < bounding_box.shape[0]:
         n_samples = pd_r.shape[1]
         wavenumber = 2 * np.pi / wavelength
+        rx = source_xyz[0]
+        ry = source_xyz[1]
+        rz = source_xyz[2]
         t0x = tri_vert[tri_idx[ti, 0], 0]
         t0y = tri_vert[tri_idx[ti, 0], 1]
         t0z = tri_vert[tri_idx[ti, 0], 2]
@@ -157,33 +184,31 @@ def calcProjectionReturn(source_xyz, ray_power, bounding_box, tri_box_idx, tri_v
         t2x = tri_vert[tri_idx[ti, 2], 0]
         t2y = tri_vert[tri_idx[ti, 2], 1]
         t2z = tri_vert[tri_idx[ti, 2], 2]
-        rx = source_xyz[tt, 0]
-        ry = source_xyz[tt, 1]
-        rz = source_xyz[tt, 2]
-        for u in range(0, 1, 10):
-            for v in range(0, 1, 10):
-                if u + v > 1:
+        boxxmin = bounding_box[box, 0, 0]
+        boxymin = bounding_box[box, 0, 1]
+        boxzmin = bounding_box[box, 0, 2]
+        boxxmax = bounding_box[box, 1, 0]
+        boxymax = bounding_box[box, 1, 1]
+        boxzmax = bounding_box[box, 1, 2]
+        for u in range(2):
+            for v in range(2):
+                if u + v > 2:
                     continue
-                intx, inty, intz = selectPointOnTriangle(t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z, u, v)
+                intx, inty, intz = selectPointOnTriangle(t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z, u / 2., v / 2.)
                 rdx, rdy, rdz = getRayDir(intx, inty, intz, rx, ry, rz)
+                ipx, ipy, ipz = project(intx, inty, intz, rx, ry, rz, pan, tilt, False)
+                ippx, ippy, ippz = project(intx, inty, intz, rx, ry, rz, pan, tilt, True)
                 curr_rng = np.inf
                 curr_rho = 0.
-                for box in range(bounding_box.shape[0]):
-                    boxxmin = bounding_box[box, 0, 0]
-                    boxymin = bounding_box[box, 0, 1]
-                    boxzmin = bounding_box[box, 0, 2]
-                    boxxmax = bounding_box[box, 1, 0]
-                    boxymax = bounding_box[box, 1, 1]
-                    boxzmax = bounding_box[box, 1, 2]
-                    if checkBox(rx, ry, rz, rdx, rdy, rdz, boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
-                        for t_idx in range(tri_box_idx.shape[0]):
-                            if tri_box_idx[t_idx, box]:
-                                if not checkOcclusion(tri_vert, tri_idx, t_idx, intx, inty, intz):
-                                    rho_o, rng = calcPowerReturn(intx, inty, intz, bw_az, bw_el, ray_power, tri_sigma[t_idx],
-                                                    tri_norm[t_idx, 0],tri_norm[t_idx, 1], tri_norm[t_idx, 2])
-                                    if rng < curr_rng:
-                                        curr_rng = rng
-                                        curr_rho = rho_o + 0.
+                if checkBox(rx, ry, rz, rdx, rdy, rdz, boxxmin, boxymin, boxzmin, boxxmax, boxymax, boxzmax):
+                    for t_idx in range(tri_box_idx.shape[0]):
+                        if not checkOcclusion(tri_proj_vert, tri_idx, t_idx, ippx, ippy, ipz):
+                            tnx, tny, tnz = project(tri_norm[t_idx, 0], tri_norm[t_idx, 1], tri_norm[t_idx, 2], rx, ry, rz, pan, tilt, False)
+                            rho_o, rng = calcPowerReturn(ipx, ipy, ipz, bw_az, bw_el, ray_power, tri_sigma[t_idx],
+                                            tnx, tny, tnz)
+                            if rng < curr_rng:
+                                curr_rng = rng
+                                curr_rho = rho_o + 0.
 
                 if curr_rho > 0:
                     rng_bin = (rng / c0 - 2 * near_range_s) * source_fs
