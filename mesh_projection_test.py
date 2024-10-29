@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib import patches
 from scipy.signal.windows import taylor
 from scipy.spatial import Delaunay
 from backproject_functions import getRadarAndEnvironment, backprojectPulseSet
@@ -28,10 +29,10 @@ plp = .75
 fdelay = 10.
 upsample = 4
 num_bounces = 1
-nbounce_rays = 2
-nboxes = 2000
-points_to_sample = 1000
-num_mesh_triangles = 1000
+nbounce_rays = 3
+nbox_levels = 4
+points_to_sample = 100
+num_mesh_triangles = 100000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -77,7 +78,7 @@ building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0,
 mesh_ids = np.concatenate((mesh_ids, np.asarray(building.triangle_material_ids) + mesh_ids.max()))
 mesh += building
 
-gpx, gpy, gpz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+gpx, gpy, gpz = bg.getGrid(grid_origin, 201, 199, nrows=201, ncols=199, az=-68.5715881976 * DTR)
 gnd_points = np.array([gpx.flatten(), gpy.flatten(), gpz.flatten()]).T
 gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
 gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
@@ -132,11 +133,11 @@ try:
     mkss[6] = mkss[13] = mkss[17] = 1.  # body
     mkss[12] = mkss[4] = .01  # windshield'''
     # msigmas[28] = 2
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample,
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=points_to_sample,
                                                       material_sigmas=msigmas, material_kd=mkds, material_ks=mkss)
 except ValueError:
     print('Error in getting material sigmas.')
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample)
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=points_to_sample)
 print('Done.')
 
 boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
@@ -256,6 +257,17 @@ plt.figure('Backprojection')
 db_bpj = db(bpj_grid)
 plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj) - np.std(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 3])
 plt.axis('tight')
+plt.show()
+
+fig, ax = plt.subplots()
+for o in box_tree[0]:
+    # Create a Rectangle patch
+    rect = patches.Rectangle((o[0, 0], o[0, 1]), o[1, 0] - o[0, 0], o[1, 1] - o[1, 0], linewidth=1, edgecolor='r', facecolor='none')
+
+    # Add the patch to the Axes
+    ax.add_patch(rect)
+plt.xlim(box_tree[0][:, 0, 0].min(), box_tree[0][:, 1, 0].max())
+plt.ylim(box_tree[0][:, 0, 1].min(), box_tree[0][:, 1, 1].max())
 plt.show()
 
 '''campos = rp.txpos(sdr_f[0].pulse_time).mean(axis=0)
