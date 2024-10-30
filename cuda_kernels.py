@@ -68,6 +68,27 @@ def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     return tx_pat * tx_pat * rx_pat * rx_pat
 
 
+@cuda.jit(device=True)
+def applyOneWayRadiationPattern(el_c, az_c, az_rx, el_rx, bw_az, bw_el):
+    """
+    Applies a very simple sinc radiation pattern.
+    :param el_c: float. Center of beam in elevation, radians.
+    :param az_c: float. Azimuth center of beam in radians.
+    :param az_rx: float. Azimuth value of Rx antenna in radians.
+    :param el_rx: float. Elevation value of Rx antenna in radians.
+    :param bw_az: float. Azimuth beamwidth of antenna in radians.
+    :param bw_el: float. elevation beamwidth of antenna in radians.
+    :return: float. Value by which a point should be scaled.
+    """
+    a = np.pi / bw_az
+    b = np.pi / bw_el
+    # Abs shouldn't be a problem since the pattern is symmetrical about zero
+    eldiff = max(1e-9, abs(diff(el_c, el_rx)))
+    azdiff = max(1e-9, abs(diff(az_c, az_rx)))
+    rx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
+    return rx_pat * rx_pat
+
+
 def applyRadiationPatternCPU(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     """
     Applies a very simple sinc radiation pattern.

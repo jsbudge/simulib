@@ -22,17 +22,19 @@ DTR = np.pi / 180
 
 
 fc = 9.6e9
-ant_gain = 22  # dB
+rx_gain = 22  # dB
+tx_gain = 22  # dB
+rec_gain = 100  # dB
 ant_transmit_power = 100  # watts
 npulses = 128
 plp = .75
 fdelay = 10.
 upsample = 4
 num_bounces = 1
-nbounce_rays = 3
+nbounce_rays = 1
 nbox_levels = 4
-points_to_sample = 100
-num_mesh_triangles = 100000
+points_to_sample = 10000
+num_mesh_triangles = 10000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -105,7 +107,8 @@ face_points = np.asarray(mesh.vertices)
 print('Done.')
 
 # This is all the constants in the radar equation for this simulation
-radar_coeff = c0**2 / fc**2 * ant_transmit_power * 10**((ant_gain + 2.15) / 5) / (4 * np.pi)**3
+radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
+               10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
 
 # Generate a chirp
 chirp = genChirp(nr, fs, fc, 400e6)
@@ -120,7 +123,7 @@ mf_chirp = fft_chirp * fft_chirp.conj() * taytay
 # Load in boxes and meshes for speedup of ray tracing
 print('Loading mesh box structure...', end='')
 try:
-    msigmas = [.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
+    msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
     '''msigmas[0] = msigmas[15] = .2  # seats
     msigmas[6] = msigmas[13] = msigmas[17] = .02  # body
     msigmas[12] = msigmas[4] = 1.  # windshield'''
