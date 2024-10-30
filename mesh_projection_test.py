@@ -33,8 +33,8 @@ upsample = 4
 num_bounces = 1
 nbounce_rays = 1
 nbox_levels = 4
-points_to_sample = 10000
-num_mesh_triangles = 10000
+points_to_sample = 1000000
+num_mesh_triangles = 100000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -48,8 +48,8 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-# gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
+# gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -59,10 +59,10 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
+mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+mesh_ids = np.asarray(mesh.triangle_material_ids)
 
 car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file

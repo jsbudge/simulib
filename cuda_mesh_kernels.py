@@ -162,13 +162,13 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_box_levels: i
 
     # Sample the mesh to get points for initial raycasting
     points = a_mesh.sample_points_poisson_disk(sample_points)
-    return (boxes, sorted_tri_idx[:, 1], mesh_idx_key, mesh_tri_idx, mesh_vertices, mesh_normals, mesh_sigmas, mesh_kd,
-            mesh_ks), np.asarray(points.points)
+    tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
+                                                  mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
+    return (boxes, sorted_tri_idx[:, 1], mesh_idx_key, mesh_tri_idx, mesh_vertices, mesh_normals, tri_material), np.asarray(points.points)
 
 @profile
-def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarray, tri_idx_key: np.ndarray, mesh_tri_idxes: np.ndarray,
-                            mesh_vertices: np.ndarray, mesh_normals: np.ndarray, mesh_sigmas: np.ndarray,
-                            mesh_kd: np.ndarray, mesh_ks: np.ndarray, sample_points: np.ndarray, a_obs_pt: np.ndarray,
+def getRangeProfileFromMesh(boxes, tri_box, tri_box_key, tri_idxes, tri_verts, tri_norm,
+                                                 tri_material, sample_points: np.ndarray, a_obs_pt: np.ndarray,
                             pointing_vec: np.ndarray,
                             radar_equation_constant: float, bw_az: float, bw_el: float, nsam: int, fc: float,
                             near_range_s: float, bounce_rays: int=15, num_bounces: int=3, debug: bool=False)\
@@ -199,17 +199,15 @@ def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarra
                np.sinc((pel[:, None] + np.arcsin(ray_dirs[:, :, 2])) / bw_el)**2)
     ray_power = radar_equation_constant * ray_att
 
-
     # These are the mesh constants that don't change with intersection points
-    tri_norm_gpu = cupy.array(mesh_normals, dtype=np.float32)
-    tri_idxes_gpu = cupy.array(mesh_tri_idxes, dtype=np.int32)
-    tri_verts_gpu = cupy.array(mesh_vertices, dtype=np.float32)
-    tri_material_gpu = cupy.array(np.concatenate([mesh_sigmas.reshape((-1, 1)),
-                                                  mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1),
-                                  dtype=np.float32)
-    tri_box_gpu = cupy.array(tri_box_idxes, dtype=np.int32)
-    tri_box_key_gpu = cupy.array(tri_idx_key, dtype=np.int32)
-    boxes_gpu = cupy.array(bounding_boxes, dtype=np.float32)
+    tri_norm_gpu = cupy.array(tri_norm, dtype=np.float32)
+    tri_idxes_gpu = cupy.array(tri_idxes, dtype=np.int32)
+    tri_verts_gpu = cupy.array(tri_verts, dtype=np.float32)
+    tri_material_gpu = cupy.array(tri_material, dtype=np.float32)
+    tri_box_gpu = cupy.array(tri_box, dtype=np.int32)
+    tri_box_key_gpu = cupy.array(tri_box_key, dtype=np.int32)
+    boxes_gpu = cupy.array(boxes, dtype=np.float32)
+
     receive_xyz_gpu = cupy.array(a_obs_pt, dtype=np.float32)
     ray_origin_gpu = cupy.array(ray_origins, dtype=np.float32)
     ray_dir_gpu = cupy.array(ray_dirs, dtype=np.float32)
@@ -219,7 +217,8 @@ def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarra
     pd_i = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
 
     np.random.seed(12)
-    rng_state = cupy.array(np.random.normal(0, .03, (sample_points.shape[0], bounce_rays, 3)), dtype=np.float32)
+    rng_state = cupy.array(np.random.normal(0, .03, (sample_points.shape[0], bounce_rays, 3)),
+                           dtype=np.float32)
 
     for b in range(num_bounces):
 
@@ -237,13 +236,19 @@ def getRangeProfileFromMesh(bounding_boxes: np.ndarray, tri_box_idxes: np.ndarra
     pulse_ret = pd_r.get() + 1j * pd_i.get()
     del pd_r
     del pd_i
-    del boxes_gpu
-    del tri_norm_gpu
-    del tri_box_gpu
+    del ray_distance_gpu
+    del ray_power_gpu
+    del ray_origin_gpu
+    del receive_xyz_gpu
+    del pointing_az
+    del pointing_el
+    del tri_material_gpu
     del tri_box_key_gpu
     del tri_idxes_gpu
-    del tri_material_gpu
     del tri_verts_gpu
+    del tri_box_gpu
+    del boxes_gpu
+    del tri_norm_gpu
 
     cupy.get_default_memory_pool().free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
@@ -306,7 +311,6 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
     # Calculate out the angles in azimuth and elevation for the bounce
     t, vrng, _, _ = getRangeAndAngles(inter, ro)
-
     bx = t - vn * dot(t, vn) * 2.
 
     return True, normalize(bx), inter
@@ -351,7 +355,13 @@ def traverseOctreeAndIntersection(ro, rd, bounding_box, rho, final_level, tri_bo
     bounding_box: (N, 2, 3) = array of axis aligned bounding boxes
     rho: float = ray power in watts
     final_level: int = start index of the final level of the octree for the bounding_box array
-
+    tri_box_idx: (N) = sorted array of triangle indexes based on octree boxes
+    tri_box_key: (N, 2) = key to look into tri_box_idx and find the triangles inside of a box
+    tri_idx: (N, 3) = indexes of vertices that correspond to an individual triangle
+    tri_vert: (N, 3) = vertices for triangles in euclidean space
+    tri_norm: (N, 3) = surface normal of triangle
+    tri_material: (N, 3) = material scattering values of triangle - (RCS, ks, kd)
+    occlusion_only: bool = set to True to return when the ray intersects something without checking any other triangles
     """
     int_rng = np.inf
     did_intersect = False
@@ -388,7 +398,7 @@ def traverseOctreeAndIntersection(ro, rd, bounding_box, rho, final_level, tri_bo
                             if occlusion_only:
                                 return True, None, None, None, None
                             tmp_rng = length(ro - tinter)
-                            if 1. < tmp_rng < int_rng:
+                            if 1e-4 < tmp_rng < int_rng:
                                 int_rng = tmp_rng + 0.
                                 inv_rng = 1 / tmp_rng
                                 b = tb + 0.
@@ -461,6 +471,8 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
                     ray_dir[tt, ray_idx, 2] = b.z
                     ray_power[tt, ray_idx] = nrho
                     ray_distance[tt, ray_idx] = rng
+            else:
+                ray_power[tt, ray_idx] = 0.
 
         cuda.syncthreads()
 
