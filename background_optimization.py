@@ -2,6 +2,7 @@ import cupy
 import numpy as np
 import cma
 from scipy.spatial import Delaunay
+from scipy.optimize import minimize
 from SDRParsing import load
 from backproject_functions import backprojectPulseSet
 from cuda_kernels import calcRangeProfile, getMaxThreads
@@ -11,7 +12,7 @@ from platform_helper import SDRPlatform
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import open3d as o3d
-from simulation_functions import db, upsamplePulse
+from simulation_functions import db, upsamplePulse, azelToVec, detect_local_extrema
 import plotly.io as pio
 
 pio.renderers.default = 'browser'
@@ -59,14 +60,15 @@ grid_origin = (40.133830, -111.665722, 1385.)
 fnme = '/home/jeff/SDR_DATA/RAW/08072024/SAR_08072024_111617.sar'
 sdr = load(fnme, progress_tracker=True)
 wavelength = c0 / sdr[0].fc
-ant_gain = 55
-transmit_power = 100
-eff_aperture = 10. * 10.
+rx_gain = 22  # dB
+tx_gain = 22  # dB
+rec_gain = 100  # dB
+ant_transmit_power = 100  # watts
 upsample = 1
 pixel_to_m = 1.
 nboxes = 4
 points_to_sample = 256
-npulses = 1024
+npulses = 32
 num_bounces = 0
 nbounce_rays = 5
 
@@ -81,7 +83,8 @@ chirp_filt = np.fft.fft(sdr[0].cal_chirp, fft_len) * mfilt
 threads_per_block = getMaxThreads()
 
 # This is all the constants in the radar equation for this simulation
-radar_coeff = transmit_power * 10 ** (ant_gain / 10) * eff_aperture / (4 * np.pi) ** 2
+radar_coeff = (c0**2 / sdr[0].fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
+               10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
 chip_shape = (16, 16)
 
 gx, gy, gz = bg.getGrid(grid_origin, chip_shape[0] * pixel_to_m, chip_shape[1] * pixel_to_m, *chip_shape)
@@ -89,11 +92,133 @@ pix_data = bg.getRefGrid(grid_origin, chip_shape[0] * pixel_to_m, chip_shape[1] 
 
 points = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 
-boresight = rp.boresight(sdr[0].pulse_time).mean(axis=0)
+boresights = rp.boresight(sdr[0].pulse_time)
+boresight = boresights.mean(axis=0)
 pointing_az = np.arctan2(boresight[0], boresight[1])
 
-# Locate the extrema to speed up the optimization
+paz = np.arctan2(boresights[:, 0], boresights[:, 1])
+pel = -np.arcsin(boresights[:, 2])
+
+pt = [2034, 3133]
+pt_pos = bg.getPos(*pt, True)
+
 flight_path = rp.txpos(sdr[0].pulse_time)
+pmax = points.max(axis=0)
+vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
+                 pmax[2] - flight_path[:, 2]]).T
+pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
+max_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw]
+pmin = points.min(axis=0)
+vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
+                 pmin[2] - flight_path[:, 2]]).T
+pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
+min_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw]
+pulse_lims = [min(min(max_pts), min(min_pts)), max(max(max_pts), max(min_pts))]
+
+ro = pt_pos - flight_path
+rnges = np.linalg.norm(ro, axis=1)
+rng_bins = ((rnges / c0 - near_range_s) * fs).astype(int)
+ray_att = (np.sinc((paz - np.arctan2(ro[:, 0], ro[:, 1])) / rp.az_half_bw) ** 2 *
+               np.sinc((pel + np.arcsin(ro[:, 2] / rnges)) / rp.el_half_bw) ** 2)
+rho = radar_coeff * ray_att
+
+pt_data = np.zeros(pulse_lims[1] - pulse_lims[0], dtype=np.complex128)
+for idx in range(pulse_lims[0], pulse_lims[1], npulses):
+    idx_range = np.arange(idx, min(idx + npulses, pulse_lims[1]))
+
+    # Get real pulse data
+    _, pulse_data = sdr.getPulses(sdr[0].frame_num[idx_range], 0)
+    mf_data = np.fft.fft(pulse_data, fft_len, axis=0) * mfilt[:, None]
+    mf_data = upsamplePulse(mf_data.T, fft_len, upsample, is_freq=True, time_len=nsam)
+    pt_data[idx_range - pulse_lims[0]] = mf_data[idx_range - idx_range[0], ((rnges[idx_range] / c0 - near_range_s) * upsample * fs).astype(int)]
+
+pt_data /= 1e7
+
+min_pt_ts = np.where(rnges == rnges.min())[0][0]
+min_pt_path = flight_path[min_pt_ts]
+min_ro = ro[min_pt_ts]
+min_az = np.arctan2(min_ro[0], min_ro[1])
+min_el = -np.arcsin(min_ro[2] / rnges[min_pt_ts])
+
+
+
+
+def findPossPos(x):
+    xyz = azelToVec(min_az, x) * rnges[min_pt_ts] + min_pt_path
+    return np.linalg.norm(rnges[pulse_lims[0]:pulse_lims[1]] - np.linalg.norm(flight_path[pulse_lims[0]:pulse_lims[1]] - xyz, axis=1))
+'''es = cma.CMAEvolutionStrategy(np.array([pointing_az, rp.dep_ang]), np.pi / 4,
+                              {'bounds': [[pointing_az - np.pi / 2, 0], [pointing_az + np.pi / 2, np.pi / 2]]})
+es.optimize(findPossPos)'''
+
+yes = np.linspace(min_el - rp.el_half_bw / 8, min_el + rp.el_half_bw / 8, 11)
+res = np.array([findPossPos(y) for y in yes])
+locy = detect_local_extrema(db(res))
+'''valids = res[locy, locx] < res.mean() - res.std()
+locy = locy[valids]
+locx = locx[valids]'''
+
+poss_pos = (azelToVec(min_az, yes) * rnges[min_pt_ts] + min_pt_path[:, None]).T
+
+tri_norm = azelToVec(12 * DTR, np.pi / 3)
+ks = .3
+kd = .3
+rcs = 2.
+
+x0 = np.array([0., 0.3310422816311423, ks, kd, rcs / 5])
+
+for p in poss_pos:
+    def calc_th(x):
+        # Scale everything
+        az = x[0] * np.pi - (pointing_az + np.pi / 2)
+        el = x[1] * np.pi / 2
+        rcs = x[4] * 5
+        th_data = np.zeros(pulse_lims[1] - pulse_lims[0], dtype=np.complex128)
+        tri_norm = azelToVec(az, el)
+        for idx in range(pulse_lims[0], pulse_lims[1], npulses):
+            idx_range = np.arange(idx, min(idx + npulses, pulse_lims[1]))
+            nro = p - flight_path[idx_range]
+
+            # Get theoretical return for pixel
+            th_return = np.zeros((nsam, len(idx_range)), dtype=np.complex128)
+            bounce = p - tri_norm * np.dot(p, tri_norm) * 2.
+            bounce /= np.linalg.norm(bounce)
+            # This is the phong reflection model to get nrho
+            tdotn = np.dot(nro, tri_norm) / rnges[idx_range]
+            tdotn[tdotn < 0] = 0
+            reflection = np.dot(nro, bounce) / rnges[idx_range]
+            reflection[reflection < 0] = 0
+            nrho = (1e-6 + (x[3] * tdotn * rho[idx_range] / 100. + x[2] * reflection ** rcs * rho[idx_range])) / rnges[
+                idx_range] ** 2
+            nrho[nrho - rho[idx_range] > 0] = rho[idx_range[nrho - rho[idx_range] > 0]]
+            th_return[rng_bins[idx_range], idx_range - idx_range[0]] += nrho * np.exp(-2j * wavelength * rnges[idx_range])
+            th_return = np.fft.fft(th_return, fft_len, axis=0) * chirp_filt[:, None]
+            th_return = upsamplePulse(th_return.T, fft_len, upsample, is_freq=True, time_len=nsam)
+            th_data[idx_range - pulse_lims[0]] = th_return[idx_range - idx_range[0], ((rnges[idx_range] / c0 - near_range_s) * upsample * fs).astype(int)]
+
+        th_data *= abs(pt_data).max() / abs(th_data).max()
+        return th_data
+
+    def minfunc(x):
+        return np.linalg.norm(pt_data - calc_th(x))
+
+    es = cma.CMAEvolutionStrategy(x0, .33, {'bounds': [[0, 0, 1e-5, 1e-5, 1e-5], [1, 1, 1, 1, 1]]})
+    es.optimize(minfunc)
+
+    opt_x = es.result[0]
+    # opt_x = minimize(minfunc, x0, bounds=[(0, 2 * np.pi), (0, np.pi / 2), (1e-9, 1), (1e-9, 1), (1e-9, 5)])
+
+    th_data = calc_th(opt_x)
+
+    plt.figure(f'pos {p}')
+    plt.plot(abs(pt_data))
+    plt.plot(abs(th_data))
+
+plt.figure()
+plt.plot(db(res))
+plt.show()
+
+# Locate the extrema to speed up the optimization
+'''flight_path = rp.txpos(sdr[0].pulse_time)
 pmax = points.max(axis=0)
 vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
                  pmax[2] - flight_path[:, 2]]).T
@@ -147,3 +272,4 @@ def minfunc(x):
 
 es = cma.CMAEvolutionStrategy(x0, 3.3, {'bounds': [0, 10]})
 es.optimize(minfunc)
+'''

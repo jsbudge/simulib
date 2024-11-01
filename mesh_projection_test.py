@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 from matplotlib import patches
+from matplotlib.patches import Wedge
 from scipy.signal.windows import taylor
 from scipy.spatial import Delaunay
 from backproject_functions import getRadarAndEnvironment, backprojectPulseSet
@@ -11,7 +12,9 @@ import numpy as np
 import open3d as o3d
 import plotly.express as px
 import plotly.io as pio
+import plotly.graph_objects as go
 from SDRParsing import load
+import os
 
 pio.renderers.default = 'browser'
 
@@ -21,22 +24,31 @@ fs = 2e9
 DTR = np.pi / 180
 
 
+def addNoise(range_profile, chirp, npower, mf, fft_len):
+    data = (chirp * np.fft.fft(range_profile + np.random.normal(0, npower, range_profile.shape) +
+     1j * np.random.normal(0, npower, range_profile.shape), fft_len))
+    return data * mf
+
+
 fc = 9.6e9
 rx_gain = 22  # dB
 tx_gain = 22  # dB
 rec_gain = 100  # dB
 ant_transmit_power = 100  # watts
+noise_power_db = -80
 npulses = 128
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 1
+num_bounces = 2
 nbounce_rays = 1
 nbox_levels = 4
-points_to_sample = 1000000
-num_mesh_triangles = 100000
+points_to_sample = 30000
+num_mesh_triangles = 10000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
+
+# os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
 
 sdr_f = load(fnme)
@@ -48,8 +60,8 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-# gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
+gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+# gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -59,10 +71,10 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
+'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)
+mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
 car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
@@ -109,6 +121,7 @@ print('Done.')
 # This is all the constants in the radar equation for this simulation
 radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
                10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
+noise_power = 10**(noise_power_db / 10)
 
 # Generate a chirp
 chirp = genChirp(nr, fs, fc, 400e6)
@@ -117,7 +130,7 @@ twin = taylor(int(np.round(400e6 / fs * fft_len)))
 taytay = np.zeros(fft_len, dtype=np.complex128)
 winloc = int((fc % fs) * fft_len / fs) - len(twin) // 2
 taytay[winloc:winloc + len(twin)] += twin
-mf_chirp = fft_chirp * fft_chirp.conj() * taytay
+mf_chirp = fft_chirp.conj() * taytay
 
 
 # Load in boxes and meshes for speedup of ray tracing
@@ -175,7 +188,7 @@ single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*bo
 single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp, fft_len), fft_len, upsample,
                              is_freq=True, time_len=nsam)
 single_mf_pulse = upsamplePulse(
-    mf_chirp * np.fft.fft(single_rp, fft_len), fft_len, upsample,
+    addNoise(single_rp, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample,
     is_freq=True, time_len=nsam)
 bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
@@ -186,66 +199,34 @@ for frame in tqdm(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)):
     trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.txpos(dt), rp.boresight(dt),
                                   radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces,
                                   bounce_rays=nbounce_rays)
-    clean_pulse = mf_chirp * np.fft.fft(trp, fft_len)
-    noise = (np.random.normal(0, 1e-12, size=clean_pulse.shape) +
-             1j * np.random.normal(0, 1e-12, size=clean_pulse.shape))
-    mf_pulse = upsamplePulse(clean_pulse + noise, fft_len, upsample, is_freq=True, time_len=nsam)
+    mf_pulse = upsamplePulse(addNoise(trp, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam)
     bpj_grid += backprojectPulseSet(mf_pulse.T, rp.pan(dt), rp.tilt(dt), rp.txpos(dt), rp.txpos(dt), gx, gy, gz,
                                    c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw)
 
-if len(mesh.triangles) < 100000:
-    face_tris = np.asarray(mesh.triangles)
-    try:
-        face_colors = np.asarray(mesh.vertex_colors)[face_tris].mean(axis=1)
-    except IndexError:
-        face_colors = np.zeros_like(face_tris)
-    obs_pt = rp.pos(data_t[npulses // 2])
-    ax = plt.figure().add_subplot(projection='3d')
-    polygons = []
-    for i in range(face_tris.shape[0]):
-        face = face_tris[i]
-        polygon = Poly3DCollection([face_points[face]], alpha=.75, facecolor=face_colors[i], linewidths=2)
-        polygons.append(polygon)
-        ax.add_collection3d(polygon)
-    scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
-    sc_min = scaling[0] - 1e-3
-    sc = 1 / (scaling[1] - scaling[0])
-    for idx, (ro, rd, nrp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
-        scaled_rp = nrp
-        ax.quiver(ro[0, :, 0], ro[0, :, 1], ro[0, :, 2], rd[0, :, 0] * scaled_rp[0, :],
-                  rd[0, :, 1] * scaled_rp[0, :], rd[0, :, 2] * scaled_rp[0, :])
-    ax.set_zlim(face_points[:, 2].min() - 15., face_points[:, 2].max() + 15)
-    ax.set_ylim(face_points[:, 1].min() - 5., face_points[:, 1].max() + 5)
-    ax.set_xlim(face_points[:, 0].min() - 5., face_points[:, 0].max() + 5)
-    plt.show()
-
-    plt.figure()
-    plt.scatter(gx.flatten(), gy.flatten())
-    plt.scatter(face_points[:, 0], face_points[:, 1])
-    plt.scatter(sample_points[:, 0], sample_points[:, 1])
-    plt.show()
-
-    ax = plt.figure('First Bounce Angle').add_subplot(projection='3d')
-    polygons = []
-    for i in range(face_tris.shape[0]):
-        face = face_tris[i]
-        polygon = Poly3DCollection([face_points[face]], alpha=.75, facecolor=face_colors[i], linewidths=2)
-        polygons.append(polygon)
-        ax.add_collection3d(polygon)
-    scaled_rp = (ray_powers[0] - sc_min) * sc
-    ax.quiver(ray_origins[0][0, :, 0], ray_origins[0][0, :, 1], ray_origins[0][0, :, 2],
-              ray_directions[0][0, :, 0] * scaled_rp[0, :],
-              ray_directions[0][0, :, 1] * scaled_rp[0, :], ray_directions[0][0, :, 2] * scaled_rp[0, :])
-    ax.scatter(gx.flatten(), gy.flatten(), gz.flatten())
-    ax.set_zlim(face_points[:, 2].min(), face_points[:, 2].max())
-    ax.set_ylim(face_points[:, 1].min(), face_points[:, 1].max())
-    ax.set_xlim(face_points[:, 0].min(), face_points[:, 0].max())
-    plt.show()
-
-    ax = plt.figure().add_subplot(projection='3d')
-    for idx, (ro, rd, nrp) in enumerate(zip(ray_origins, ray_directions, ray_powers)):
-        scaled_rp = (nrp - sc_min) * sc * 10
-        ax.scatter(ro[0, :, 0], ro[0, :, 1], ro[0, :, 2])
+def getMeshFig(title='Title Goes Here'):
+    fig = go.Figure(data=[
+        go.Mesh3d(
+            x=box_tree[4][:, 0],
+            y=box_tree[4][:, 1],
+            z=box_tree[4][:, 2],
+            colorscale=[[0, 'gold'],
+                        [0.5, 'mediumturquoise'],
+                        [1, 'magenta']],
+            # Intensity of each vertex, which will be interpolated and color-coded
+            # intensity=point_rng / point_rng.max(),
+            # i, j and k give the vertices of triangles
+            # here we represent the 4 triangles of the tetrahedron surface
+            i=box_tree[3][:, 0],
+            j=box_tree[3][:, 1],
+            k=box_tree[3][:, 2],
+            name='y',
+            showscale=True
+        )
+    ])
+    fig.update_layout(
+        title=title,
+    )
+    return fig
 
 px.scatter(db(single_rp[0].flatten())).show()
 px.scatter(db(single_pulse[0].flatten())).show()
@@ -262,50 +243,47 @@ plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj) - np.std(d
 plt.axis('tight')
 plt.show()
 
-fig, ax = plt.subplots()
-for o in box_tree[0]:
-    # Create a Rectangle patch
-    rect = patches.Rectangle((o[0, 0], o[0, 1]), o[1, 0] - o[0, 0], o[1, 1] - o[1, 0], linewidth=1, edgecolor='r', facecolor='none')
+scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
+sc_min = scaling[0] - 1e-3
+sc = 1 / (scaling[1] - scaling[0])
+scaled_rp = (ray_powers[0] - sc_min) * sc
 
-    # Add the patch to the Axes
-    ax.add_patch(rect)
-plt.xlim(box_tree[0][:, 0, 0].min(), box_tree[0][:, 1, 0].max())
-plt.ylim(box_tree[0][:, 0, 1].min(), box_tree[0][:, 1, 1].max())
-plt.show()
+fig = getMeshFig('Full Mesh')
+fig.show()
 
-'''campos = rp.txpos(sdr_f[0].pulse_time).mean(axis=0)
-boresight = np.array([gx.mean() - campos[0], gy.mean() - campos[1], gz.mean() + mesh_extent[2] / 2 - campos[2]])
-bnorm = boresight / np.linalg.norm(boresight)
-pointing_az = np.arctan2(bnorm[0], bnorm[1])
-pointing_el = -np.arcsin(bnorm[2])
-car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
-                           points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
-car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
-car = car.translate(np.array([gx.mean() - campos[0], gy.mean() - campos[1], gz.mean() + mesh_extent[2] / 2 - campos[2]]), relative=False)
-# Rotate into antenna frame
-points = np.asarray(car.vertices).dot(car.get_rotation_matrix_from_zyx(np.array([-pointing_az, 0, 3 * np.pi / 2 - pointing_el])))
-points = np.concatenate((points, np.ones((points.shape[0], 1))), axis=1)
-hpoints = points.dot(np.array([[1, 0, 0, 0],[0, 1, 0, 0],[0, 0, 1, 1 / 100.],[0, 0, 0, 0]]))
-proj_points = hpoints / hpoints[:, 3][:, None]
-mesh_extent = car.get_max_bound() - car.get_min_bound()
+bounce_colors = ['blue', 'red', 'green', 'yellow']
+for bounce in range(len(ray_origins)):
+    fig = getMeshFig(f'Bounce {bounce}')
+    for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
+        valids = nrp[0] > 1e-9
+        fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0],
+                          v=rd[0, valids, 1], w=rd[0, valids, 2], sizemode='absolute', sizeref=2, anchor='tail',
+                              colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
+
+    fig.show()
 
 
-ax = plt.figure().add_subplot(projection='3d')
-ax.scatter(points[:, 0], points[:, 1], points[:, 2])
-ax.quiver([0], [0], [0], [0], [0], [1000])
-ax.azim = pointing_az / DTR
-ax.elev = pointing_el / DTR
-ax.dist = 100
+def drawbox(box):
+    vertices = []
+    for z in range(2):
+        vertices.append([box[0, 0], box[0, 1], box[z, 2]])
+        vertices.append([box[1, 0], box[0, 1], box[z, 2]])
+        vertices.append([box[1, 0], box[0, 1], box[int(not z), 2]])
+        vertices.append([box[1, 0], box[0, 1], box[z, 2]])
+        vertices.append([box[1, 0], box[1, 1], box[z, 2]])
+        vertices.append([box[1, 0], box[1, 1], box[int(not z), 2]])
+        vertices.append([box[1, 0], box[1, 1], box[z, 2]])
+        vertices.append([box[0, 0], box[1, 1], box[z, 2]])
+        vertices.append([box[0, 0], box[1, 1], box[int(not z), 2]])
+        vertices.append([box[0, 0], box[1, 1], box[z, 2]])
+        vertices.append([box[0, 0], box[0, 1], box[z, 2]])
+    vertices = np.array(vertices)
+    return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
 
-plt.figure()
-plt.scatter(proj_points[:, 0], proj_points[:, 1])
+fig = getMeshFig()
 
-az_bw_con = 100 * np.tan(rp.az_half_bw)
-el_bw_con = 100 * np.tan(rp.el_half_bw)
+for b in box_tree[0][sum(8**n for n in range(nbox_levels - 1)):]:
+    if np.sum(b) != 0:
+        fig.add_trace(drawbox(b))
 
-def makemat(az, el):
-    Rzx = np.array([[np.cos(az), -np.cos(el) * np.sin(az), np.sin(el) * np.sin(az)],
-                    [np.sin(az), np.cos(el) * np.cos(az), -np.sin(el) * np.cos(az)],
-                    [0, np.sin(el), np.cos(el)]])
-    return Rzx'''
+fig.show()

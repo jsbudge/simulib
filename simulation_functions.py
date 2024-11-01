@@ -52,7 +52,10 @@ def detect_local_extrema(arr):
 
 def db(x):
     ret = abs(x)
-    ret[ret < 1e-15] = 1e-15
+    if isinstance(ret, np.ndarray):
+        ret[ret < 1e-15] = 1e-15
+    else:
+        ret = ret if ret < 1e-15 else 1e-15
     return 20 * np.log10(ret)
 
 

@@ -302,9 +302,9 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
                 continue
 
             # Attenuation of beam in elevation and azimuth
-            att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-                                        bw_az, bw_el)
-            # att = 1.
+            # att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
+            #                             bw_az, bw_el)
+            att = 1.
             # Azimuth window to reduce sidelobes
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))

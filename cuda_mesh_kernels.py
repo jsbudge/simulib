@@ -2,6 +2,8 @@ import cmath
 import math
 from profile import runctx
 
+from scipy.optimize import minimize
+
 from cuda_functions import float3, make_float3, cross, dot, length, normalize
 from proj_kernels import calcProjectionReturn
 from simulation_functions import factors
@@ -30,7 +32,7 @@ CUTOFF = 200000
 BOX_CUSHION = .1
 
 
-@cuda.jit(device=True, fastmath=True)
+@cuda.jit(device=True)
 def getRangeAndAngles(v, s):
     t = v - s
     rng = length(t)
@@ -86,29 +88,43 @@ def genOctree(bounding_box: np.ndarray, points: np.ndarray, num_levels: int = 3)
         init_idx = sum(int(8**(n - 1)) for n in range(level))
         for parent in range(init_idx, init_idx + int(8**(level - 1))):
             box_min = octree[parent, 0]
-            box_max = octree[parent, 1]
+            # box_max = octree[parent, 1]
             child_idx = sum(8**n for n in range(level)) + (parent - init_idx) * 8
-            npoints = points[np.logical_and(np.logical_and(points[:, 0] > box_min[0],
-                                                           points[:, 0] < octree[parent, 1, 0]),
-                                            np.logical_and(points[:, 1] > box_min[1],
-                                                           points[:, 1] < octree[parent, 1, 1]),
-                                            np.logical_and(points[:, 2] > box_min[2], points[:, 2] < octree[parent, 1, 2]))]
+            npoints = points[np.logical_and(np.logical_and(points[:, 0] >= box_min[0],
+                                                           points[:, 0] <= octree[parent, 1, 0]),
+                                            np.logical_and(points[:, 1] >= box_min[1],
+                                                           points[:, 1] <= octree[parent, 1, 1]),
+                                            np.logical_and(points[:, 2] >= box_min[2], points[:, 2] < octree[parent, 1, 2]))]
             if len(npoints) == 0:
                 continue
+
             box_div = npoints.mean(axis=0)
-            box_hull = np.array([box_min, box_div, box_max])
+            box_hull = np.array([npoints.min(axis=0), box_div, npoints.max(axis=0)])
             bidx = 0
             for x in range(2):
                 for y in range(2):
                     for z in range(2):
-                        octree[child_idx + bidx, :] = np.array([[box_hull[x, 0] - BOX_CUSHION, box_hull[y, 1] - BOX_CUSHION, box_hull[z, 2] - BOX_CUSHION],
-                                                                [box_hull[x + 1, 0] + BOX_CUSHION, box_hull[y + 1, 1] + BOX_CUSHION, box_hull[z + 1, 2] + BOX_CUSHION]])
+                        # Recalculate to remove any dead space inside the box
+                        npo = npoints[np.logical_and(np.logical_and(npoints[:, 0] >= box_hull[x, 0],
+                                                                       npoints[:, 0] <= box_hull[x + 1, 0]),
+                                                        np.logical_and(npoints[:, 1] >= box_hull[y, 1],
+                                                                       npoints[:, 1] <= box_hull[y + 1, 1]),
+                                                        np.logical_and(npoints[:, 2] >= box_hull[z, 2],
+                                                                       npoints[:, 2] <= box_hull[z + 1, 2]))]
+                        if len(npo) == 0:
+                            bidx += 1
+                            continue
+                        box_pt = np.array([npo.min(axis=0), npo.max(axis=0)])
+                        octree[child_idx + bidx, :] = np.array([[box_pt[0] - BOX_CUSHION],
+                                                                [box_pt[1] + BOX_CUSHION]]).reshape((2, 3))
+                        # octree[child_idx + bidx, :] = np.array([[box_hull[x, 0] - BOX_CUSHION, box_hull[y, 1] - BOX_CUSHION, box_hull[z, 2] - BOX_CUSHION],
+                        #                                         [box_hull[x + 1, 0] + BOX_CUSHION, box_hull[y + 1, 1] + BOX_CUSHION, box_hull[z + 1, 2] + BOX_CUSHION]])
                         bidx += 1
 
     return octree
 
 def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_box_levels: int=4, sample_points: int=10000,
-                            material_sigmas: list=None, material_kd: list=None, material_ks: list = None):
+                            material_sigmas: list=None, material_kd: list=None, material_ks: list = None, view_pos: np.ndarray = None):
     # Generate bounding box tree
     mesh_tri_idx = np.asarray(a_mesh.triangles)
     mesh_vertices = np.asarray(a_mesh.vertices)
@@ -161,10 +177,18 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_box_levels: i
         mesh_ks = np.array([material_ks[i] for i in np.asarray(a_mesh.triangle_material_ids)])
 
     # Sample the mesh to get points for initial raycasting
-    points = a_mesh.sample_points_poisson_disk(sample_points)
+
+    # points = np.sum(mesh_tri_vertices / 3., axis=1)
+    if view_pos is None:
+        points = np.asarray(a_mesh.sample_points_poisson_disk(sample_points).points)
+    else:
+        mpoint = mesh_vertices - view_pos
+        azes = np.arctan2(mpoint[:, 0], mpoint[:, 1])
+        eles = -np.arcsin(mpoint[:, 2] / np.linalg.norm(mpoint, axis=1))
+        points = azelToVec(np.random.uniform(azes.min(), azes.max(), sample_points), np.random.uniform(eles.min(), eles.max(), sample_points)).T
     tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
                                                   mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
-    return (boxes, sorted_tri_idx[:, 1], mesh_idx_key, mesh_tri_idx, mesh_vertices, mesh_normals, tri_material), np.asarray(points.points)
+    return (boxes, sorted_tri_idx[:, 1], mesh_idx_key, mesh_tri_idx, mesh_vertices, mesh_normals, tri_material), points
 
 @profile
 def getRangeProfileFromMesh(boxes, tri_box, tri_box_key, tri_idxes, tri_verts, tri_norm,
@@ -178,8 +202,12 @@ def getRangeProfileFromMesh(boxes, tri_box, tri_box_key, tri_idxes, tri_verts, t
     # that will affect the power received by the intersection point
     paz = np.arctan2(pointing_vec[:, 0], pointing_vec[:, 1])
     pel = -np.arcsin(pointing_vec[:, 2])
-    pointing_az = cupy.array(paz, dtype=np.float32)
-    pointing_el = cupy.array(pel, dtype=np.float32)
+    pointing_az = cupy.array(paz, dtype=np.float64)
+    pointing_el = cupy.array(pel, dtype=np.float64)
+
+    vert_look = tri_verts - a_obs_pt.mean(axis=0)
+    vert_az = np.arctan2(vert_look[:, 0], vert_look[:, 1])
+    vert_el = -np.arcsin(vert_look[:, 2] / np.linalg.norm(vert_look, axis=1))
 
     debug_rays = []
     debug_raydirs = []
@@ -191,6 +219,8 @@ def getRangeProfileFromMesh(boxes, tri_box, tri_box_key, tri_idxes, tri_verts, t
              sample_points.shape[0] // threads_per_block[1] + 1)
 
     ray_origins = np.repeat(a_obs_pt.reshape((a_obs_pt.shape[0], 1, a_obs_pt.shape[1])), sample_points.shape[0], axis=1)
+    # ray_dirs = azelToVec(np.random.uniform(vert_az.min(), vert_az.max(), (ray_origins.shape[0], ray_origins.shape[1])),
+    #       np.random.uniform(vert_el.min(), vert_el.max(), (ray_origins.shape[0], ray_origins.shape[1]))).T.swapaxes(0, 1)
     ray_dirs = sample_points[None, :, :] - ray_origins
     ray_dirs /= np.linalg.norm(ray_dirs, axis=2)[:, :, None]
 
@@ -200,25 +230,26 @@ def getRangeProfileFromMesh(boxes, tri_box, tri_box_key, tri_idxes, tri_verts, t
     ray_power = radar_equation_constant * ray_att
 
     # These are the mesh constants that don't change with intersection points
-    tri_norm_gpu = cupy.array(tri_norm, dtype=np.float32)
+    tri_norm_gpu = cupy.array(tri_norm, dtype=np.float64)
     tri_idxes_gpu = cupy.array(tri_idxes, dtype=np.int32)
-    tri_verts_gpu = cupy.array(tri_verts, dtype=np.float32)
-    tri_material_gpu = cupy.array(tri_material, dtype=np.float32)
+    tri_verts_gpu = cupy.array(tri_verts, dtype=np.float64)
+    tri_material_gpu = cupy.array(tri_material, dtype=np.float64)
     tri_box_gpu = cupy.array(tri_box, dtype=np.int32)
     tri_box_key_gpu = cupy.array(tri_box_key, dtype=np.int32)
-    boxes_gpu = cupy.array(boxes, dtype=np.float32)
+    boxes_gpu = cupy.array(boxes, dtype=np.float64)
 
-    receive_xyz_gpu = cupy.array(a_obs_pt, dtype=np.float32)
-    ray_origin_gpu = cupy.array(ray_origins, dtype=np.float32)
-    ray_dir_gpu = cupy.array(ray_dirs, dtype=np.float32)
-    ray_power_gpu = cupy.array(ray_power, dtype=np.float32)
+    receive_xyz_gpu = cupy.array(a_obs_pt, dtype=np.float64)
+    ray_origin_gpu = cupy.array(ray_origins, dtype=np.float64)
+    ray_dir_gpu = cupy.array(ray_dirs, dtype=np.float64)
+    ray_power_gpu = cupy.array(ray_power, dtype=np.float64)
     ray_distance_gpu = cupy.zeros_like(ray_power_gpu)
     pd_r = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
     pd_i = cupy.array(np.zeros((a_obs_pt.shape[0], nsam)), dtype=np.float64)
 
     np.random.seed(12)
     rng_state = cupy.array(np.random.normal(0, .03, (sample_points.shape[0], bounce_rays, 3)),
-                           dtype=np.float32)
+                           dtype=np.float64) if bounce_rays > 1 else cupy.array([[[0, 0, 0.]]],
+                           dtype=np.float64)
 
     for b in range(num_bounces):
 
@@ -257,7 +288,7 @@ def getRangeProfileFromMesh(boxes, tri_box, tri_box_key, tri_idxes, tri_verts, t
     else:
         return pulse_ret
 
-@cuda.jit(device=True, fast_math=True)
+@cuda.jit(device=True)
 def checkBox(ro, ray, boxmin, boxmax):
     tmin = -np.inf
     tmax = np.inf
@@ -276,7 +307,7 @@ def checkBox(ro, ray, boxmin, boxmax):
     return tmax - tmin >= 0 and tmax >= 0
 
 
-@cuda.jit(device=True, fast_math=True)
+@cuda.jit(device=True)
 def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
     e1 = v1 - v0
     e2 = v2 - v0
@@ -316,7 +347,7 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
     return True, normalize(bx), inter
 
 
-@cuda.jit(device=True, fast_math=True)
+@cuda.jit(device=True)
 def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
     r, r_rng, r_az, r_el = getRangeAndAngles(inter, re)
@@ -327,6 +358,8 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
 
     if n_samples > but > 0:
         att = applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) / r_rng**2 * rho
+        if abs(att) == np.inf:
+            print(r_el)
         acc_val = att * cmath.exp(-1j * wavenumber * two_way_rng)
         return acc_val.real, acc_val.imag, but
 
@@ -398,15 +431,15 @@ def traverseOctreeAndIntersection(ro, rd, bounding_box, rho, final_level, tri_bo
                             if occlusion_only:
                                 return True, None, None, None, None
                             tmp_rng = length(ro - tinter)
-                            if 1e-4 < tmp_rng < int_rng:
+                            if 1. < tmp_rng < int_rng:
                                 int_rng = tmp_rng + 0.
                                 inv_rng = 1 / tmp_rng
                                 b = tb + 0.
                                 # This is the phong reflection model to get nrho
                                 tdotn = dot(ro - tinter, tn) * inv_rng
                                 reflection = dot(b, ro) * inv_rng
-                                nrho = min(1e-6 + (tri_material[ti, 1] * max(tdotn, 0) * rho / 100. +
-                                               tri_material[ti, 2] * max(reflection, 0) ** tri_material[
+                                nrho = min(1e-6 + (tri_material[ti, 1] * abs(tdotn) * rho / 100. +
+                                               tri_material[ti, 2] * abs(reflection) ** tri_material[
                                                    ti, 0] * rho), rho) * inv_rng**2
                                 inter = tinter + 0.
                                 did_intersect = True
@@ -434,6 +467,8 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
         rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
         rdi = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
         rho = ray_power[tt, ray_idx]
+        if rho < 1e-9:
+            return
         rng = ray_distance[tt, ray_idx]
         for b_idx in prange(bounce_rays):
             if b_idx == 0:
@@ -459,6 +494,8 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
                     acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, near_range_s, source_fs, n_samples,
                                                                pan[tt], tilt[tt], bw_az, bw_el, wavenumber, nrho)
                     if but >= 0:
+                        acc_real = acc_real if abs(acc_real) < np.inf else 0.
+                        acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                         cuda.atomic.add(pd_r, (tt, but), acc_real)
                         cuda.atomic.add(pd_i, (tt, but), acc_imag)
 
@@ -490,3 +527,28 @@ def makemat(az, el):
 if __name__ == '__main__':
 
     mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=260000)
+    def minfunc(x):
+        box_hull = np.array([npoints.min(axis=0), x, npoints.max(axis=0)])
+        bidx = 0
+        stds = np.zeros(3)
+        for x in range(2):
+            for y in range(2):
+                for z in range(2):
+                    # Recalculate to remove any dead space inside the box
+                    npoints = points[np.logical_and(np.logical_and(points[:, 0] > box_hull[x, 0],
+                                                                   points[:, 0] < box_hull[x + 1, 0]),
+                                                    np.logical_and(points[:, 1] > box_hull[y, 1],
+                                                                   points[:, 1] < box_hull[y + 1, 1]),
+                                                    np.logical_and(points[:, 2] > box_hull[z, 2],
+                                                                   points[:, 2] < box_hull[z + 1, 2]))]
+                    if len(npoints) == 0:
+                        bidx += 1
+                        continue
+                    stds += npoints.std(axis=0)
+        return sum(stds)
+
+
+    box_hull = np.array([npoints.min(axis=0), npoints.max(axis=0)])
+    opt_x = minimize(minfunc, npoints.mean(axis=0), bounds=[(box_hull[0, 0], box_hull[1, 0]), (box_hull[0, 1], box_hull[1, 1]), (box_hull[0, 2], box_hull[1, 2])])
+
+
