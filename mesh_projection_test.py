@@ -1,12 +1,9 @@
 import matplotlib.pyplot as plt
-from matplotlib import patches
-from matplotlib.patches import Wedge
 from scipy.signal.windows import taylor
 from scipy.spatial import Delaunay
 from backproject_functions import getRadarAndEnvironment, backprojectPulseSet
 from simulation_functions import db, genChirp, upsamplePulse, llh2enu
 from cuda_mesh_kernels import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -14,7 +11,6 @@ import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
 from SDRParsing import load
-import os
 
 pio.renderers.default = 'browser'
 
@@ -40,10 +36,10 @@ npulses = 128
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 2
-nbounce_rays = 1
+num_bounces = 1
+nbounce_rays = 3
 nbox_levels = 4
-points_to_sample = 30000
+points_to_sample = 100000
 num_mesh_triangles = 10000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
@@ -60,8 +56,8 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-# gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
+# gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=800, ncols=400)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -71,12 +67,12 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
+mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+mesh_ids = np.asarray(mesh.triangle_material_ids)
 
-car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+'''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
@@ -111,7 +107,7 @@ mesh += ground
 if len(mesh_ids) > 0:
     mesh_ids = np.concatenate((mesh_ids, np.array([mesh_ids.max() + 1 for _ in range(len(ground.triangles))])))
 else:
-    mesh_ids = np.zeros(len(ground.triangles)).astype(int)
+    mesh_ids = np.zeros(len(ground.triangles)).astype(int)'''
 
 grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
 mesh.triangle_material_ids = o3d.utility.IntVector([int(m) for m in mesh_ids])
@@ -239,8 +235,9 @@ plt.show()
 
 plt.figure('Backprojection')
 db_bpj = db(bpj_grid)
-plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj) - np.std(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 3])
+plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2])
 plt.axis('tight')
+plt.axis('off')
 plt.show()
 
 scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
@@ -257,7 +254,7 @@ for bounce in range(len(ray_origins)):
     for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
         valids = nrp[0] > 1e-9
         fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0],
-                          v=rd[0, valids, 1], w=rd[0, valids, 2], sizemode='absolute', sizeref=2, anchor='tail',
+                          v=rd[0, valids, 1], w=rd[0, valids, 2], sizemode='absolute', sizeref=40, anchor='tail',
                               colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
 
     fig.show()

@@ -48,18 +48,18 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
     mids = []
     if sum(num_tris) > points:
         scaling = points / sum(num_tris)
-        target_tris = [int(max(1, t * scaling)) for t in num_tris]
+        target_tris = [int(np.ceil(max(1, t * scaling))) for t in num_tris]
         for me_idx, me in enumerate(full_mesh.meshes):
             me.mesh.triangle_uvs = o3d.utility.Vector2dVector([])
             pcd = o3d.geometry.PointCloud(me.mesh.vertices)
             vertex_size = np.mean(pcd.compute_point_cloud_distance(
-                o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.mean(np.asarray(pcd.points), axis=0).reshape(1, -1))))) / 2
+                o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.mean(np.asarray(pcd.points), axis=0).reshape(1, -1))))) / 4
             tm = me.mesh.simplify_vertex_clustering(vertex_size)
             tm.remove_duplicated_vertices()
             tm.remove_unreferenced_vertices()
             bounce = 1
             while len(tm.triangles) > target_tris[me_idx] or len(tm.triangles) == 0:
-                vertex_size *= (2 if len(tm.triangles) > target_tris[me_idx] else .6) * bounce
+                vertex_size *= (1.5 if len(tm.triangles) > target_tris[me_idx] else .6) * bounce
                 tm = me.mesh.simplify_vertex_clustering(vertex_size)
                 tm.remove_duplicated_vertices()
                 tm.remove_unreferenced_vertices()
