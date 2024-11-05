@@ -1,3 +1,5 @@
+import sys
+sys.path.extend(['/home/jeff/repo/data_converter', '/home/jeff/repo/simulib'])
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
 from scipy.spatial import Delaunay
@@ -11,6 +13,7 @@ import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
 from SDRParsing import load
+
 
 pio.renderers.default = 'browser'
 
@@ -37,9 +40,10 @@ plp = .75
 fdelay = 10.
 upsample = 4
 num_bounces = 1
-nbounce_rays = 3
+nbounce_rays = 1
 nbox_levels = 4
-points_to_sample = 100000
+nstreams = 10
+points_to_sample = 100
 num_mesh_triangles = 10000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
@@ -56,8 +60,8 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-# gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=800, ncols=400)
+gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+# gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=800, ncols=400)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -67,12 +71,12 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
+'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)
+mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
-'''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
@@ -107,7 +111,7 @@ mesh += ground
 if len(mesh_ids) > 0:
     mesh_ids = np.concatenate((mesh_ids, np.array([mesh_ids.max() + 1 for _ in range(len(ground.triangles))])))
 else:
-    mesh_ids = np.zeros(len(ground.triangles)).astype(int)'''
+    mesh_ids = np.zeros(len(ground.triangles)).astype(int)
 
 grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
 mesh.triangle_material_ids = o3d.utility.IntVector([int(m) for m in mesh_ids])
@@ -180,7 +184,7 @@ single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*bo
                                                                              nsam, fc, near_range_s,
                                                                              num_bounces=num_bounces,
                                                                              bounce_rays=nbounce_rays,
-                                                                             debug=True)
+                                                                             debug=True, nstreams=nstreams)
 single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp, fft_len), fft_len, upsample,
                              is_freq=True, time_len=nsam)
 single_mf_pulse = upsamplePulse(
@@ -194,10 +198,13 @@ for frame in tqdm(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)):
     dt = sdr_f[0].pulse_time[frame:frame + npulses]
     trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.txpos(dt), rp.boresight(dt),
                                   radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces,
-                                  bounce_rays=nbounce_rays)
+                                  bounce_rays=nbounce_rays, nstreams=nstreams)
     mf_pulse = upsamplePulse(addNoise(trp, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam)
-    bpj_grid += backprojectPulseSet(mf_pulse.T, rp.pan(dt), rp.tilt(dt), rp.txpos(dt), rp.txpos(dt), gx, gy, gz,
-                                   c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw)
+    bpj_grid += backprojectPulseSet(mf_pulse.T, rp.pan(dt), rp.tilt(dt), rp.txpos(dt), rp.txpos(dt), gz,
+                                    c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
+                                    gx=gx, gy=gy)
+    # bpj_grid += backprojectPulseSet(mf_pulse.T, rp.pan(dt), rp.tilt(dt), rp.txpos(dt), rp.txpos(dt), gz,
+    #                                c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw, transform=bg.transforms[0])
 
 def getMeshFig(title='Title Goes Here'):
     fig = go.Figure(data=[
@@ -228,7 +235,7 @@ px.scatter(db(single_rp[0].flatten())).show()
 px.scatter(db(single_pulse[0].flatten())).show()
 px.scatter(db(single_mf_pulse[0].flatten())).show()
 
-plt.figure('Data')
+'''plt.figure('Data')
 plt.imshow(db(single_mf_pulse))
 plt.axis('tight')
 plt.show()
@@ -238,7 +245,7 @@ db_bpj = db(bpj_grid)
 plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2])
 plt.axis('tight')
 plt.axis('off')
-plt.show()
+plt.show()'''
 
 scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
 sc_min = scaling[0] - 1e-3

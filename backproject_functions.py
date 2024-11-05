@@ -2,7 +2,7 @@ import numpy as np
 from numba.cuda.random import create_xoroshiro128p_states
 
 from simulation_functions import llh2enu, db, genPulse
-from cuda_kernels import getMaxThreads, backproject, genRangeProfile
+from cuda_kernels import getMaxThreads, backproject, genRangeProfile, backprojectRegularGrid
 from grid_helper import SDREnvironment
 from platform_helper import SDRPlatform, RadarPlatform
 import cupy as cupy
@@ -153,13 +153,18 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
     return r_bpj_final, r_debug_data
 
 
-def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavelength, near_range_s, upsample_fs,
-                        az_half_bw, el_half_bw, a_debug: bool = False, a_poly_num: int = 0) -> np.ndarray:
-    nbpj_pts = gx.shape
+def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndarray, posrx: np.ndarray,
+                        postx: np.ndarray, gz: np.ndarray, wavelength: float, near_range_s: float, upsample_fs: float,
+                        az_half_bw: float, el_half_bw: float, transform: np.ndarray = None, gx: np.ndarray = None,
+                        gy: np.ndarray = None, a_debug: bool = False, a_poly_num: int = 0) -> np.ndarray:
+    nbpj_pts = gz.shape
 
     # Calculate out points on the ground
-    gx_gpu = cupy.array(gx, dtype=np.float64)
-    gy_gpu = cupy.array(gy, dtype=np.float64)
+    if transform is None:
+        gx_gpu = cupy.array(gx, dtype=np.float64)
+        gy_gpu = cupy.array(gy, dtype=np.float64)
+    else:
+        transform_gpu = cupy.array(transform, dtype=np.float64)
     gz_gpu = cupy.array(gz, dtype=np.float64)
 
     if a_debug:
@@ -173,14 +178,7 @@ def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavel
     threads_per_block = getMaxThreads()
     bpg_bpj = (max(1, nbpj_pts[0] // threads_per_block[0] + 1), nbpj_pts[1] // threads_per_block[1] + 1)
 
-    # Clean everything out
-    cupy.get_default_memory_pool().free_all_blocks()
-    cupy.get_default_pinned_memory_pool().free_all_blocks()
-    # rng_states = create_xoroshiro128p_states(triangles.shape[0], seed=10)
-
     # Run through loop to get data simulated
-    r_debug_data = None
-    # print('Backprojecting...')
     # Data blocks for imaging
     r_bpj_final = np.zeros(nbpj_pts, dtype=np.complex128)
     panrx_gpu = cupy.array(panrx, dtype=np.float64)
@@ -188,33 +186,20 @@ def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavel
     posrx_gpu = cupy.array(posrx, dtype=np.float64)
     postx_gpu = cupy.array(postx, dtype=np.float64)
     bpj_grid = cupy.zeros(nbpj_pts, dtype=np.complex128)
-
-    # Reset the grid for truth data
     rtdata = cupy.array(pulse_data, dtype=np.complex128)
-    # cupy.cuda.Device().synchronize()
 
-    backproject[bpg_bpj, threads_per_block](
-        postx_gpu,
-        posrx_gpu,
-        gx_gpu,
-        gy_gpu,
-        gz_gpu,
-        panrx_gpu,
-        elrx_gpu,
-        panrx_gpu,
-        elrx_gpu,
-        rtdata,
-        bpj_grid,
-        wavelength,
-        near_range_s,
-        upsample_fs,
-        az_half_bw,
-        el_half_bw,
-        a_poly_num,
-        pts_debug,
-        angs_debug,
-        a_debug,
-    )
+    if transform is None:
+        backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu, elrx_gpu,
+            panrx_gpu, elrx_gpu, rtdata, bpj_grid, wavelength, near_range_s, upsample_fs, az_half_bw, el_half_bw,
+            a_poly_num, pts_debug, angs_debug, a_debug)
+        del gx_gpu
+        del gy_gpu
+    else:
+        backprojectRegularGrid[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, transform_gpu, gz_gpu, panrx_gpu, elrx_gpu,
+                                                panrx_gpu, elrx_gpu, rtdata, bpj_grid, wavelength, near_range_s,
+                                                upsample_fs, az_half_bw, el_half_bw,
+                                                a_poly_num, pts_debug, angs_debug, a_debug)
+        del transform_gpu
     cupy.cuda.Device().synchronize()
 
     r_bpj_final += bpj_grid.get()
@@ -225,9 +210,11 @@ def backprojectPulseSet(pulse_data, panrx, elrx, posrx, postx, gx, gy, gz, wavel
     del elrx_gpu
     del rtdata
     del bpj_grid
-    del gx_gpu
-    del gy_gpu
     del gz_gpu
+
+    # Clean everything out
+    cupy.get_default_memory_pool().free_all_blocks()
+    cupy.get_default_pinned_memory_pool().free_all_blocks()
 
     return r_bpj_final
 

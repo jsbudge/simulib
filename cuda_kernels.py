@@ -273,7 +273,6 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
         n_samples = pulse_data.shape[0]
         k = 2 * np.pi / wavelength
         gl = make_float3(gx[pcol, prow], gy[pcol, prow], gz[pcol, prow])
-        r_xyz = make_float3(0., 0., 0.)
 
         # Grab pulse data and sum up for this pixel
         for tt in range(nPulses):
@@ -343,6 +342,103 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
             #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
             exp_phase = k * two_way_rng
             acc_val += a * cmath.exp(1j * exp_phase) * att * az_win
+        final_grid[pcol, prow] = acc_val
+
+
+@cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
+          'float64[:], float64[:], float64[:], complex128[:, :], complex128[:, :], float64, float64, float64, float64, '
+          'float64, int32)')
+def backprojectRegularGrid(source_xyz, receive_xyz, transform, gz, panrx, elrx, pantx, eltx, pulse_data, final_grid,
+                wavelength, near_range_s, source_fs, bw_az, bw_el, poly):
+    """
+    Backprojection kernel.
+    :param source_xyz: array. XYZ values of the source, usually Tx antenna, in meters.
+    :param receive_xyz: array. XYZ values of the receiver, usually Rx antenna, in meters.
+    :param gx: array. X values, in meters, of grid.
+    :param gy: array. Y values, in meters, of grid.
+    :param gz: array. Z values, in meters, of grid.
+    :param rbins: array. Range bins, in meters.
+    :param panrx: array. Rx azimuth values, in radians.
+    :param elrx: array. Rx elevation values, in radians.
+    :param pantx: array. Tx azimuth values, in radians.
+    :param eltx: array. Tx elevation values, in radians.
+    :param pulse_data: array. Complex pulse return data.
+    :param final_grid: array. 2D matrix that accumulates all the corrected phase values.
+    This is the backprojected image.
+    :param wavelength: float. Wavelength used for phase correction.
+    :param near_range_s: float. Near range value in seconds.
+    :param source_fs: float. Sampling frequency in Hz.
+    :param signal_bw: float. Bandwidth of signal in Hz.
+    :param bw_az: float. Azimuth beamwidth in radians.
+    :param bw_el: float. Elevation beamwidth in radians.
+    :param poly: int. Determines the order of polynomial interpolation for range bins.
+    :param calc_pts: array. Debug array for calculated ranges. Optional.
+    :param calc_angs: array. Debug array for calculated angles to points. Optional.
+    :param debug_flag: bool. If True, populates the calc_pts and calc_angs arrays.
+    :return: Nothing, technically. final_grid is the returned product.
+    """
+    pcol, prow = cuda.grid(ndim=2)
+    if pcol < gz.shape[0] and prow < gz.shape[1]:
+        # Load in all the parameters that don't change
+        acc_val = 0
+        nPulses = pulse_data.shape[1]
+        n_samples = pulse_data.shape[0]
+        k = 2 * np.pi / wavelength
+        px = transform[0, 0] * pcol + transform[0, 1] * prow + transform[0, 2]
+        py = transform[1, 0] * pcol + transform[1, 1] * prow + transform[1, 2]
+        gl = make_float3(px, py, gz[pcol, prow])
+
+        # Grab pulse data and sum up for this pixel
+        for tt in range(nPulses):
+            cp = pulse_data[:, tt]
+            # Get LOS vector in XYZ and spherical coordinates at pulse time
+            # Rx
+            r_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
+            rx, rx_rng, r_az, r_el = getRangeAndAngles(gl, r_xyz)
+
+            # Check to see if it's outside of our beam
+            az_diffrx = diff(r_az, panrx[tt])
+            el_diffrx = diff(r_el, elrx[tt])
+            if (abs(az_diffrx) > bw_az) or (abs(el_diffrx) > bw_el):
+                continue
+
+            # Tx
+            s_xyz = make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2])
+            tx, tx_rng, t_az, t_el = getRangeAndAngles(gl, s_xyz)
+
+            # Get index into range compressed data
+            two_way_rng = tx_rng + rx_rng
+            rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+            bi0 = int(rng_bin)
+            bi1 = bi0 + 1
+            if bi1 >= n_samples or bi1 < 0:
+                continue
+
+            # Attenuation of beam in elevation and azimuth
+            # att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
+            #                             bw_az, bw_el)
+            att = 1.
+            # Azimuth window to reduce sidelobes
+            # Gaussian window
+            # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
+            # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
+            az_win = raisedCosine(az_diffrx, bw_az, .5)
+            # az_win = 1.
+
+            if poly == 0:
+                # This is how APS does it (for reference, I guess)
+                a = cp[bi1]
+            elif poly == 1:
+                # Linear interpolation between bins (slower but more accurate)
+                bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
+                bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
+                a = (cp[bi0] * (bi1_rng - tx_rng) + cp[bi1] * (tx_rng - bi0_rng)) \
+                    / (bi1_rng - bi0_rng)
+
+            # Multiply by phase reference function, attenuation and azimuth window
+            # if tt == 0:
+            #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
+            acc_val += a * cmath.exp(1j * k * two_way_rng) * att * az_win
         final_grid[pcol, prow] = acc_val
 
 
