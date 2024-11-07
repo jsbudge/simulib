@@ -10,7 +10,7 @@ from numba.cuda import get_current_device
 from numba.cuda.compiler import compile_cuda as numba_compile_cuda
 from numba.cuda.libdevice import fast_powf, float_as_int, int_as_float
 
-from operator import add, mul, sub
+from operator import add, mul, sub, truediv
 from typing import List, Tuple
 from enum import IntEnum
 
@@ -247,6 +247,9 @@ lower_vector_type_binops(
 )
 lower_vector_type_binops(
     mul, float3, [(float3, float3), (float32, float3), (float3, float32)]
+)
+lower_vector_type_binops(
+    truediv, float3, [(float3, float3), (float32, float3), (float3, float32)]
 )
 ## float2
 lower_vector_type_binops(

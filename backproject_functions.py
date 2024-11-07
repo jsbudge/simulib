@@ -1,7 +1,8 @@
 import numpy as np
+from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states
-
-from simulation_functions import llh2enu, db, genPulse
+import nvtx
+from simulation_functions import llh2enu, db
 from cuda_kernels import getMaxThreads, backproject, genRangeProfile, backprojectRegularGrid
 from grid_helper import SDREnvironment
 from platform_helper import SDRPlatform, RadarPlatform
@@ -191,7 +192,7 @@ def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndar
     if transform is None:
         backproject[bpg_bpj, threads_per_block](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu, elrx_gpu,
             panrx_gpu, elrx_gpu, rtdata, bpj_grid, wavelength, near_range_s, upsample_fs, az_half_bw, el_half_bw,
-            a_poly_num, pts_debug, angs_debug, a_debug)
+            a_poly_num)
         del gx_gpu
         del gy_gpu
     else:
@@ -217,6 +218,49 @@ def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndar
     cupy.get_default_pinned_memory_pool().free_all_blocks()
 
     return r_bpj_final
+
+@nvtx.annotate(color='red')
+def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray], elrx: list[np.ndarray], posrx: list[np.ndarray],
+                        postx: list[np.ndarray], gz: np.ndarray, wavelength: float, near_range_s: float, upsample_fs: float,
+                        az_half_bw: float, el_half_bw: float, gx: np.ndarray = None,
+                        gy: np.ndarray = None, a_debug: bool = False, a_poly_num: int = 0, streams: list[cuda.stream]=None) -> np.ndarray:
+    nbpj_pts = gz.shape
+
+    # Calculate out points on the ground
+    with cuda.defer_cleanup():
+        gx_gpu = cuda.to_device(gx)
+        gy_gpu = cuda.to_device(gy)
+        gz_gpu = cuda.to_device(gz)
+
+        # GPU device calculations
+        threads_per_block = getMaxThreads()
+        poss_threads = np.array([nbpj_pts[1] % n for n in range(1, threads_per_block[1])])
+        poss_pulse_threads = np.array([nbpj_pts[0] % n for n in range(1, threads_per_block[0])])
+        bpg_bpj = (max(1, nbpj_pts[0] // (np.max(np.where(poss_pulse_threads == poss_pulse_threads.min())[0]) + 1)),
+                 nbpj_pts[1] // (np.max(np.where(poss_threads == poss_threads.min())[0]) + 1))
+        # bpg_bpj = (max(1, nbpj_pts[0] // threads_per_block[0] + 1), nbpj_pts[1] // threads_per_block[1] + 1)
+
+        # Run through loop to get data simulated
+        # Data blocks for imaging
+        r_bpj = [np.zeros(nbpj_pts, dtype=np.complex128) for _ in panrx]
+        for az, el, prx, ptx, data, stream, rbj in zip(panrx, elrx, posrx, postx, pulse_data, streams, r_bpj):
+            with cuda.pinned(data, rbj):
+                panrx_gpu = cuda.to_device(az, stream=stream)
+                elrx_gpu = cuda.to_device(el, stream=stream)
+                posrx_gpu = cuda.to_device(prx, stream=stream)
+                postx_gpu = cuda.to_device(ptx, stream=stream)
+                bpj_grid = cuda.to_device(rbj, stream=stream)
+                rtdata = cuda.to_device(data, stream=stream)
+                backproject[bpg_bpj, threads_per_block, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu, elrx_gpu,
+                                                        panrx_gpu, elrx_gpu, rtdata, bpj_grid, wavelength, near_range_s,
+                                                        upsample_fs, az_half_bw, el_half_bw,
+                                                        a_poly_num)
+                bpj_grid.copy_to_host(rbj, stream=stream)
+                del panrx_gpu, elrx_gpu, posrx_gpu, postx_gpu, bpj_grid, rtdata
+        cuda.synchronize()
+    del gx_gpu, gy_gpu, gz_gpu
+
+    return np.sum(r_bpj, axis=0)
 
 def genSimPulseData(a_rp: RadarPlatform,
                     a_bg: SDREnvironment,

@@ -1,9 +1,7 @@
 import cmath
 import math
-from numba import cuda, njit
+from numba import cuda
 from numba.cuda.random import xoroshiro128p_uniform_float64
-from numpy.lib.utils import source
-
 from cuda_functions import make_float3, length
 from simulation_functions import findPowerOf2
 import numpy as np
@@ -279,12 +277,13 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
             cp = pulse_data[:, tt]
             # Get LOS vector in XYZ and spherical coordinates at pulse time
             # Tx first
-            s_xyz = make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2])
-            tx, tx_rng, t_az, t_el = getRangeAndAngles(gl, s_xyz)
+            # s_xyz = make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2])
+            tx_rng = length(gl - make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2]))
+            # _, tx_rng, t_az, t_el = getRangeAndAngles(gl, s_xyz)
 
             # Rx
-            r_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
-            rx, rx_rng, r_az, r_el = getRangeAndAngles(gl, r_xyz)
+            # r_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
+            _, rx_rng, r_az, r_el = getRangeAndAngles(gl, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
@@ -295,15 +294,14 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
             # Get index into range compressed data
             two_way_rng = tx_rng + rx_rng
             rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
-            bi0 = int(rng_bin)
-            bi1 = bi0 + 1
+            bi1 = int(rng_bin) + 1
             if bi1 >= n_samples or bi1 < 0:
                 continue
 
             # Attenuation of beam in elevation and azimuth
             # att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
             #                             bw_az, bw_el)
-            att = 1.
+            # att = 1.
             # Azimuth window to reduce sidelobes
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
@@ -315,34 +313,20 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
                 # This is how APS does it (for reference, I guess)
                 a = cp[bi1]
             elif poly == 1:
+                bi0 = bi1 - 1
                 # Linear interpolation between bins (slower but more accurate)
                 bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
                 bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
                 a = (cp[bi0] * (bi1_rng - tx_rng) + cp[bi1] * (tx_rng - bi0_rng)) \
                     / (bi1_rng - bi0_rng)
-            else:
-                # This is a lagrange polynomial interpolation of the specified order
-                ar = ai = 0
-                kspan = (poly + 1 if poly % 2 != 0 else poly) // 2
-                ks = max(bi0 - kspan, 0)
-                ke = bi0 + kspan + 1 if bi0 + kspan < n_samples else n_samples
-                for jdx in range(ks, ke):
-                    jrng = c0 / 2 * (jdx / source_fs + 2 * near_range_s)
-                    mm = 1
-                    for kdx in range(ks, ke):
-                        krng = c0 / 2 * (kdx / source_fs + 2 * near_range_s)
-                        if jdx != kdx:
-                            mm *= (tx_rng - krng) / (jrng - krng)
-                    ar += mm * cp[jdx].real
-                    ai += mm * cp[jdx].imag
-                a = ar + 1j * ai
 
             # Multiply by phase reference function, attenuation and azimuth window
             # if tt == 0:
             #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
-            exp_phase = k * two_way_rng
-            acc_val += a * cmath.exp(1j * exp_phase) * att * az_win
+            acc_val += a * cmath.exp(1j * k * two_way_rng) * az_win# * att
         final_grid[pcol, prow] = acc_val
+        # if pcol == 110 and prow == 110:
+        #     print(a.real, k, two_way_rng, att, az_win, acc_val.real, final_grid[pcol, prow].real)
 
 
 @cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
@@ -534,6 +518,6 @@ def getMaxThreads(pts_per_tri: int = 0):
     maxThreads = int(np.sqrt(gpuDevice.MAX_THREADS_PER_BLOCK))
     sqrtMaxThreads = maxThreads // 2
     if pts_per_tri <= 0:
-        return sqrtMaxThreads, sqrtMaxThreads
+        return sqrtMaxThreads * 2, sqrtMaxThreads
     sqrtMaxThreads = sqrtMaxThreads // pts_per_tri
     return sqrtMaxThreads, sqrtMaxThreads, pts_per_tri
