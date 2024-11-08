@@ -1,18 +1,18 @@
 import sys
 from numba import cuda
-sys.path.extend(['/home/jeff/repo/data_converter', '/home/jeff/repo/simulib'])
+from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
-from backproject_functions import getRadarAndEnvironment, backprojectPulseStream
-from simulation_functions import db, genChirp, upsamplePulse, llh2enu
-from mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh
+from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
+from simulib import db, genChirp, upsamplePulse, llh2enu
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
 import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
-from SDRParsing import load
+from sdrparse import load
 
 
 pio.renderers.default = 'browser'
@@ -60,7 +60,7 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 # gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 200, 100, nrows=800, ncols=400)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=800, ncols=400)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -68,7 +68,7 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=1000000)
+mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
 mesh_ids = np.asarray(mesh.triangle_material_ids)
@@ -147,7 +147,8 @@ try:
     mkss[12] = mkss[4] = .01  # windshield'''
     # msigmas[28] = 2
     box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=points_to_sample,
-                                                      material_sigmas=msigmas, material_kd=mkds, material_ks=mkss)
+                                                      material_sigmas=msigmas, material_kd=mkds, material_ks=mkss,
+                                                      view_pos=rp.txpos(rp.gpst[range(0, len(rp.gpst), 500)]))
 except ValueError:
     print('Error in getting material sigmas.')
     box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=points_to_sample)

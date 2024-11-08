@@ -3,7 +3,7 @@ from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
 
 from typing import Type
-from simulation_functions import llh2enu, findPowerOf2
+from .simulation_functions import llh2enu, findPowerOf2
 
 c0 = 299792458.0
 TAC = 125e6

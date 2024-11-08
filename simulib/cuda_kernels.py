@@ -2,8 +2,8 @@ import cmath
 import math
 from numba import cuda
 from numba.cuda.random import xoroshiro128p_uniform_float64
-from cuda_functions import make_float3, length
-from simulation_functions import findPowerOf2
+from .cuda_functions import make_float3, length
+from .simulation_functions import findPowerOf2
 import numpy as np
 
 c0 = 299792458.0

@@ -1,10 +1,10 @@
 import itertools
 from numba import cuda
-from cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt
-from simulation_functions import azelToVec
+from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints
+from .simulation_functions import azelToVec
 import numpy as np
 import open3d as o3d
-from cuda_kernels import getMaxThreads
+from .cuda_kernels import getMaxThreads
 import nvtx
 
 c0 = 299792458.0
@@ -52,26 +52,48 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
     mesh.normalize_normals()
     return mesh
 
-def splitBox(bounding_box):
+def splitBox(bounding_box, npo: np.ndarray = None):
     splits = np.zeros((8, 2, 3))
-    box_hull = np.array([bounding_box.min(axis=0), bounding_box.mean(axis=0), bounding_box.max(axis=0)])
+    if npo is not None:
+        try:
+            box_hull = np.array([npo.min(axis=0) - BOX_CUSHION, npo.mean(axis=0), npo.max(axis=0) + BOX_CUSHION])
+        except ValueError:
+            box_hull = np.zeros((3, 3))
+    else:
+        box_hull = np.array([bounding_box.min(axis=0) - BOX_CUSHION, bounding_box.mean(axis=0),
+                             bounding_box.max(axis=0) + BOX_CUSHION])
     for bidx, (x, y, z) in enumerate(itertools.product(range(2), range(2), range(2))):
-        splits[bidx, :] = np.array([[box_hull[x, 0] - BOX_CUSHION, box_hull[y, 1] - BOX_CUSHION, box_hull[z, 2] - BOX_CUSHION],
-                                                [box_hull[x + 1, 0] + BOX_CUSHION, box_hull[y + 1, 1] - BOX_CUSHION, box_hull[z + 1, 2] + BOX_CUSHION]]).reshape((2, 3))
+        try:
+            boxpo = npo[np.logical_and(npo[:, 0] >= box_hull[x, 0], npo[:, 0] <= box_hull[x + 1, 0]) &
+                         np.logical_and(npo[:, 1] >= box_hull[y, 1], npo[:, 1] <= box_hull[y + 1, 1]) &
+                         np.logical_and(npo[:, 2] >= box_hull[z, 2], npo[:, 2] <= box_hull[z + 1, 2])]
+            splits[bidx, :] = np.array([boxpo.min(axis=0) - BOX_CUSHION,
+                                        boxpo.max(axis=0) + BOX_CUSHION]).reshape((2, 3))
+        except ValueError:
+            splits[bidx, :] = np.zeros((2, 3))
+        # splits[bidx, :] = np.array([[box_hull[x, 0], box_hull[y, 1], box_hull[z, 2]],
+        #                             [box_hull[x + 1, 0], box_hull[y + 1, 1], box_hull[z + 1, 2]]]).reshape((2, 3))
     return splits
 
-def genOctree(bounding_box: np.ndarray, num_levels: int = 3):
+def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray = None):
     octree = np.zeros((sum(8**n for n in range(num_levels)), 2, 3))
     octree[0, ...] = bounding_box
     abs_idx = 1
+    npo = None
     for level in range(num_levels - 1):
         for parent in range(8**level):
-            octree[abs_idx:abs_idx + 8] = splitBox(octree[parent + sum(8**l for l in range(level))])
+            pbox = octree[parent + sum(8**l for l in range(level))]
+            if points is not None:
+                npo = points[np.logical_and(points[:, 0] > pbox[0, 0], points[:, 0] < pbox[1, 0]) &
+                             np.logical_and(points[:, 1] > pbox[0, 1], points[:, 1] < pbox[1, 1]) &
+                             np.logical_and(points[:, 2] > pbox[0, 2], points[:, 2] < pbox[1, 2])]
+            octree[abs_idx:abs_idx + 8] = splitBox(pbox, npo)
             abs_idx += 8
     return octree
 
 def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_box_levels: int=4, sample_points: int=10000,
-                            material_sigmas: list=None, material_kd: list=None, material_ks: list = None, view_pos: np.ndarray = None):
+                            material_sigmas: list=None, material_kd: list=None, material_ks: list = None,
+                            view_pos: np.ndarray = None, use_box_pts: bool = True):
     # Generate bounding box tree
     mesh_tri_idx = np.asarray(a_mesh.triangles)
     mesh_vertices = np.asarray(a_mesh.vertices)
@@ -82,7 +104,7 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_box_levels: i
     max_bound = aabb.get_max_bound()
     min_bound = aabb.get_min_bound()
     root_box = np.array([min_bound, max_bound])
-    boxes = genOctree(root_box, num_box_levels)
+    boxes = genOctree(root_box, num_box_levels, mesh_vertices if use_box_pts else None)
 
     mesh_box_idx = np.zeros((mesh_tri_idx.shape[0], len(boxes))).astype(bool)
     # Get the box index for each triangle, for exclusion in the GPU calculations
@@ -123,18 +145,27 @@ def getBoxesSamplesFromMesh(a_mesh: o3d.geometry.TriangleMesh, num_box_levels: i
     else:
         mesh_ks = np.array([material_ks[i] for i in np.asarray(a_mesh.triangle_material_ids)])
 
+    tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
+                                   mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
+
     # Sample the mesh to get points for initial raycasting
 
     # points = np.sum(mesh_tri_vertices / 3., axis=1)
     if view_pos is None:
         points = np.asarray(a_mesh.sample_points_poisson_disk(sample_points).points)
     else:
-        mpoint = mesh_vertices - view_pos
-        azes = np.arctan2(mpoint[:, 0], mpoint[:, 1])
-        eles = -np.arcsin(mpoint[:, 2] / np.linalg.norm(mpoint, axis=1))
-        points = azelToVec(np.random.uniform(azes.min(), azes.max(), sample_points), np.random.uniform(eles.min(), eles.max(), sample_points)).T
-    tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
-                                                  mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
+        # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
+        pvecs = a_mesh.get_center() - view_pos
+        pointing_az = np.arctan2(pvecs[:, 0], pvecs[:, 1])
+        pointing_el = -np.arcsin(pvecs[:, 2] / np.linalg.norm(pvecs, axis=1))
+        mesh_views = mesh_vertices[None, :, :] - view_pos[:, None, :]
+        view_az = np.arctan2(mesh_views[:, :, 0], mesh_views[:, :, 1])
+        view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
+        bw_az = abs(pointing_az[:, None] - view_az).max()
+        bw_el = abs(pointing_el[:, None] - view_el).max()
+        points = detectPoints(boxes, sorted_tri_idx[:, 1], mesh_idx_key, mesh_tri_idx, mesh_vertices, mesh_normals, tri_material,
+                     sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
+
     return (boxes, sorted_tri_idx[:, 1], mesh_idx_key, mesh_tri_idx, mesh_vertices, mesh_normals, tri_material), points
 
 @nvtx.annotate(color='blue')
@@ -231,3 +262,44 @@ def getRangeProfileFromMesh(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key:
         return final_rp, debug_rays, debug_raydirs, debug_raypower
     else:
         return final_rp
+
+
+def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray, tri_idxes: np.ndarray,
+                            tri_verts: np.ndarray, tri_norm: np.ndarray, tri_material: np.ndarray,
+                            npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, pointing_az, pointing_el):
+
+    # GPU device calculations
+    threads_per_block = getMaxThreads()
+    npulses = a_obs_pt.shape[0]
+    poss_threads = np.array([npoints % n for n in range(1, threads_per_block[1])])
+    poss_pulse_threads = np.array([npulses % n for n in range(1, threads_per_block[0])])
+    bprun = (max(1, npulses // (np.max(np.where(poss_pulse_threads == poss_pulse_threads.min())[0]) + 1)),
+             npoints // (np.max(np.where(poss_threads == poss_threads.min())[0]) + 1))
+
+    # These are the mesh constants that don't change with intersection points
+    tri_norm_gpu = cuda.to_device(tri_norm.astype(np.float64))
+    tri_idxes_gpu = cuda.to_device(tri_idxes.astype(np.int32))
+    tri_verts_gpu = cuda.to_device(tri_verts.astype(np.float64))
+    tri_material_gpu = cuda.to_device(tri_material.astype(np.float64))
+    tri_box_gpu = cuda.to_device(tri_box.astype(np.int32))
+    tri_box_key_gpu = cuda.to_device(tri_box_key.astype(np.int32))
+    boxes_gpu = cuda.to_device(boxes.astype(np.float64))
+
+    ray_origins_gpu = cuda.to_device(np.zeros((npulses, npoints, 3)))
+    receive_xyz_gpu = cuda.to_device(a_obs_pt)
+
+    # Calculate out direction vectors for the beam to hit
+    points = np.zeros((1, 3))
+    while len(points) < npoints:
+        ray_power_gpu = cuda.to_device(np.ones((npulses, npoints)))
+        rdirs = azelToVec(pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints)),
+                      pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints))).T.swapaxes(0, 1)
+        ray_dir_gpu = cuda.to_device(np.ascontiguousarray(rdirs))
+
+        calcIntersectionPoints[bprun, threads_per_block](ray_origins_gpu, ray_dir_gpu, ray_power_gpu, boxes_gpu, tri_box_gpu,
+                                                             tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
+                                                             tri_norm_gpu, tri_material_gpu, receive_xyz_gpu)
+        newpoints = ray_origins_gpu.copy_to_host()[ray_power_gpu.copy_to_host().astype(bool)]
+        points = newpoints if newpoints.shape[0] > npoints else np.concatenate((points, newpoints))
+
+    return points[:npoints, :]

@@ -1,9 +1,9 @@
 import cmath
 import math
-from cuda_functions import make_float3, cross, dot, length, normalize
+from .cuda_functions import make_float3, cross, dot, length, normalize
 from numba import cuda, prange
 import numpy as np
-from cuda_kernels import applyOneWayRadiationPattern
+from .cuda_kernels import applyOneWayRadiationPattern
 
 c0 = 299792458.0
 
@@ -271,4 +271,20 @@ def calcOriginDirAtt(rec_xyz, sample_points, pan, tilt, params, ray_dir, ray_ori
         ray_origin[tt, ray_idx, 2] = rec_xyz[tt, 2]
 
 
+@cuda.jit()
+def calcIntersectionPoints(ray_origin, ray_dir, ray_power, bounding_box, tri_box_idx, tri_box_key, tri_vert, tri_idx,
+                   tri_norm, tri_material, receive_xyz):
+    tt, ray_idx = cuda.grid(ndim=2)
+    if ray_idx < ray_dir.shape[1] and tt < ray_dir.shape[0]:
 
+        rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
+        rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
+        did_intersect, nrho, inter, rng, b = traverseOctreeAndIntersection(rec_xyz, rd, bounding_box, ray_power[tt, ray_idx], tri_box_idx,
+                                                                               tri_box_key, tri_idx, tri_vert,
+                                                                               tri_norm, tri_material, False)
+        if did_intersect:
+            ray_origin[tt, ray_idx, 0] = inter.x
+            ray_origin[tt, ray_idx, 1] = inter.y
+            ray_origin[tt, ray_idx, 2] = inter.z
+        else:
+            ray_power[tt, ray_idx] = 0.

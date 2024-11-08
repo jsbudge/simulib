@@ -1,5 +1,4 @@
 from io import BytesIO
-
 import numpy as np
 import requests
 from scipy.interpolate import interpn
@@ -12,7 +11,6 @@ import plotly.io as pio
 import os
 from functools import reduce
 from dted import Tile, LatLon
-from urllib.request import Request, urlopen, urlretrieve
 from PIL import Image
 
 pio.renderers.default = 'browser'
