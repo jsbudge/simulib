@@ -521,3 +521,12 @@ def getMaxThreads(pts_per_tri: int = 0):
         return sqrtMaxThreads * 2, sqrtMaxThreads
     sqrtMaxThreads = sqrtMaxThreads // pts_per_tri
     return sqrtMaxThreads, sqrtMaxThreads, pts_per_tri
+
+
+def optimizeThreadBlocks(threads_per_block, threads):
+    assert len(threads) == len(threads_per_block), 'threads dimension must equal threads_per_block dimension'
+    poss_configs = [np.array([th % n for n in range(1, tpb)]) for th, tpb in zip(threads, threads_per_block)]
+    return tuple(
+        max(1, th // (np.max(np.where(pc == pc.min())[0]) + 1))
+        for th, pc in zip(threads, poss_configs)
+    )

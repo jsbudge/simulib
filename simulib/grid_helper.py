@@ -1,4 +1,10 @@
+from typing import Tuple, Any
+
 import numpy as np
+from numpy import ndarray, dtype, bool_, unsignedinteger, signedinteger, floating, complexfloating, timedelta64, \
+    datetime64, float_
+from numpy._typing import _64Bit
+
 from .simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
 from scipy.spatial import Delaunay
 from scipy.interpolate import interpn
@@ -18,16 +24,16 @@ This is a class to represent the environment of a radar.
 
 
 class Environment(object):
-    _transforms: tuple
+    _transform: np.ndarray
     _refgrid: np.ndarray
     ref: np.ndarray
     origin: np.ndarray
 
-    def __init__(self, rmat=None, shift=None, reflectivity=None):
+    def __init__(self, rmat: np.ndarray = None, reflectivity: np.ndarray = None, **kwargs):
         if rmat is not None:
-            self.setGrid(reflectivity, rmat, shift)
+            self.setGrid(reflectivity, rmat)
 
-    def getGridParams(self, pos, width, height, npts, az=0.):
+    def getGridParams(self, pos: tuple[float], width: float, height: float, npts: tuple[int, int], az=0.) -> np.ndarray:
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
         corr_az = np.pi / 2 - az
         # Translation
@@ -44,15 +50,21 @@ class Environment(object):
         h_k = height / (npts[1] - 1)
         rmat = rmat.dot(np.diag([h_k, w_k, 1]))
 
-        return rmat, np.array([shift_x, shift_y])
+        return rmat
 
-    def getGrid(self, pos=None, width=None, height=None, nrows=0, ncols=0, az=0, use_elevation=True):
+    def getGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
+                ncols: int = 0, az: float = 0, use_elevation: bool = True) -> tuple[
+        ndarray[Any, dtype[bool_]], ndarray[Any, dtype[bool_]], ndarray[Any, dtype[floating[_64Bit] | float_]] |
+                                                                ndarray[Any, dtype[Any]]]:
         # This grid is independent of the refgrid or stored transforms
-        pos = self.origin if pos is None else pos
-        width = self.shape[0] if width is None else width
-        height = self.shape[1] if height is None else height
         npts = self.shape if nrows == 0 else (ncols, nrows)
-        rmat, (shift_x, shift_y) = self.getGridParams(pos, width, height, npts, az)
+        if pos is None and width is None and height is None and nrows == 0 and ncols == 0 and az == 0:
+            rmat = self.transforms
+        else:
+            pos = self.origin if pos is None else pos
+            width = self.shape[0] if width is None else width
+            height = self.shape[1] if height is None else height
+            rmat = self.getGridParams(pos, width, height, npts, az)
         gxx = np.linspace(npts[0] / 2, -npts[0] / 2, npts[0])
         gyy = np.linspace(-npts[1] / 2, npts[1] / 2, npts[1])
         gy, gx = np.meshgrid(gxx, gyy)
@@ -70,9 +82,10 @@ class Environment(object):
             gz = np.zeros(px.shape)
         return px, py, gz
 
-    def getRefGrid(self, pos=None, width=None, height=None, nrows=0, ncols=0, az=0):
-        x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az)
-        irmat = np.linalg.pinv(self._transforms[0])
+    def getRefGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
+                   ncols: int = 0, az: float = 0) -> np.ndarray:
+        x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az, True)
+        irmat = np.linalg.pinv(self._transform)
         px = self.shape[1] - (irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2)
         py = self.shape[0] - (irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2)
         pos_r = np.stack([px.ravel(), py.ravel()]).T
@@ -80,23 +93,23 @@ class Environment(object):
                         np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
                        fill_value=0).reshape(x.shape, order='C')
 
-    def setGrid(self, newgrid, rmat, shift):
+    def setGrid(self, newgrid: np.ndarray, rmat: np.ndarray) -> None:
         self._refgrid = newgrid
-        self._transforms = (rmat, shift)
+        self._transform = rmat
 
-    def resampleGrid(self, pos, width, height, nrows, ncols, az=0):
+    def resampleGrid(self, pos: tuple[float], width: float, height: float, nrows: int, ncols: int, az: float = 0) -> None:
         x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az)
-        irmat = np.linalg.pinv(self._transforms[0])
+        irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
         pos_r = np.stack([px.ravel(), py.ravel()]).T
         self.setGrid(interpn((np.arange(self.refgrid.shape[1]),
                               np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
                              fill_value=0).reshape(x.shape, order='C'),
-                     *self.getGridParams(pos, width, height, (nrows, ncols), az))
+                     self.getGridParams(pos, width, height, (nrows, ncols), az))
 
-    def sample(self, x, y):
-        irmat = np.linalg.pinv(self._transforms[0])
+    def sample(self, x: float, y: float) -> float:
+        irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
         pos_r = np.stack([px.ravel(), py.ravel()]).T
@@ -123,8 +136,8 @@ class Environment(object):
         """
         gx = px - self.shape[1] / 2
         gy = py - self.shape[0] / 2
-        pos_x = self._transforms[0][0, 0] * gx + self._transforms[0][0, 1] * gy + self._transforms[0][0, 2]
-        pos_y = self._transforms[0][1, 0] * gx + self._transforms[0][1, 1] * gy + self._transforms[0][1, 2]
+        pos_x = self._transform[0, 0] * gx + self._transform[0, 1] * gy + self._transform[0, 2]
+        pos_y = self._transform[1, 0] * gx + self._transform[1, 1] * gy + self._transform[1, 2]
         if not elevation:
             return np.array([pos_x, pos_y]).T
         lat, lon, _ = (
@@ -136,14 +149,18 @@ class Environment(object):
             np.array([pos_x, pos_y, getElevationMap(lat, lon) - self.ref[2]]).T)
 
     def getIndex(self, x: float, y: float) -> np.ndarray:
-        irmat = np.linalg.pinv(self._transforms[0])
+        irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
         return np.array([px, py])
 
-    def interp(self, x, y):
-        return interpn((np.arange(self.refgrid.shape[0]),
-                        np.arange(self.refgrid.shape[1])), self.refgrid, self.getIndex(x, y)).reshape(x.shape)
+    def interp(self, x: float | np.ndarray, y: float | np.ndarray) -> float | np.ndarray:
+        if isinstance(x, float):
+            return interpn((np.arange(self.refgrid.shape[0]),
+                            np.arange(self.refgrid.shape[1])), self.refgrid, self.getIndex(x, y))
+        else:
+            return interpn((np.arange(self.refgrid.shape[0]),
+                            np.arange(self.refgrid.shape[1])), self.refgrid, self.getIndex(x, y)).reshape(x.shape)
 
     @property
     def refgrid(self):
@@ -155,16 +172,17 @@ class Environment(object):
 
     @property
     def transforms(self):
-        return self._transforms
+        return self._transform
 
 
 class MapEnvironment(Environment):
 
-    def __init__(self, origin, extent, background):
+    def __init__(self, origin, extent, ref=None, background=None, az=0.):
         self.origin = origin
-        self.ref = origin
-        gp = getGridParams(origin, origin, extent[0], extent[1], background.shape)
-        super().__init__(gp[0], gp[1], background)
+        self.ref = origin if ref is None else ref
+        super().__init__()
+        bg = np.ones(extent) if background is None else background
+        self.setGrid(bg, self.getGridParams(origin, extent[0], extent[1], bg.shape, az=az))
 
 
 class SDREnvironment(Environment):
@@ -221,17 +239,17 @@ class SDREnvironment(Environment):
 
         grid = local_grid if local_grid is not None else grid
 
-        rmat, shift = self.getGridParams(self.origin, grid.shape[0] * self.cps, grid.shape[1] * self.rps, grid.shape,
+        rmat = self.getGridParams(self.origin, grid.shape[0] * self.cps, grid.shape[1] * self.rps, grid.shape,
                                          self.heading)
 
-        super().__init__(rmat=rmat, shift=shift, reflectivity=grid)
+        super().__init__(rmat=rmat, reflectivity=grid)
 
     @property
     def sdr(self):
         return self._sdr
 
 
-def mesh(ptx, pty, ref_im, tri_err, max_vertices, max_iters=20, minimize_vertices=True):
+def createMesh(ptx, pty, ref_im, tri_err, max_vertices, max_iters=20, minimize_vertices=True):
     # Generate a mesh using SVS metrics to make triangles in the right spots
 
     # Initial points are the four corners of the grid
@@ -288,28 +306,16 @@ def getGridParams(ref, pos, width, height, npts, az=0):
 
 
 if __name__ == '__main__':
-    from SDRParsing import load
+    bggrid = np.ones((200, 200))
+    bggrid[::50, ::50] = 100
+    test = MapEnvironment((40.011, -111.-11, 1380), (200, 300), background=bggrid, az=np.pi / 3)
     from simulation_functions import db
     import matplotlib.pyplot as plt
 
-    sdr = load('/data6/SAR_DATA/2023/08092023/SAR_08092023_112016.sar')
+    plt.figure()
+    plt.imshow(test.refgrid)
+    gx, gy, gz = test.getGrid()
 
-    bg = SDREnvironment(sdr)
-    plt.figure('Before')
-    plt.imshow(db(bg.refgrid), origin='lower', clim=[130, 160])
+    plt.figure()
+    plt.scatter(gx.flatten(), gy.flatten())
     plt.show()
-    plane_x = np.arange(100) * np.exp(1j * bg.heading).imag
-    plane_y = np.arange(100) * np.exp(1j * bg.heading).real
-
-    x, y, _ = bg.getGrid(width=1225.7, height=1038.25, nrows=4902, ncols=4153, az=bg.heading, use_elevation=False)
-    lx, ly, _ = bg.getGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, 20, 600, use_elevation=False)
-
-    plt.figure('Rel. Positions')
-    plt.scatter(plane_x, plane_y)
-    plt.scatter(x[::50, ::50].flatten(), y[::50, ::50].flatten())
-    plt.scatter(lx.flatten(), ly.flatten())
-
-    bg.resampleGrid([40.138538, -111.662090, 1365.8849123907273], 500, 200, 200, 600)
-    plt.figure('After')
-    plt.imshow(db(bg.refgrid), origin='lower', clim=[130, 160])
-    plt.axis('tight')

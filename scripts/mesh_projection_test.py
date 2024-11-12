@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.signal.windows import taylor
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
 from simulib import db, genChirp, upsamplePulse, llh2enu
-from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh, samplePoints
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -39,11 +39,12 @@ npulses = 32
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 2
+num_bounces = 1
 nbox_levels = 4
 nstreams = 5
 points_to_sample = 100000
 num_mesh_triangles = 1000000
+max_pts_per_run = 10000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -59,8 +60,8 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-# gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=1600, ncols=800)
+# gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -68,15 +69,20 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+mesh_ids = np.asarray(mesh.triangle_material_ids)
+
+'''mesh = readCombineMeshFile('/home/jeff/Documents/neighborhood/scene.gltf', points=3e9, scale=1.5)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
 mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
 # car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
 #                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
-car = readCombineMeshFile('/home/jeff/Documents/target_meshes/x-wing.obj',
-                           points=num_mesh_triangles, scale=1.)  # Has just over 500000 points in the file
+'''car = readCombineMeshFile('/home/jeff/Documents/target_meshes/helic.obj',
+                           points=num_mesh_triangles, scale=1 / 1.8)  # Has just over 500000 points in the file
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
 mesh_extent = car.get_max_bound() - car.get_min_bound()
@@ -84,7 +90,7 @@ car = car.translate(np.array([gx.mean(), gy.mean(), gz.mean() + mesh_extent[2] /
 mesh_ids = np.asarray(car.triangle_material_ids)
 mesh += car
 
-'''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/hangar.gltf', points=10000, scale=.8)
+building = readCombineMeshFile('/home/jeff/Documents/target_meshes/hangar.gltf', points=10000, scale=.8)
 building = building.translate(llh2enu(40.139670, -111.663759, 1380, bg.ref) + np.array([-10, -10, -6.]),
                               relative=False).rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, 42.51 * DTR])))
@@ -134,6 +140,7 @@ mf_chirp = fft_chirp.conj() * taytay
 
 # Load in boxes and meshes for speedup of ray tracing
 print('Loading mesh box structure...', end='')
+ptsam = min(points_to_sample, max_pts_per_run)
 try:
     msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
     '''msigmas[0] = msigmas[15] = .2  # seats
@@ -148,12 +155,13 @@ try:
     mkss[6] = mkss[13] = mkss[17] = 1.  # body
     mkss[12] = mkss[4] = .01  # windshield'''
     # msigmas[28] = 2
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=points_to_sample,
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=ptsam,
                                                       material_sigmas=msigmas, material_kd=mkds, material_ks=mkss,
                                                       view_pos=rp.txpos(rp.gpst[range(0, len(rp.gpst), 500)]))
 except ValueError:
     print('Error in getting material sigmas.')
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=points_to_sample)
+    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=ptsam,
+                                                      view_pos=rp.txpos(rp.gpst[range(0, len(rp.gpst), 500)]))
 print('Done.')
 
 boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
@@ -177,7 +185,7 @@ streams = [cuda.stream() for _ in range(nstreams)]
 # Single pulse for debugging
 print('Generating single pulse...')
 single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
-                                                                             [rp.txpos(data_t)],
+                                                                             [rp.txpos(data_t)], [rp.rxpos(data_t)],
                                                                              [rp.pan(data_t)], [rp.tilt(data_t)], radar_coeff,
                                                                              rp.az_half_bw, rp.el_half_bw,
                                                                              nsam, fc, near_range_s,
@@ -193,17 +201,25 @@ bpj_grid = np.zeros_like(gx).astype(np.complex128)
 print('Running main loop...')
 # Get the data into CPU memory for later
 # MAIN LOOP
-for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * (nstreams + 1)))):
-    txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-    rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-    pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-    tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-    trp = getRangeProfileFromMesh(*box_tree, sample_points, txposes, pans, tilts,
-                                  radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces, streams=streams)
-    mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
-    bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, txposes, rxposes, gz,
-                                        c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                        gx=gx, gy=gy, streams=streams)
+# If we need to split the point raster, do so
+if points_to_sample > max_pts_per_run:
+    splits = np.concatenate((np.arange(0, points_to_sample, max_pts_per_run), [points_to_sample]))
+else:
+    splits = np.array([0, points_to_sample])
+for s in range(len(splits) - 1):
+    if s > 0:
+        sample_points = samplePoints(mesh, rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), splits[s + 1] - splits[s], *box_tree)
+    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * (nstreams + 1)))):
+        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
+        rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
+        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
+        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
+        trp = getRangeProfileFromMesh(*box_tree, sample_points, txposes, rxposes, pans, tilts,
+                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces, streams=streams)
+        mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
+        bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, txposes, rxposes, gz,
+                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
+                                            gx=gx, gy=gy, streams=streams)
 
 
 def getMeshFig(title='Title Goes Here'):
@@ -228,6 +244,7 @@ def getMeshFig(title='Title Goes Here'):
     ])
     fig.update_layout(
         title=title,
+        scene=dict(zaxis=dict(range=[-30, 100])),
     )
     return fig
 
@@ -270,17 +287,21 @@ for bounce in range(len(ray_origins)):
 def drawbox(box):
     vertices = []
     for z in range(2):
-        vertices.append([box[0, 0], box[0, 1], box[z, 2]])
-        vertices.append([box[1, 0], box[0, 1], box[z, 2]])
-        vertices.append([box[1, 0], box[0, 1], box[int(not z), 2]])
-        vertices.append([box[1, 0], box[0, 1], box[z, 2]])
-        vertices.append([box[1, 0], box[1, 1], box[z, 2]])
-        vertices.append([box[1, 0], box[1, 1], box[int(not z), 2]])
-        vertices.append([box[1, 0], box[1, 1], box[z, 2]])
-        vertices.append([box[0, 0], box[1, 1], box[z, 2]])
-        vertices.append([box[0, 0], box[1, 1], box[int(not z), 2]])
-        vertices.append([box[0, 0], box[1, 1], box[z, 2]])
-        vertices.append([box[0, 0], box[0, 1], box[z, 2]])
+        vertices.extend(
+            (
+                [box[0, 0], box[0, 1], box[z, 2]],
+                [box[1, 0], box[0, 1], box[z, 2]],
+                [box[1, 0], box[0, 1], box[int(not z), 2]],
+                [box[1, 0], box[0, 1], box[z, 2]],
+                [box[1, 0], box[1, 1], box[z, 2]],
+                [box[1, 0], box[1, 1], box[int(not z), 2]],
+                [box[1, 0], box[1, 1], box[z, 2]],
+                [box[0, 0], box[1, 1], box[z, 2]],
+                [box[0, 0], box[1, 1], box[int(not z), 2]],
+                [box[0, 0], box[1, 1], box[z, 2]],
+                [box[0, 0], box[0, 1], box[z, 2]],
+            )
+        )
     vertices = np.array(vertices)
     return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
 
