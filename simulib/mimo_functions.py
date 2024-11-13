@@ -1,7 +1,9 @@
 import numpy as np
 from numba.cuda.random import create_xoroshiro128p_states
-from simulib import getMaxThreads, getPulseTimeGen, SDREnvironment, genRangeProfile, azelToVec
-from simulib.platform_helper import RadarPlatform
+from .cuda_kernels import getMaxThreads, genRangeProfile
+from .backproject_functions import getPulseTimeGen
+from .grid_helper import SDREnvironment
+from .platform_helper import RadarPlatform
 import cupy as cupy
 from scipy.signal.windows import taylor
 
@@ -171,100 +173,3 @@ def genSimPulseData(a_rp: RadarPlatform,
     del gx_gpu
     del gy_gpu
     del gz_gpu
-
-
-if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    from data_converter.SDRParsing import load
-    from simulib import llh2enu, db, genPulse
-
-    bg_fnme = '/home/jeff/SDR_DATA/ARCHIVE/05212024/SAR_05212024_123051.sar'
-    origin = (40.141223, -111.699440, 1378)
-    fs = 500e6
-    bwidth = 240e6
-    fc = 9.6e9
-
-    gimbal_offset = np.array([0, 0, 2.])
-    gimbal_rotation = np.array([0., 0., np.pi / 2])
-    gps_times = np.arange(0, 5, .01)
-    e = np.linspace(388., -875, len(gps_times))
-    n = np.linspace(373.84, -874.26, len(gps_times))
-    u = np.linspace(1500, 1524., len(gps_times))
-    r = np.zeros_like(e)
-    p = np.zeros_like(e)
-    y = np.zeros_like(e) + 3.9355
-
-    bg = SDREnvironment(load(bg_fnme, progress_tracker=True, use_jump_correction=False), origin=origin)
-    origin_enu = llh2enu(*origin, bg.ref)
-    gim_pan = np.zeros_like(e)
-    gim_el = np.zeros_like(gim_pan) + np.arccos((u - origin_enu[2]) /
-                                                np.sqrt((e - origin_enu[0])**2 +
-                                                        (n - origin_enu[1])**2 +
-                                                        (u - origin_enu[2])**2))
-    gimbal = np.array([gim_pan, gim_el]).T
-
-    tx_array = np.array([[1., 0, 0], [-1., 0, 0]])
-    rx_array = np.array([[0, 1., 0], [0, -1., 0]])
-    rpi, rps, vx_array = genChannels(2, 2, tx_array, rx_array, e, n, u, r, p, y, gps_times, gimbal,
-                                     gimbal_offset, gimbal_rotation, 30, 5 * DTR, 5 * DTR, fs, RadarPlatform)
-    nsam, nr, ranges, ranges_sampled, near_range_s, granges, p_fft_len, _ = (
-        rpi.getRadarParams(u.mean(), .5, 1))
-
-    ublock = -azelToVec(np.pi / 2, 0)
-    fine_ucavec = np.exp(1j * 2 * np.pi / (c0 / fc) * vx_array.dot(ublock))
-
-    waves = np.array([genPulse(np.linspace(0, 1, 10),
-                               np.linspace(0, 1, 10), nr, fs, fc, bwidth),
-                      genPulse(np.linspace(0, 1, 10),
-                               np.linspace(1, 0, 10), nr, fs, fc, bwidth)])
-    waves = np.fft.fft(waves, p_fft_len, axis=1)
-    second_waves = np.fft.fft(np.random.random(waves.shape) + 1j * np.random.random(waves.shape), axis=1)
-
-    win, chirp, mfilt = genChirpAndMatchedFilters(waves, rps, bwidth, fs, fc, p_fft_len)
-
-    collect_times = np.linspace(0, 5, 1288 * 5)
-
-    data_gen = genSimPulseData(rpi, rps, bg, u.mean(), a_grid_width=200, a_grid_height=200,
-                               a_pulse_times=collect_times, a_chirp=chirp, a_cpi_len=128,
-                               a_bpj_wavelength=c0 / fc, a_origin=origin, a_noise_level=-300, a_debug=True)
-
-    plt.ion()
-    for idx, (chirp, pdata) in enumerate(data_gen):
-        try:
-            compressed_data = np.sum([np.fft.ifft(pdata[rp.tx_num] * mfilt[ch_idx].get(), axis=1)[:, :nsam] *
-                                      fine_ucavec[ch_idx] for ch_idx, rp in enumerate(rps)], axis=0)
-            compressed_data = np.fft.fft(compressed_data, axis=0)
-            plt.gca().cla()
-            plt.imshow(db(compressed_data))
-            plt.axis('tight')
-            plt.title(f'CPI {idx}')
-            plt.draw()
-            plt.pause(0.1)
-            if idx == 17:
-                # win, sec_chirp, mfilt = genChirpAndMatchedFilters(second_waves, rps, bwidth, fs, fc, p_fft_len)
-                data_gen.send((chirp, pdata))
-        except KeyboardInterrupt:
-            break
-'''def multiplier():
-    print("top of generator")
-    m = yield # nothing to yield the first time, just a value we get
-    print("before loop, m =", m)
-    while True:
-        print("top of loop, m =", m)
-        m = yield m * 2, m * 3         # we always care about the value we're sent
-        print("bottom of loop, m =", m)
-
-print("calling generator")
-it = multiplier()
-
-print("calling next")
-next(it)   # this is equivalent to it.send(None)
-
-print("sending 10")
-print(it.send(10))
-
-print("sending 20")
-print(it.send(20))
-
-print("sending 100")
-print(it.send(100))'''

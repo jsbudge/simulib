@@ -39,12 +39,12 @@ npulses = 32
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 1
-nbox_levels = 4
+num_bounces = 2
+nbox_levels = 5
 nstreams = 5
 points_to_sample = 100000
 num_mesh_triangles = 1000000
-max_pts_per_run = 10000
+max_pts_per_run = 100000
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
@@ -61,7 +61,7 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 # gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=400, ncols=200)
+gx, gy, gz = bg.getGrid(grid_origin, 800, 800, nrows=1600, ncols=1600)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -69,15 +69,17 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
-mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)
-
-'''mesh = readCombineMeshFile('/home/jeff/Documents/neighborhood/scene.gltf', points=3e9, scale=1.5)
+'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
 mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+
+mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
+mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
+mesh = mesh.crop(o3d.geometry.AxisAlignedBoundingBox().create_from_points(o3d.utility.Vector3dVector(np.array([[-400, -400, -400],[400, 400, 400]]))))
+mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+mesh_ids = np.asarray(mesh.triangle_material_ids)
 
 # car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
 #                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
@@ -222,7 +224,7 @@ for s in range(len(splits) - 1):
                                             gx=gx, gy=gy, streams=streams)
 
 
-def getMeshFig(title='Title Goes Here'):
+def getMeshFig(title='Title Goes Here', zrange=100):
     fig = go.Figure(data=[
         go.Mesh3d(
             x=box_tree[4][:, 0],
@@ -244,7 +246,7 @@ def getMeshFig(title='Title Goes Here'):
     ])
     fig.update_layout(
         title=title,
-        scene=dict(zaxis=dict(range=[-30, 100])),
+        scene=dict(zaxis=dict(range=[-30, zrange])),
     )
     return fig
 
@@ -269,7 +271,8 @@ sc_min = scaling[0] - 1e-3
 sc = 1 / (scaling[1] - scaling[0])
 scaled_rp = (ray_powers[0] - sc_min) * sc
 
-fig = getMeshFig('Full Mesh')
+fig = getMeshFig('Full Mesh', flight_path[:, 2].mean() + 10)
+fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
 fig.show()
 
 bounce_colors = ['blue', 'red', 'green', 'yellow']
