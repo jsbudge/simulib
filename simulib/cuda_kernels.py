@@ -24,11 +24,6 @@ def cpudiff(x, y):
 
 
 @cuda.jit(device=True)
-def dot(ax, ay, az, bx, by, bz):
-    return ax * bx + ay * by + az * bz
-
-
-@cuda.jit(device=True)
 def raisedCosine(x, bw, a0):
     """
     Raised Cosine windowing function.
@@ -50,7 +45,7 @@ def getRangeAndAngles(v, s):
     return t, rng, az, el
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, fastmath=True)
 def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     """
     Applies a very simple sinc radiation pattern.
@@ -67,16 +62,18 @@ def applyRadiationPattern(el_c, az_c, az_rx, el_rx, az_tx, el_tx, bw_az, bw_el):
     a = np.pi / bw_az
     b = np.pi / bw_el
     # Abs shouldn't be a problem since the pattern is symmetrical about zero
-    eldiff = max(1e-9, abs(diff(el_c, el_tx)))
-    azdiff = max(1e-9, abs(diff(az_c, az_tx)))
-    tx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
-    eldiff = max(1e-9, abs(diff(el_c, el_rx)))
-    azdiff = max(1e-9, abs(diff(az_c, az_rx)))
-    rx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
+    eldiff = diff(el_c, el_rx)
+    azdiff = diff(az_c, az_rx)
+    # rx_pat = math.sin(a * azdiff) * math.sin(b * eldiff) / (cuda.fma(a, azdiff, 1e-9) + cuda.fma(b, eldiff, 1e-9))
+    rx_pat = math.sin(a * azdiff) / cuda.fma(a, azdiff, 1e-9) * math.sin(b * eldiff) / cuda.fma(b, eldiff, 1e-9)
+    eldiff = diff(el_c, el_tx)
+    azdiff = diff(az_c, az_tx)
+    # rx_pat = math.sin(a * azdiff) * math.sin(b * eldiff) / (cuda.fma(a, azdiff, 1e-9) + cuda.fma(b, eldiff, 1e-9))
+    tx_pat = math.sin(a * azdiff) / cuda.fma(a, azdiff, 1e-9) * math.sin(b * eldiff) / cuda.fma(b, eldiff, 1e-9)
     return tx_pat * tx_pat * rx_pat * rx_pat
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, fastmath=True)
 def applyOneWayRadiationPattern(el_c, az_c, az_rx, el_rx, bw_az, bw_el):
     """
     Applies a very simple sinc radiation pattern.
@@ -91,9 +88,11 @@ def applyOneWayRadiationPattern(el_c, az_c, az_rx, el_rx, bw_az, bw_el):
     a = np.pi / bw_az
     b = np.pi / bw_el
     # Abs shouldn't be a problem since the pattern is symmetrical about zero
-    eldiff = max(1e-9, abs(diff(el_c, el_rx)))
-    azdiff = max(1e-9, abs(diff(az_c, az_rx)))
-    rx_pat = abs(math.sin(a * azdiff) / (a * azdiff)) * abs(math.sin(b * eldiff) / (b * eldiff))
+    eldiff = diff(el_c, el_rx)
+    azdiff = diff(az_c, az_rx)
+    # rx_pat = math.sin(a * azdiff) * math.sin(b * eldiff) / (cuda.fma(a, azdiff, 1e-9) + cuda.fma(b, eldiff, 1e-9))
+    rx_pat = math.sin(a * azdiff) / cuda.fma(a, azdiff, 1e-9) * math.sin(b * eldiff) / cuda.fma(b, eldiff, 1e-9)
+    # rx_pat = math.sin(a * azdiff) / (a * azdiff) * math.sin(b * eldiff) / (b * eldiff)
     return rx_pat * rx_pat
 
 
@@ -231,9 +230,7 @@ def genRangeProfile(gx, gy, vgz, vert_reflectivity,
             cuda.syncthreads()
 
 
-@cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
-          'float64[:], float64[:], float64[:], complex128[:, :], complex128[:, :], float64, float64, float64, float64, '
-          'float64, int32)')
+@cuda.jit()
 def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, pulse_data, final_grid,
                 wavelength, near_range_s, source_fs, bw_az, bw_el, poly):
     """
@@ -274,56 +271,47 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
 
         # Grab pulse data and sum up for this pixel
         for tt in range(nPulses):
-            cp = pulse_data[:, tt]
             # Get LOS vector in XYZ and spherical coordinates at pulse time
             # Tx first
-            # s_xyz = make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2])
             tx_rng = length(gl - make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2]))
-            # _, tx_rng, t_az, t_el = getRangeAndAngles(gl, s_xyz)
 
             # Rx
-            # r_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
             _, rx_rng, r_az, r_el = getRangeAndAngles(gl, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
 
             # Check to see if it's outside of our beam
             az_diffrx = diff(r_az, panrx[tt])
-            el_diffrx = diff(r_el, elrx[tt])
-            if (abs(az_diffrx) > bw_az) or (abs(el_diffrx) > bw_el):
+            if (abs(az_diffrx) > bw_az) or (abs(diff(r_el, elrx[tt])) > bw_el):
                 continue
 
             # Get index into range compressed data
-            two_way_rng = tx_rng + rx_rng
-            rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
-            bi1 = int(rng_bin) + 1
+            bi1 = int(((tx_rng + rx_rng) / c0 - 2 * near_range_s) * source_fs) + 1
             if bi1 >= n_samples or bi1 < 0:
                 continue
 
             # Attenuation of beam in elevation and azimuth
-            # att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-            #                             bw_az, bw_el)
+            att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
+                                        bw_az, bw_el)
             # att = 1.
             # Azimuth window to reduce sidelobes
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
-            az_win = raisedCosine(az_diffrx, bw_az, .5)
-            # az_win = 1.
 
             if poly == 0:
                 # This is how APS does it (for reference, I guess)
-                a = cp[bi1]
+                a = pulse_data[bi1, tt]
             elif poly == 1:
                 bi0 = bi1 - 1
                 # Linear interpolation between bins (slower but more accurate)
                 bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
                 bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
-                a = (cp[bi0] * (bi1_rng - tx_rng) + cp[bi1] * (tx_rng - bi0_rng)) \
+                a = (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
                     / (bi1_rng - bi0_rng)
 
             # Multiply by phase reference function, attenuation and azimuth window
             # if tt == 0:
             #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
-            acc_val += a * cmath.exp(1j * k * two_way_rng) * az_win# * att
+            acc_val += a * cmath.exp(1j * k * (tx_rng + rx_rng))#  * raisedCosine(az_diffrx, bw_az, .5) * att
         final_grid[pcol, prow] = acc_val
         # if pcol == 110 and prow == 110:
         #     print(a.real, k, two_way_rng, att, az_win, acc_val.real, final_grid[pcol, prow].real)

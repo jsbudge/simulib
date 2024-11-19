@@ -334,7 +334,11 @@ def genTaylorWindow(baseband_fc: float, half_bw: float, fs: float, fft_len: int,
         bandStartInd = \
             int(np.floor((baseband_fc - half_bw) / fs * fft_len))
         taylorWindowExtended = np.zeros(fft_len)
-        taylorWindowExtended[bandStartInd: bandStartInd + windowSize] = taylorWindow
+        if bandStartInd + windowSize > fft_len:
+            taylorWindowExtended[bandStartInd:] = taylorWindow[:fft_len - bandStartInd]
+            taylorWindowExtended[:windowSize - (fft_len - bandStartInd)] = taylorWindow[fft_len - bandStartInd:]
+        else:
+            taylorWindowExtended[bandStartInd: bandStartInd + windowSize] = taylorWindow
     return taylorWindowExtended
 
 

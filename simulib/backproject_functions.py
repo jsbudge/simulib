@@ -2,12 +2,14 @@ import numpy as np
 from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states
 import nvtx
-from .cuda_kernels import getMaxThreads, backproject, genRangeProfile, backprojectRegularGrid, optimizeThreadBlocks
+from .cuda_kernels import getMaxThreads, backproject, genRangeProfile, optimizeThreadBlocks
 from .grid_helper import SDREnvironment
 from .platform_helper import SDRPlatform, RadarPlatform
 import cupy
 from tqdm import tqdm
 from sdrparse import load, SDRParse
+
+_float = np.float32
 
 
 def applyRangeRolloff(bpj_truedata):
@@ -66,16 +68,16 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
 
     # Calculate out points on the ground
     gx, gy, gz = a_bg.getGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
-    gx_gpu = cupy.array(gx, dtype=np.float64)
-    gy_gpu = cupy.array(gy, dtype=np.float64)
-    gz_gpu = cupy.array(gz, dtype=np.float64)
+    gx_gpu = cupy.array(gx, dtype=_float)
+    gy_gpu = cupy.array(gy, dtype=_float)
+    gz_gpu = cupy.array(gz, dtype=_float)
 
     if a_debug:
-        pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
-        angs_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
+        pts_debug = cupy.zeros((3, *gx.shape), dtype=_float)
+        angs_debug = cupy.zeros((3, *gx.shape), dtype=_float)
     else:
-        pts_debug = cupy.zeros((1, 1), dtype=np.float64)
-        angs_debug = cupy.zeros((1, 1), dtype=np.float64)
+        pts_debug = cupy.zeros((1, 1), dtype=_float)
+        angs_debug = cupy.zeros((1, 1), dtype=_float)
 
     # GPU device calculations
     threads_per_block = getMaxThreads()
@@ -89,10 +91,10 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
     r_bpj_final = np.zeros(nbpj_pts, dtype=np.complex128)
     for ts, frames in getPulseTimeGen(a_sdr[a_channel].pulse_time, a_sdr[a_channel].frame_num, a_cpi_len, True):
         tmp_len = len(ts)
-        panrx_gpu = cupy.array(a_rp.pan(ts), dtype=np.float64)
-        elrx_gpu = cupy.array(a_rp.tilt(ts), dtype=np.float64)
-        posrx_gpu = cupy.array(a_rp.rxpos(ts), dtype=np.float64)
-        postx_gpu = cupy.array(a_rp.txpos(ts), dtype=np.float64)
+        panrx_gpu = cupy.array(a_rp.pan(ts), dtype=_float)
+        elrx_gpu = cupy.array(a_rp.tilt(ts), dtype=_float)
+        posrx_gpu = cupy.array(a_rp.rxpos(ts), dtype=_float)
+        postx_gpu = cupy.array(a_rp.txpos(ts), dtype=_float)
         bpj_grid = cupy.zeros(nbpj_pts, dtype=np.complex128)
 
         # Reset the grid for truth data
@@ -254,17 +256,17 @@ def genSimPulseData(a_rp: RadarPlatform,
     # Calculate out points on the ground
     gx, gy, gz = a_bg.getGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
     rg = a_bg.getRefGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
-    gx_gpu = cupy.array(gx, dtype=np.float64)
-    gy_gpu = cupy.array(gy, dtype=np.float64)
-    gz_gpu = cupy.array(gz, dtype=np.float64)
-    refgrid_gpu = cupy.array(rg, dtype=np.float64)
+    gx_gpu = cupy.array(gx, dtype=_float)
+    gy_gpu = cupy.array(gy, dtype=_float)
+    gz_gpu = cupy.array(gz, dtype=_float)
+    refgrid_gpu = cupy.array(rg, dtype=_float)
 
     if a_debug:
-        pts_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
-        angs_debug = cupy.zeros((3, *gx.shape), dtype=np.float64)
+        pts_debug = cupy.zeros((3, *gx.shape), dtype=_float)
+        angs_debug = cupy.zeros((3, *gx.shape), dtype=_float)
     else:
-        pts_debug = cupy.zeros((1, 1), dtype=np.float64)
-        angs_debug = cupy.zeros((1, 1), dtype=np.float64)
+        pts_debug = cupy.zeros((1, 1), dtype=_float)
+        angs_debug = cupy.zeros((1, 1), dtype=_float)
 
     # GPU device calculations
     threads_per_block = getMaxThreads()
@@ -282,12 +284,12 @@ def genSimPulseData(a_rp: RadarPlatform,
     frame_idx = a_sdr[a_channel].frame_num if a_sdr else np.arange(len(dt))
     for ts, frames in getPulseTimeGen(dt, frame_idx, a_cpi_len, True):
         tmp_len = len(ts)
-        panrx_gpu = cupy.array(a_rp.pan(ts), dtype=np.float64)
-        elrx_gpu = cupy.array(a_rp.tilt(ts), dtype=np.float64)
-        posrx_gpu = cupy.array(a_rp.rxpos(ts), dtype=np.float64)
-        postx_gpu = cupy.array(a_rp.txpos(ts), dtype=np.float64)
-        pd_r = cupy.zeros((nsam, tmp_len), dtype=np.float64)
-        pd_i = cupy.zeros((nsam, tmp_len), dtype=np.float64)
+        panrx_gpu = cupy.array(a_rp.pan(ts), dtype=_float)
+        elrx_gpu = cupy.array(a_rp.tilt(ts), dtype=_float)
+        posrx_gpu = cupy.array(a_rp.rxpos(ts), dtype=_float)
+        postx_gpu = cupy.array(a_rp.txpos(ts), dtype=_float)
+        pd_r = cupy.zeros((nsam, tmp_len), dtype=_float)
+        pd_i = cupy.zeros((nsam, tmp_len), dtype=_float)
 
         genRangeProfile[bpg_bpj, threads_per_block](gx_gpu, gy_gpu, gz_gpu, refgrid_gpu, postx_gpu, posrx_gpu,
                                                     panrx_gpu, elrx_gpu, panrx_gpu, elrx_gpu, pd_r, pd_i,

@@ -1,11 +1,10 @@
-import sys
 from numba import cuda
-from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
-from scipy.signal.windows import taylor
+from scipy.spatial import Delaunay
+
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
-from simulib import db, genChirp, upsamplePulse, llh2enu
-from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getBoxesSamplesFromMesh, samplePoints
+from simulib import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -14,6 +13,7 @@ import plotly.io as pio
 import plotly.graph_objects as go
 from sdrparse import load
 
+from simulib.mesh_objects import Mesh
 
 pio.renderers.default = 'browser'
 
@@ -34,22 +34,21 @@ rx_gain = 22  # dB
 tx_gain = 22  # dB
 rec_gain = 100  # dB
 ant_transmit_power = 100  # watts
-noise_power_db = -80
+noise_power_db = -120
 npulses = 32
 plp = .75
 fdelay = 10.
 upsample = 4
-num_bounces = 2
+num_bounces = 1
 nbox_levels = 5
-nstreams = 5
-points_to_sample = 100000
+nstreams = 1
+points_to_sample = 2**16
 num_mesh_triangles = 1000000
-max_pts_per_run = 100000
+max_pts_per_run = 2**16
 grid_origin = (40.139343, -111.663541, 1360.10812)
 fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
 
 # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
-
 
 sdr_f = load(fnme)
 bg, rp = getRadarAndEnvironment(sdr_f)
@@ -61,7 +60,7 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 # gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 800, 800, nrows=1600, ncols=1600)
+gx, gy, gz = bg.getGrid(grid_origin, 512, 512, nrows=1024, ncols=1024)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -69,37 +68,47 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
-mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)'''
-
-mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
-mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
-mesh = mesh.crop(o3d.geometry.AxisAlignedBoundingBox().create_from_points(o3d.utility.Vector3dVector(np.array([[-400, -400, -400],[400, 400, 400]]))))
+mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
 mesh_ids = np.asarray(mesh.triangle_material_ids)
 
-# car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
-#                            points=num_mesh_triangles, scale=.6)  # Has just over 500000 points in the file
-'''car = readCombineMeshFile('/home/jeff/Documents/target_meshes/helic.obj',
-                           points=num_mesh_triangles, scale=1 / 1.8)  # Has just over 500000 points in the file
+'''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
+mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
+mesh = mesh.crop(o3d.geometry.AxisAlignedBoundingBox().create_from_points(o3d.utility.Vector3dVector(np.array([[-400, -400, -400],[400, 400, 400]]))))
+mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+
+'''mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6)
+mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
+mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+
+'''mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=30000000)
+# mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+mesh_ids = np.asarray(mesh.triangle_material_ids)
+triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
+
+
+'''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+                           points=num_mesh_triangles)  # Has just over 500000 points in the file
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
 mesh_extent = car.get_max_bound() - car.get_min_bound()
-car = car.translate(np.array([gx.mean(), gy.mean(), gz.mean() + mesh_extent[2] / 2]), relative=False)
+car = car.translate(np.array([gx.mean() + 1.5, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2]), relative=False)
 mesh_ids = np.asarray(car.triangle_material_ids)
 mesh += car
 
-building = readCombineMeshFile('/home/jeff/Documents/target_meshes/hangar.gltf', points=10000, scale=.8)
+building = readCombineMeshFile('/home/jeff/Documents/target_meshes/hangar.gltf', points=1e9, scale=.8)
 building = building.translate(llh2enu(40.139670, -111.663759, 1380, bg.ref) + np.array([-10, -10, -6.]),
                               relative=False).rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, 42.51 * DTR])))
 mesh_ids = np.concatenate((mesh_ids, np.asarray(building.triangle_material_ids) + mesh_ids.max()))
 mesh += building
 
-gpx, gpy, gpz = bg.getGrid(grid_origin, 201, 199, nrows=201, ncols=199, az=-68.5715881976 * DTR)
+gpx, gpy, gpz = bg.getGrid(grid_origin, 201 / 2, 199 / 2, nrows=201, ncols=199, az=-68.5715881976 * DTR)
 gnd_points = np.array([gpx.flatten(), gpy.flatten(), gpz.flatten()]).T
 gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
 gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
@@ -128,15 +137,13 @@ print('Done.')
 # This is all the constants in the radar equation for this simulation
 radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
                10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
-noise_power = 0  # 10**(noise_power_db / 10)
+noise_power = 0  #10**(noise_power_db / 10)
 
 # Generate a chirp
-chirp = genChirp(nr, fs, fc, 400e6)
+chirp_bandwidth = 400e6
+chirp = genChirp(nr, fs, fc, chirp_bandwidth)
 fft_chirp = np.fft.fft(chirp, fft_len)
-twin = taylor(int(np.round(400e6 / fs * fft_len)))
-taytay = np.zeros(fft_len, dtype=np.complex128)
-winloc = int((fc % fs) * fft_len / fs) - len(twin) // 2
-taytay[winloc:winloc + len(twin)] += twin
+taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
 mf_chirp = fft_chirp.conj() * taytay
 
 
@@ -146,8 +153,8 @@ ptsam = min(points_to_sample, max_pts_per_run)
 try:
     msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
     '''msigmas[0] = msigmas[15] = .2  # seats
-    msigmas[6] = msigmas[13] = msigmas[17] = .02  # body
-    msigmas[12] = msigmas[4] = 1.  # windshield'''
+    msigmas[6] = msigmas[13] = msigmas[17] = .2  # body
+    msigmas[12] = msigmas[4] = .02  # windshield'''
     mkds = [.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
     '''mkds[0] = mkds[15] = 1.  # seats
     mkds[6] = mkds[13] = mkds[17] = 1.  # body
@@ -157,14 +164,15 @@ try:
     mkss[6] = mkss[13] = mkss[17] = 1.  # body
     mkss[12] = mkss[4] = .01  # windshield'''
     # msigmas[28] = 2
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=ptsam,
-                                                      material_sigmas=msigmas, material_kd=mkds, material_ks=mkss,
-                                                      view_pos=rp.txpos(rp.gpst[range(0, len(rp.gpst), 500)]))
+    mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss, octree_perspective=rp.txpos(data_t).mean(axis=0))
 except ValueError:
     print('Error in getting material sigmas.')
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_box_levels=nbox_levels, sample_points=ptsam,
-                                                      view_pos=rp.txpos(rp.gpst[range(0, len(rp.gpst), 500)]))
+    mesh = Mesh(mesh, num_box_levels=nbox_levels, octree_perspective=rp.txpos(data_t).mean(axis=0))
+except IndexError:
+    mesh = Mesh(mesh, num_box_levels=nbox_levels, octree_perspective=rp.txpos(data_t).mean(axis=0))
 print('Done.')
+
+sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
 
 boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
 pointing_az = np.arctan2(boresight[0], boresight[1])
@@ -181,18 +189,19 @@ vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
                  pmin[2] - flight_path[:, 2]]).T
 pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
 min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
-pulse_lims = [min(min(max_pts), min(min_pts)) - 1000, max(max(max_pts), max(min_pts)) + 1000]
+pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr_f[0].frame_num[-1])]
+# pulse_lims = [0, sdr_f[0].nframes]
 streams = [cuda.stream() for _ in range(nstreams)]
 
 # Single pulse for debugging
 print('Generating single pulse...')
-single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(*box_tree, sample_points,
-                                                                             [rp.txpos(data_t)], [rp.rxpos(data_t)],
-                                                                             [rp.pan(data_t)], [rp.tilt(data_t)], radar_coeff,
+single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(mesh, ptsam,
+                                                                             [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
+                                                                             [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                              rp.az_half_bw, rp.el_half_bw,
                                                                              nsam, fc, near_range_s,
                                                                              num_bounces=num_bounces,
-                                                                             debug=True, streams=streams)
+                                                                             debug=True, streams=streams, sampled_points=sample_points)
 single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                              is_freq=True, time_len=nsam)
 single_mf_pulse = upsamplePulse(
@@ -210,37 +219,31 @@ else:
     splits = np.array([0, points_to_sample])
 for s in range(len(splits) - 1):
     if s > 0:
-        sample_points = samplePoints(mesh, rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), splits[s + 1] - splits[s], *box_tree)
+        sample_points = mesh.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
     for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * (nstreams + 1)))):
-        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-        rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(np.float64) for n in range(nstreams)]
-        trp = getRangeProfileFromMesh(*box_tree, sample_points, txposes, rxposes, pans, tilts,
-                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces, streams=streams)
+        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
+        rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
+        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
+        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
+        trp = getRangeProfileFromMesh(mesh, int(splits[s + 1] - splits[s]), txposes, rxposes, pans, tilts,
+                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces, streams=streams, sampled_points=sample_points)
         mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
-        bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, txposes, rxposes, gz,
+        bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                            gx=gx, gy=gy, streams=streams)
+                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
 
 
 def getMeshFig(title='Title Goes Here', zrange=100):
     fig = go.Figure(data=[
         go.Mesh3d(
-            x=box_tree[4][:, 0],
-            y=box_tree[4][:, 1],
-            z=box_tree[4][:, 2],
-            colorscale=[[0, 'gold'],
-                        [0.5, 'mediumturquoise'],
-                        [1, 'magenta']],
-            # Intensity of each vertex, which will be interpolated and color-coded
-            # intensity=point_rng / point_rng.max(),
+            x=mesh.vertices[:, 0],
+            y=mesh.vertices[:, 1],
+            z=mesh.vertices[:, 2],
             # i, j and k give the vertices of triangles
-            # here we represent the 4 triangles of the tetrahedron surface
-            i=box_tree[3][:, 0],
-            j=box_tree[3][:, 1],
-            k=box_tree[3][:, 2],
-            name='y',
+            i=mesh.tri_idx[:, 0],
+            j=mesh.tri_idx[:, 1],
+            k=mesh.tri_idx[:, 2],
+            # facecolor=triangle_colors,
             showscale=True
         )
     ])
@@ -255,7 +258,11 @@ px.scatter(db(single_pulse[0].flatten())).show()
 px.scatter(db(single_mf_pulse[0].flatten())).show()
 
 plt.figure('Data')
-plt.imshow(db(single_mf_pulse))
+plt.imshow(db(single_mf_pulse * 1e8))
+plt.xlabel('Interpolated Range Bin')
+plt.ylabel('Pulse Number')
+plt.title('Example CPI - Generated Data')
+plt.colorbar()
 plt.axis('tight')
 plt.show()
 
@@ -310,7 +317,7 @@ def drawbox(box):
 
 fig = getMeshFig()
 
-for b in box_tree[0][sum(8**n for n in range(nbox_levels - 1)):]:
+for b in mesh.octree[sum(8**n for n in range(nbox_levels - 1)):]:
     if np.sum(b) != 0:
         fig.add_trace(drawbox(b))
 
