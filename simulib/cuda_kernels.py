@@ -289,8 +289,8 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
                 continue
 
             # Attenuation of beam in elevation and azimuth
-            att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-                                        bw_az, bw_el)
+            # att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
+            #                             bw_az, bw_el)
             # att = 1.
             # Azimuth window to reduce sidelobes
             # Gaussian window
@@ -311,7 +311,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
             # Multiply by phase reference function, attenuation and azimuth window
             # if tt == 0:
             #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
-            acc_val += a * cmath.exp(1j * k * (tx_rng + rx_rng))#  * raisedCosine(az_diffrx, bw_az, .5) * att
+            acc_val += a * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(az_diffrx, bw_az, .5)#  * att
         final_grid[pcol, prow] = acc_val
         # if pcol == 110 and prow == 110:
         #     print(a.real, k, two_way_rng, att, az_win, acc_val.real, final_grid[pcol, prow].real)

@@ -1,11 +1,10 @@
 import itertools
 import multiprocessing as mp
 import open3d as o3d
-import functools
 import numpy as np
 from .mesh_functions import detectPoints
 
-BOX_CUSHION = .01
+BOX_CUSHION = .1
 
 
 class Mesh(object):

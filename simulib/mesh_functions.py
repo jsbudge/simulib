@@ -9,7 +9,7 @@ import nvtx
 
 c0 = 299792458.0
 fs = 2e9
-_float = np.float64
+_float = np.float32
 
 
 def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d.geometry.TriangleMesh:
@@ -74,10 +74,13 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
 
 
 @nvtx.annotate(color='blue')
-def getRangeProfileFromMesh(mesh, npoints: int, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray], pan: list[np.ndarray], tilt: list[np.ndarray],
+def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray], pan: list[np.ndarray], tilt: list[np.ndarray],
                             radar_equation_constant: float, bw_az: float, bw_el: float, nsam: int, fc: float,
-                            near_range_s: float, num_bounces: int=3, debug: bool=False, streams: list[cuda.stream]=None, sampled_points: np.ndarray = None) -> tuple[list, list, list, list] | list:
+                            near_range_s: float, num_bounces: int=3, debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
     npulses = tx_pos[0].shape[0]
+    if isinstance(sampled_points, int):
+        sampled_points = mesh.sample(sampled_points, view_pos=np.array([tx[0] for tx in tx_pos]))
+    npoints = sampled_points.shape[0]
 
     debug_rays = []
     debug_raydirs = []
@@ -88,8 +91,7 @@ def getRangeProfileFromMesh(mesh, npoints: int, tx_pos: list[np.ndarray], rx_pos
     bprun = optimizeThreadBlocks(threads_per_block, (npulses, npoints))
 
     # These are the mesh constants that don't change with intersection points
-    if sampled_points is None:
-        sampled_points = mesh.sample(npoints, view_pos=np.array([tx[0] for tx in tx_pos]))
+
     sample_points_gpu = cuda.to_device(sampled_points.astype(_float))
     tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
     tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))

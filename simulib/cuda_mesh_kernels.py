@@ -161,37 +161,37 @@ def traverseOctreeAndIntersection(ro, rd, bounding_box, rho, tri_box_idx, tri_bo
     while 0 < box < bounding_box.shape[0]:
         if findOctreeBox(ro, rd, bounding_box, box):
             tn = make_float3(bounding_box[box, 0, 0], bounding_box[box, 0, 1], bounding_box[box, 0, 2])
-            # if length(ro - tn) <= int_rng:
-            if box >= bounding_box.shape[0] >> 3:
-                tri_min = tri_box_key[box, 0]
-                for t_idx in prange(tri_min, tri_min + tri_box_key[box, 1]):
-                    ti = tri_box_idx[t_idx]
-                    ti_idx = make_uint3(tri_idx[ti, 0], tri_idx[ti, 1], tri_idx[ti, 2])
-                    tn = make_float3(tri_norm[ti, 0], tri_norm[ti, 1], tri_norm[ti, 2])
-                    curr_intersect, tb, tinter = (
-                        calcSingleIntersection(rd, ro, make_float3(tri_vert[ti_idx.x, 0],
-                                                                   tri_vert[ti_idx.x, 1],
-                                                                   tri_vert[ti_idx.x, 2]),
-                                               make_float3(tri_vert[ti_idx.y, 0],
-                                                           tri_vert[ti_idx.y, 1],
-                                                           tri_vert[ti_idx.y, 2]),
-                                               make_float3(tri_vert[ti_idx.z, 0],
-                                                           tri_vert[ti_idx.z, 1],
-                                                           tri_vert[ti_idx.z, 2]), tn, True))
-                    if curr_intersect:
-                        tmp_rng = length(ro - tinter)
-                        if 1. < tmp_rng < int_rng:
-                            int_rng = tmp_rng + rng
-                            inv_rng = 1 / tmp_rng
-                            b = tb + 0.
-                            # This is the phong reflection model to get nrho
-                            nrho = (tri_material[ti, 1] * max(0, dot(ro - tinter, tn) * inv_rng) * rho * .01 +
-                                            tri_material[ti, 2] * max(0, dot(b, ro) * inv_rng) ** tri_material[ti, 0] * rho) * (inv_rng * inv_rng)
-                            inter = tinter + 0.
-                            did_intersect = True
-            else:
-                box <<= 3
-                jump = True
+            if length(ro - tn) <= int_rng:
+                if box >= bounding_box.shape[0] >> 3:
+                    tri_min = tri_box_key[box, 0]
+                    for t_idx in prange(tri_min, tri_min + tri_box_key[box, 1]):
+                        ti = tri_box_idx[t_idx]
+                        ti_idx = make_uint3(tri_idx[ti, 0], tri_idx[ti, 1], tri_idx[ti, 2])
+                        tn = make_float3(tri_norm[ti, 0], tri_norm[ti, 1], tri_norm[ti, 2])
+                        curr_intersect, tb, tinter = (
+                            calcSingleIntersection(rd, ro, make_float3(tri_vert[ti_idx.x, 0],
+                                                                       tri_vert[ti_idx.x, 1],
+                                                                       tri_vert[ti_idx.x, 2]),
+                                                   make_float3(tri_vert[ti_idx.y, 0],
+                                                               tri_vert[ti_idx.y, 1],
+                                                               tri_vert[ti_idx.y, 2]),
+                                                   make_float3(tri_vert[ti_idx.z, 0],
+                                                               tri_vert[ti_idx.z, 1],
+                                                               tri_vert[ti_idx.z, 2]), tn, True))
+                        if curr_intersect:
+                            tmp_rng = length(ro - tinter)
+                            if 1. < tmp_rng < int_rng:
+                                int_rng = tmp_rng + rng
+                                inv_rng = 1 / int_rng
+                                b = tb + 0.
+                                # This is the phong reflection model to get nrho
+                                nrho = (tri_material[ti, 1] * max(0, dot(ro - tinter, tn) * inv_rng) * rho +
+                                                tri_material[ti, 2] * max(0, 1 - tri_material[ti, 0] * (1 - dot(b, ro) * inv_rng)) ** 2 * rho) * (inv_rng * inv_rng)
+                                inter = tinter + 0.
+                                did_intersect = True
+                else:
+                    box <<= 3
+                    jump = True
         else:
             if box == 8:
                 break

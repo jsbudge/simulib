@@ -1,7 +1,6 @@
 from numba import cuda
 import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
-
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
 from simulib import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
 from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float
@@ -35,14 +34,14 @@ tx_gain = 22  # dB
 rec_gain = 100  # dB
 ant_transmit_power = 100  # watts
 noise_power_db = -120
-npulses = 32
+npulses = 64
 plp = .75
 fdelay = 10.
-upsample = 4
-num_bounces = 1
+upsample = 8
+num_bounces = 2
 nbox_levels = 5
-nstreams = 1
-points_to_sample = 2**16
+nstreams = 5
+points_to_sample = 2**15
 num_mesh_triangles = 1000000
 max_pts_per_run = 2**16
 grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -60,7 +59,7 @@ data_t = sdr_f[0].pulse_time[idx_t]
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
 # gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 512, 512, nrows=1024, ncols=1024)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=1024, ncols=1024)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -195,13 +194,13 @@ streams = [cuda.stream() for _ in range(nstreams)]
 
 # Single pulse for debugging
 print('Generating single pulse...')
-single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(mesh, ptsam,
+single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(mesh, sample_points,
                                                                              [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
                                                                              [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                              rp.az_half_bw, rp.el_half_bw,
                                                                              nsam, fc, near_range_s,
                                                                              num_bounces=num_bounces,
-                                                                             debug=True, streams=streams, sampled_points=sample_points)
+                                                                             debug=True, streams=streams)
 single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                              is_freq=True, time_len=nsam)
 single_mf_pulse = upsamplePulse(
@@ -220,13 +219,14 @@ else:
 for s in range(len(splits) - 1):
     if s > 0:
         sample_points = mesh.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
-    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * (nstreams + 1)))):
-        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
-        rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
-        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
-        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n + 1]]).astype(_float) for n in range(nstreams)]
-        trp = getRangeProfileFromMesh(mesh, int(splits[s + 1] - splits[s]), txposes, rxposes, pans, tilts,
-                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, num_bounces=num_bounces, streams=streams, sampled_points=sample_points)
+    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
+        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        trp = getRangeProfileFromMesh(mesh, sample_points, txposes, rxposes, pans, tilts,
+                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s,
+                                      num_bounces=num_bounces, streams=streams)
         mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
         bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
@@ -286,12 +286,31 @@ bounce_colors = ['blue', 'red', 'green', 'yellow']
 for bounce in range(len(ray_origins)):
     fig = getMeshFig(f'Bounce {bounce}')
     for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
-        valids = nrp[0] > 1e-9
-        fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0],
-                          v=rd[0, valids, 1], w=rd[0, valids, 2], sizemode='absolute', sizeref=40, anchor='tail',
+        valids = nrp[0] > 1e-10
+        sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
+        fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0] * sc,
+                          v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=10,
                               colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
 
     fig.show()
+
+fig = getMeshFig('Ray trace')
+init_pos = np.repeat(rp.txpos(data_t[0]).reshape((1, -1)), ro.shape[1], 0)
+valids = np.sum([nrp[0] > 0.0 for nrp in ray_powers], axis=0) == len(ray_powers)
+ln = np.stack([init_pos[valids]] + [ro[0, valids] for ro in ray_origins]).swapaxes(0, 1)[::1000, :, :]
+for l in ln:
+    fig.add_trace(go.Scatter3d(x=l[:, 0], y=l[:, 1], z=l[:, 2], mode='lines'))
+sc_max = ray_powers[0][0, valids].max()
+for ro, rd, nrp in zip(ray_origins, ray_directions, ray_powers):
+    sc = ((1 + nrp[0, valids] / nrp[0, valids].max()) * 10)[::1000]
+    fig.add_trace(go.Cone(x=ro[0, valids, 0][::1000], y=ro[0, valids, 1][::1000], z=ro[0, valids, 2][::1000], u=rd[0, valids, 0][::1000] * sc,
+                      v=rd[0, valids, 1][::1000] * sc, w=rd[0, valids, 2][::1000] * sc, anchor='tail'))
+fig.update_layout(
+        scene=dict(zaxis=dict(range=[-30, 100]),
+                   xaxis=dict(range=[2150, 2550]),
+                   yaxis=dict(range=[-800, -1000])),
+    )
+fig.show()
 
 
 def drawbox(box):
