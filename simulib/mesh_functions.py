@@ -74,9 +74,14 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
 
 
 @nvtx.annotate(color='blue')
-def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray], pan: list[np.ndarray], tilt: list[np.ndarray],
-                            radar_equation_constant: float, bw_az: float, bw_el: float, nsam: int, fc: float,
-                            near_range_s: float, num_bounces: int=3, debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
+def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
+                            pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
+                            bw_el: float, nsam: int, fc: float, near_range_s: float, num_bounces: int=3,
+                            debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
+    """
+    Generate a range profile, given a Mesh object and some other values
+
+    """
     npulses = tx_pos[0].shape[0]
     if isinstance(sampled_points, int):
         sampled_points = mesh.sample(sampled_points, view_pos=np.array([tx[0] for tx in tx_pos]))
@@ -211,7 +216,7 @@ def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray
         newpoints = ray_origins_gpu.copy_to_host()[ray_power_gpu.copy_to_host().astype(bool)]
         points = (
             newpoints
-            if newpoints.shape[0] > npoints or not points
+            if newpoints.shape[0] > npoints or len(points) == 0
             else np.concatenate((points, newpoints))
         )
 

@@ -214,8 +214,6 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
         rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
         rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
         rho = ray_power[tt, ray_idx]
-        if rho < 1e-9:
-            return
         rng = ray_distance[tt, ray_idx]
         did_intersect, nrho, inter, int_rng, b = traverseOctreeAndIntersection(ro, rd, bounding_box, rho, tri_box_idx,
                                                                                tri_box_key, tri_idx, tri_vert,
@@ -240,8 +238,8 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, bounding_box, t
             ray_dir[tt, ray_idx, 1] = b.y
             ray_dir[tt, ray_idx, 2] = b.z
             ray_power[tt, ray_idx] = nrho
-            ray_distance[tt, ray_idx] = rng
         else:
+            ray_distance[tt, ray_idx] = rng
             ray_power[tt, ray_idx] = 0.
 
 

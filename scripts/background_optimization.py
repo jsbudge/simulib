@@ -1,77 +1,66 @@
-import cupy
-import numpy as np
-import cma
-from scipy.spatial import Delaunay
-from scipy.optimize import minimize
-from SDRParsing import load
-from backproject_functions import backprojectPulseSet
-from cuda_kernels import calcRangeProfile, getMaxThreads
-from cuda_mesh_kernels import getRangeProfileFromMesh, getBoxesSamplesFromMesh
-from grid_helper import SDREnvironment
-from platform_helper import SDRPlatform
+import torch
+from numba import cuda
 import matplotlib.pyplot as plt
+from scipy.spatial import Delaunay
+
+from scripts.denoise_model import FFDNet
+from simulib.platform_helper import SDRPlatform
+from scipy.ndimage import sobel
+from simulib.grid_helper import SDREnvironment
+from scipy.interpolate import RegularGridInterpolator
+from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
+from simulib import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float
 from tqdm import tqdm
+import numpy as np
 import open3d as o3d
-from simulation_functions import db, upsamplePulse, azelToVec, detect_local_extrema
+import plotly.express as px
 import plotly.io as pio
+import plotly.graph_objects as go
+from sdrparse import load
+
+from simulib.mesh_objects import Mesh
 
 pio.renderers.default = 'browser'
 
-
-def solvey(x1, y1, z1, x0, y0, z0, R1, R0, z):
-    y = (
-                    4 * y1 ** 3 - 4 * y0 * y1 ** 2 + 4 * x1 ** 2 * y1 + 4 * z1 ** 2 * y1 + 4 * x0 ** 2 * y1 - 4 * y0 ** 2 * y1 - 4 * z0 ** 2 * y1 -
-                    4 * R1 ** 2 * y1 + 4 * R0 ** 2 * y1 - 8 * x1 * x0 * y1 - 8 * z1 * z * y1 + 8 * z0 * z * y1 + 4 * y0 ** 3 + 4 * y0 * z0 ** 2 +
-                    4 * y0 * R1 ** 2 - 4 * y0 * R0 ** 2 + 4 * x1 ** 2 * y0 - 4 * z1 ** 2 * y0 + 4 * x0 ** 2 * y0 - 8 * x1 * x0 * y0 + 8 * z1 * y0 * z -
-                    8 * y0 * z0 * z - np.sqrt(
-                (-4 * y1 ** 3 + 4 * y0 * y1 ** 2 - 4 * x1 ** 2 * y1 - 4 * z1 ** 2 * y1 - 4 * x0 ** 2 * y1 +
-                 4 * y0 ** 2 * y1 + 4 * z0 ** 2 * y1 + 4 * R1 ** 2 * y1 - 4 * R0 ** 2 * y1 + 8 * x1 * x0 * y1 + 8 * z1 * z * y1 -
-                 8 * z0 * z * y1 - 4 * y0 ** 3 - 4 * y0 * z0 ** 2 - 4 * y0 * R1 ** 2 + 4 * y0 * R0 ** 2 - 4 * x1 ** 2 * y0 + 4 * z1 ** 2 * y0 -
-                 4 * x0 ** 2 * y0 + 8 * x1 * x0 * y0 - 8 * z1 * y0 * z + 8 * y0 * z0 * z) ** 2 -
-                4 * (4 * x1 ** 2 - 8 * x0 * x1 + 4 * y1 ** 2 + 4 * x0 ** 2 + 4 * y0 ** 2 - 8 * y1 * y0) *
-                (x1 ** 4 - 4 * x0 * x1 ** 3 + 2 * y1 ** 2 * x1 ** 2 + 2 * z1 ** 2 * x1 ** 2 + 6 * x0 ** 2 * x1 ** 2 +
-                 2 * y0 ** 2 * x1 ** 2 + 2 * z0 ** 2 * x1 ** 2 - 2 * R1 ** 2 * x1 ** 2 - 2 * R0 ** 2 * x1 ** 2 + 4 * z ** 2 * x1 ** 2 -
-                 4 * z1 * z * x1 ** 2 - 4 * z0 * z * x1 ** 2 - 4 * x0 ** 3 * x1 - 4 * x0 * y0 ** 2 * x1 - 4 * x0 * z0 ** 2 * x1 +
-                 4 * x0 * R1 ** 2 * x1 + 4 * x0 * R0 ** 2 * x1 - 8 * x0 * z ** 2 * x1 - 4 * y1 ** 2 * x0 * x1 - 4 * z1 ** 2 * x0 * x1 +
-                 8 * z1 * x0 * z * x1 + 8 * x0 * z0 * z * x1 + y1 ** 4 + z1 ** 4 + x0 ** 4 + y0 ** 4 + z0 ** 4 + R1 ** 4 + R0 ** 4 +
-                 2 * y1 ** 2 * z1 ** 2 + 2 * y1 ** 2 * x0 ** 2 + 2 * z1 ** 2 * x0 ** 2 - 2 * y1 ** 2 * y0 ** 2 - 2 * z1 ** 2 * y0 ** 2 +
-                 2 * x0 ** 2 * y0 ** 2 - 2 * y1 ** 2 * z0 ** 2 - 2 * z1 ** 2 * z0 ** 2 + 2 * x0 ** 2 * z0 ** 2 + 2 * y0 ** 2 * z0 ** 2 -
-                 2 * y1 ** 2 * R1 ** 2 - 2 * z1 ** 2 * R1 ** 2 - 2 * x0 ** 2 * R1 ** 2 + 2 * y0 ** 2 * R1 ** 2 + 2 * z0 ** 2 * R1 ** 2 +
-                 2 * y1 ** 2 * R0 ** 2 + 2 * z1 ** 2 * R0 ** 2 - 2 * x0 ** 2 * R0 ** 2 - 2 * y0 ** 2 * R0 ** 2 - 2 * z0 ** 2 * R0 ** 2 -
-                 2 * R1 ** 2 * R0 ** 2 + 4 * z1 ** 2 * z ** 2 + 4 * x0 ** 2 * z ** 2 + 4 * z0 ** 2 * z ** 2 - 8 * z1 * z0 * z ** 2 -
-                 4 * z1 ** 3 * z - 4 * z0 ** 3 * z - 4 * z1 * x0 ** 2 * z + 4 * z1 * y0 ** 2 * z + 4 * z1 * z0 ** 2 * z +
-                 4 * z1 * R1 ** 2 * z - 4 * z0 * R1 ** 2 * z - 4 * z1 * R0 ** 2 * z + 4 * z0 * R0 ** 2 * z - 4 * y1 ** 2 * z1 * z +
-                 4 * y1 ** 2 * z0 * z + 4 * z1 ** 2 * z0 * z - 4 * x0 ** 2 * z0 * z - 4 * y0 ** 2 * z0 * z))) / (
-                2 * (4 * x1 ** 2 - 8 * x0 * x1 + 4 * y1 ** 2 + 4 * x0 ** 2 + 4 * y0 ** 2 - 8 * y1 * y0))
-    x = x1 + np.sqrt(-y1 ** 2 + 2 * y1 * y - z1 ** 2 + 2 * z1 * z + R0 ** 2 - y ** 2 - z ** 2)
-    return np.array([x, y]).T
-
-
 c0 = 299792458.0
+TAC = 125e6
 fs = 2e9
 DTR = np.pi / 180
-ROAD_ID = 0
-BUILDING_ID = 1
-TREE_ID = 2
-FIELD_ID = 3
-UNKNOWN_ID = 4
 
-grid_origin = (40.133830, -111.665722, 1385.)
-fnme = '/home/jeff/SDR_DATA/RAW/08072024/SAR_08072024_111617.sar'
-sdr = load(fnme, progress_tracker=True)
-wavelength = c0 / sdr[0].fc
+
+def addNoise(range_profile, chirp, npower, mf, fft_len):
+    data = (chirp * np.fft.fft(range_profile + np.random.normal(0, npower, range_profile.shape) +
+     1j * np.random.normal(0, npower, range_profile.shape), fft_len))
+    return data * mf
+
+
+fc = 9.6e9
 rx_gain = 22  # dB
 tx_gain = 22  # dB
 rec_gain = 100  # dB
-ant_transmit_power = 100  # watts
-upsample = 1
-pixel_to_m = 1.
-nboxes = 4
-points_to_sample = 256
-npulses = 32
-num_bounces = 0
-nbounce_rays = 5
+ant_transmit_power = 110  # watts
+noise_power_db = -120
+npulses = 64
+plp = .75
+fdelay = 10.
+upsample = 8
+num_bounces = 1
+pixel_to_m = .25
+nbox_levels = 5
+nstreams = 2
+points_to_sample = 2**15
+num_mesh_triangles = 1000000
+max_pts_per_run = 2**16
 
+grid_origin = (40.133830, -111.665722, 1385.)
+fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
+sdr = load(fnme, progress_tracker=True)
+wavelength = c0 / sdr[0].fc
+
+# os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
+
+print('Loading mesh...', end='')
 # Prep the background ASI image
 bg = SDREnvironment(sdr)
 rp = SDRPlatform(sdr, origin=bg.ref)
@@ -79,197 +68,162 @@ nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
     rp.getRadarParams(10., .75, upsample))
 mfilt = sdr.genMatchedFilter(0, fft_len=fft_len)
 chirp_filt = np.fft.fft(sdr[0].cal_chirp, fft_len) * mfilt
-
-threads_per_block = getMaxThreads()
+print('Done.')
 
 # This is all the constants in the radar equation for this simulation
-radar_coeff = (c0**2 / sdr[0].fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
+radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
                10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
-chip_shape = (16, 16)
+noise_power = 0  #10**(noise_power_db / 10)
 
+chip_shape = (256, 256)
 gx, gy, gz = bg.getGrid(grid_origin, chip_shape[0] * pixel_to_m, chip_shape[1] * pixel_to_m, *chip_shape)
-pix_data = bg.getRefGrid(grid_origin, chip_shape[0] * pixel_to_m, chip_shape[1] * pixel_to_m, *chip_shape) * 1e11
+bg.resampleGrid(grid_origin, chip_shape[0] * pixel_to_m, chip_shape[1] * pixel_to_m, *chip_shape)
+pix_data = bg.refgrid[:, :7000]
 
-points = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
+print('Smoothing ASI...')
+model_path = './model_zoo/ffdnet_gray.pth'
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+model = FFDNet(in_nc=1, out_nc=1, nc=64, nb=15, act_mode='R')
+model.load_state_dict(torch.load(model_path), strict=True)
+model.eval()
+for k, v in model.named_parameters():
+    v.requires_grad = False
+model = model.to(device)
 
-boresights = rp.boresight(sdr[0].pulse_time)
-boresight = boresights.mean(axis=0)
+img_L = np.float32(pix_data / pix_data.max())
+img_std = img_L.std()
+
+img_L = torch.from_numpy(np.ascontiguousarray(img_L)).float().unsqueeze(0).unsqueeze(0)
+img_L = img_L.to(device)
+
+sigma = torch.full((1, 1, 1, 1), img_std).type_as(img_L)
+
+img_E = model(img_L, sigma)
+img_E = img_E.data.squeeze().float().clamp_(0, 1).cpu().numpy() * pix_data.max()
+model.to('cpu')
+
+print('Placing mesh points...')
+sobel_h = sobel(img_E, 0)  # horizontal gradient
+sobel_v = sobel(img_E, 1)  # vertical gradient
+grad_im = np.sqrt(sobel_h**2 + sobel_v**2)
+xx, yy = np.meshgrid(np.arange(grad_im.shape[0]), np.arange(grad_im.shape[1]))
+interpolator_img = RegularGridInterpolator(np.array([np.arange(grad_im.shape[0]), np.arange(grad_im.shape[1])]), img_E)
+interpolator_grad = RegularGridInterpolator(np.array([np.arange(grad_im.shape[0]), np.arange(grad_im.shape[1])]), grad_im)
+mu = grad_im.mean()
+master_pts = []
+while len(master_pts) < 10000:
+    pts = np.random.rand(10000, 2) * (grad_im.shape[0] - 1)
+    pts = pts[interpolator_grad(pts) > mu]
+    master_pts = pts if len(master_pts) == 0 else np.concatenate((master_pts, pts))
+
+rcs = interpolator_img(master_pts)
+
+
+gnd_points = bg.getPos(master_pts[:, 0], master_pts[:, 1], elevation=True)
+tri_ = Delaunay(gnd_points[:, :2])
+ground = o3d.geometry.TriangleMesh()
+ground.vertices = o3d.utility.Vector3dVector(gnd_points)
+ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
+ground.remove_duplicated_vertices()
+ground.remove_unreferenced_vertices()
+ground.compute_vertex_normals()
+ground.compute_triangle_normals()
+ground.normalize_normals()
+
+ground.triangle_material_ids = o3d.utility.IntVector([0 for _ in rcs])
+
+# Get initial estimates of kd, ks, and beta
+msigmas = rcs / rcs.max() * 2
+mkds = rcs / rcs.max() * .5
+mkss = rcs / rcs.max() * .5
+
+# Load in boxes and meshes for speedup of ray tracing
+print('Loading mesh box structure...', end='')
+ptsam = min(points_to_sample, max_pts_per_run)
+mesh = Mesh(ground, num_box_levels=nbox_levels, use_box_pts=False, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss)
+print('Done.')
+
+sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+
+boresight = rp.boresight(sdr[0].pulse_time).mean(axis=0)
 pointing_az = np.arctan2(boresight[0], boresight[1])
 
-paz = np.arctan2(boresights[:, 0], boresights[:, 1])
-pel = -np.arcsin(boresights[:, 2])
-
-pt = [2034, 3133]
-pt_pos = bg.getPos(*pt, True)
-
+# Locate the extrema to speed up the optimization
 flight_path = rp.txpos(sdr[0].pulse_time)
-pmax = points.max(axis=0)
+pmax = sample_points.max(axis=0)
 vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
                  pmax[2] - flight_path[:, 2]]).T
 pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
-max_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw]
-pmin = points.min(axis=0)
+max_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
+pmin = sample_points.min(axis=0)
 vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
                  pmin[2] - flight_path[:, 2]]).T
 pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
-min_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw]
-pulse_lims = [min(min(max_pts), min(min_pts)), max(max(max_pts), max(min_pts))]
+min_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
+pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr[0].frame_num[-1])]
+# pulse_lims = [0, sdr_f[0].nframes]
+streams = [cuda.stream() for _ in range(nstreams)]
 
-ro = pt_pos - flight_path
-rnges = np.linalg.norm(ro, axis=1)
-rng_bins = ((rnges / c0 - near_range_s) * fs).astype(int)
-ray_att = (np.sinc((paz - np.arctan2(ro[:, 0], ro[:, 1])) / rp.az_half_bw) ** 2 *
-               np.sinc((pel + np.arcsin(ro[:, 2] / rnges)) / rp.el_half_bw) ** 2)
-rho = radar_coeff * ray_att
+# Single pulse for debugging
+bpj_grid = np.zeros_like(gx).astype(np.complex128)
 
-pt_data = np.zeros(pulse_lims[1] - pulse_lims[0], dtype=np.complex128)
-for idx in range(pulse_lims[0], pulse_lims[1], npulses):
-    idx_range = np.arange(idx, min(idx + npulses, pulse_lims[1]))
+print('Running main loop...')
+# Get the data into CPU memory for later
+# MAIN LOOP
+# If we need to split the point raster, do so
+if points_to_sample > max_pts_per_run:
+    splits = np.concatenate((np.arange(0, points_to_sample, max_pts_per_run), [points_to_sample]))
+else:
+    splits = np.array([0, points_to_sample])
+for s in range(len(splits) - 1):
+    if s > 0:
+        sample_points = mesh.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
+        txposes = [rp.txpos(sdr[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        rxposes = [rp.rxpos(sdr[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        pans = [rp.pan(sdr[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        tilts = [rp.tilt(sdr[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        trp = getRangeProfileFromMesh(mesh, sample_points, txposes, rxposes, pans, tilts,
+                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s,
+                                      num_bounces=num_bounces, streams=streams)
+        mf_pulses = [np.ascontiguousarray(upsamplePulse(np.fft.fft(range_profile, fft_len, axis=1) * chirp_filt, fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
+        bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
+                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
+                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
 
-    # Get real pulse data
-    _, pulse_data = sdr.getPulses(sdr[0].frame_num[idx_range], 0)
-    mf_data = np.fft.fft(pulse_data, fft_len, axis=0) * mfilt[:, None]
-    mf_data = upsamplePulse(mf_data.T, fft_len, upsample, is_freq=True, time_len=nsam)
-    pt_data[idx_range - pulse_lims[0]] = mf_data[idx_range - idx_range[0], ((rnges[idx_range] / c0 - near_range_s) * upsample * fs).astype(int)]
+def getMeshFig(title='Title Goes Here', zrange=100):
+    fig = go.Figure(data=[
+        go.Mesh3d(
+            x=mesh.vertices[:, 0],
+            y=mesh.vertices[:, 1],
+            z=mesh.vertices[:, 2],
+            # i, j and k give the vertices of triangles
+            i=mesh.tri_idx[:, 0],
+            j=mesh.tri_idx[:, 1],
+            k=mesh.tri_idx[:, 2],
+            # facecolor=triangle_colors,
+            showscale=True
+        )
+    ])
+    fig.update_layout(
+        title=title,
+        scene=dict(zaxis=dict(range=[-30, zrange])),
+    )
+    return fig
 
-pt_data /= 1e7
+fig = getMeshFig('Full Mesh')
+fig.show()
 
-min_pt_ts = np.where(rnges == rnges.min())[0][0]
-min_pt_path = flight_path[min_pt_ts]
-min_ro = ro[min_pt_ts]
-min_az = np.arctan2(min_ro[0], min_ro[1])
-min_el = -np.arcsin(min_ro[2] / rnges[min_pt_ts])
-
-
-
-
-def findPossPos(x):
-    xyz = azelToVec(min_az, x) * rnges[min_pt_ts] + min_pt_path
-    return np.linalg.norm(rnges[pulse_lims[0]:pulse_lims[1]] - np.linalg.norm(flight_path[pulse_lims[0]:pulse_lims[1]] - xyz, axis=1))
-'''es = cma.CMAEvolutionStrategy(np.array([pointing_az, rp.dep_ang]), np.pi / 4,
-                              {'bounds': [[pointing_az - np.pi / 2, 0], [pointing_az + np.pi / 2, np.pi / 2]]})
-es.optimize(findPossPos)'''
-
-yes = np.linspace(min_el - rp.el_half_bw / 8, min_el + rp.el_half_bw / 8, 11)
-res = np.array([findPossPos(y) for y in yes])
-locy = detect_local_extrema(db(res))
-'''valids = res[locy, locx] < res.mean() - res.std()
-locy = locy[valids]
-locx = locx[valids]'''
-
-poss_pos = (azelToVec(min_az, yes) * rnges[min_pt_ts] + min_pt_path[:, None]).T
-
-tri_norm = azelToVec(12 * DTR, np.pi / 3)
-ks = .3
-kd = .3
-rcs = 2.
-
-x0 = np.array([0., 0.3310422816311423, ks, kd, rcs / 5])
-
-for p in poss_pos:
-    def calc_th(x):
-        # Scale everything
-        az = x[0] * np.pi - (pointing_az + np.pi / 2)
-        el = x[1] * np.pi / 2
-        rcs = x[4] * 5
-        th_data = np.zeros(pulse_lims[1] - pulse_lims[0], dtype=np.complex128)
-        tri_norm = azelToVec(az, el)
-        for idx in range(pulse_lims[0], pulse_lims[1], npulses):
-            idx_range = np.arange(idx, min(idx + npulses, pulse_lims[1]))
-            nro = p - flight_path[idx_range]
-
-            # Get theoretical return for pixel
-            th_return = np.zeros((nsam, len(idx_range)), dtype=np.complex128)
-            bounce = p - tri_norm * np.dot(p, tri_norm) * 2.
-            bounce /= np.linalg.norm(bounce)
-            # This is the phong reflection model to get nrho
-            tdotn = np.dot(nro, tri_norm) / rnges[idx_range]
-            tdotn[tdotn < 0] = 0
-            reflection = np.dot(nro, bounce) / rnges[idx_range]
-            reflection[reflection < 0] = 0
-            nrho = (1e-6 + (x[3] * tdotn * rho[idx_range] / 100. + x[2] * reflection ** rcs * rho[idx_range])) / rnges[
-                idx_range] ** 2
-            nrho[nrho - rho[idx_range] > 0] = rho[idx_range[nrho - rho[idx_range] > 0]]
-            th_return[rng_bins[idx_range], idx_range - idx_range[0]] += nrho * np.exp(-2j * wavelength * rnges[idx_range])
-            th_return = np.fft.fft(th_return, fft_len, axis=0) * chirp_filt[:, None]
-            th_return = upsamplePulse(th_return.T, fft_len, upsample, is_freq=True, time_len=nsam)
-            th_data[idx_range - pulse_lims[0]] = th_return[idx_range - idx_range[0], ((rnges[idx_range] / c0 - near_range_s) * upsample * fs).astype(int)]
-
-        th_data *= abs(pt_data).max() / abs(th_data).max()
-        return th_data
-
-    def minfunc(x):
-        return np.linalg.norm(pt_data - calc_th(x))
-
-    es = cma.CMAEvolutionStrategy(x0, .33, {'bounds': [[0, 0, 1e-5, 1e-5, 1e-5], [1, 1, 1, 1, 1]]})
-    es.optimize(minfunc)
-
-    opt_x = es.result[0]
-    # opt_x = minimize(minfunc, x0, bounds=[(0, 2 * np.pi), (0, np.pi / 2), (1e-9, 1), (1e-9, 1), (1e-9, 5)])
-
-    th_data = calc_th(opt_x)
-
-    plt.figure(f'pos {p}')
-    plt.plot(abs(pt_data))
-    plt.plot(abs(th_data))
 
 plt.figure()
-plt.plot(db(res))
+plt.subplot(1, 2, 1)
+plt.imshow(db(pix_data))
+plt.subplot(1, 2, 2)
+plt.imshow(db(img_E))
+
+plt.figure()
+plt.scatter(master_pts[:, 0], master_pts[:, 1], c=interpolator_img(master_pts))
+
+plt.figure()
+plt.imshow(db(bpj_grid))
 plt.show()
-
-# Locate the extrema to speed up the optimization
-'''flight_path = rp.txpos(sdr[0].pulse_time)
-pmax = points.max(axis=0)
-vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
-                 pmax[2] - flight_path[:, 2]]).T
-pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
-max_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw]
-pmin = points.min(axis=0)
-vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
-                 pmin[2] - flight_path[:, 2]]).T
-pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
-min_pts = sdr[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw]
-pulse_lims = [min(min(max_pts), min(min_pts)), max(max(max_pts), max(min_pts))]
-
-tri_ = Delaunay(points[:, :2])
-mesh = o3d.geometry.TriangleMesh()
-mesh.vertices = o3d.utility.Vector3dVector(points)
-mesh.triangles = o3d.utility.Vector3iVector(tri_.simplices)
-mesh.compute_vertex_normals()
-mesh.compute_triangle_normals()
-mesh.normalize_normals()
-
-mesh.triangle_material_ids = o3d.utility.IntVector([i for i in range(len(mesh.triangles))])
-msigmas = [1. for _ in range(len(mesh.triangles))]
-pdata = db(pix_data)
-
-x0 = np.concatenate((msigmas, np.zeros(points.shape[0])))
-
-def minfunc(x):
-    tmp_p = points + 0.0
-    tmp_p[:, 2] += x[len(mesh.triangles):]
-    mesh.vertices = o3d.utility.Vector3dVector(tmp_p)
-    mesh.compute_vertex_normals()
-    mesh.compute_triangle_normals()
-    # Load in boxes and meshes for speedup of ray tracing
-    box_tree, sample_points = getBoxesSamplesFromMesh(mesh, num_boxes=nboxes, sample_points=points_to_sample,
-                                                      material_sigmas=x[:len(mesh.triangles)])
-    bpj_grid = np.zeros_like(gx).astype(np.complex128)
-
-    # MAIN LOOP
-    for frame in range(pulse_lims[0], pulse_lims[1], npulses):
-        dt = sdr[0].pulse_time[frame:frame + npulses]
-        trp = getRangeProfileFromMesh(*box_tree, sample_points, rp.txpos(dt), rp.boresight(dt),
-                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, sdr[0].fc, near_range_s, num_bounces=num_bounces,
-                                      bounce_rays=nbounce_rays)
-        clean_pulse = np.fft.fft(trp, fft_len) * chirp_filt
-        mf_pulse = upsamplePulse(clean_pulse + (np.random.normal(0, 1e-3, size=clean_pulse.shape) + 1j * np.random.normal(0, 1e-3, size=clean_pulse.shape))
-        , fft_len, upsample,
-            is_freq=True, time_len=nsam)
-        bpj_grid += backprojectPulseSet(mf_pulse.T, rp.pan(dt), rp.tilt(dt), rp.rxpos(dt), rp.txpos(dt), gx, gy, gz,
-                                       c0 / sdr[0].fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw)
-    return np.linalg.norm(db(bpj_grid) - pdata)
-
-es = cma.CMAEvolutionStrategy(x0, 3.3, {'bounds': [0, 10]})
-es.optimize(minfunc)
-'''

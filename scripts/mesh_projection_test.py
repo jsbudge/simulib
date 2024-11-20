@@ -33,14 +33,14 @@ rx_gain = 22  # dB
 tx_gain = 22  # dB
 rec_gain = 100  # dB
 ant_transmit_power = 100  # watts
-noise_power_db = -120
+noise_power_db = -110
 npulses = 64
 plp = .75
 fdelay = 10.
 upsample = 8
 num_bounces = 2
 nbox_levels = 5
-nstreams = 5
+nstreams = 2
 points_to_sample = 2**15
 num_mesh_triangles = 1000000
 max_pts_per_run = 2**16
@@ -58,8 +58,9 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-# gx, gy, gz = bg.getGrid(grid_origin, 201 * .1, 199 * .1, nrows=201, ncols=199, az=-68.5715881976 * DTR)
-gx, gy, gz = bg.getGrid(grid_origin, 400, 200, nrows=1024, ncols=1024)
+# gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=128, ncols=128, az=-68.5715881976 * DTR)
+# gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=128, ncols=128)
+gx, gy, gz = bg.getGrid(grid_origin, 400, 400, nrows=1024, ncols=1024)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -67,10 +68,10 @@ print('Loading mesh...', end='')
 mesh = o3d.geometry.TriangleMesh()
 mesh_ids = []
 
-mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+'''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
 mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-mesh_ids = np.asarray(mesh.triangle_material_ids)
+mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
 '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
 mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -84,11 +85,11 @@ mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
 mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
-'''mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=30000000)
+mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=30000000)
 # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
 mesh_ids = np.asarray(mesh.triangle_material_ids)
-triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
+triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)
 
 
 '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
@@ -101,6 +102,9 @@ mesh_ids = np.asarray(car.triangle_material_ids)
 mesh += car
 
 building = readCombineMeshFile('/home/jeff/Documents/target_meshes/hangar.gltf', points=1e9, scale=.8)
+stretch = np.eye(4)
+stretch[0, 0] = 2
+# building = building.transform(stretch)
 building = building.translate(llh2enu(40.139670, -111.663759, 1380, bg.ref) + np.array([-10, -10, -6.]),
                               relative=False).rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
 building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, 42.51 * DTR])))
@@ -136,7 +140,7 @@ print('Done.')
 # This is all the constants in the radar equation for this simulation
 radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
                10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
-noise_power = 0  #10**(noise_power_db / 10)
+noise_power = 10**(noise_power_db / 10)
 
 # Generate a chirp
 chirp_bandwidth = 400e6
@@ -151,17 +155,17 @@ print('Loading mesh box structure...', end='')
 ptsam = min(points_to_sample, max_pts_per_run)
 try:
     msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-    '''msigmas[0] = msigmas[15] = .2  # seats
-    msigmas[6] = msigmas[13] = msigmas[17] = .2  # body
-    msigmas[12] = msigmas[4] = .02  # windshield'''
+    msigmas[0] = msigmas[15] = .5  # seats
+    msigmas[6] = msigmas[13] = msigmas[17] = .5  # body
+    msigmas[12] = msigmas[4] = .2  # windshield
     mkds = [.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-    '''mkds[0] = mkds[15] = 1.  # seats
-    mkds[6] = mkds[13] = mkds[17] = 1.  # body
-    mkds[12] = mkds[4] = .1  # windshield'''
+    mkds[0] = mkds[15] = .8  # seats
+    mkds[6] = mkds[13] = mkds[17] = .8  # body
+    mkds[12] = mkds[4] = .1  # windshield
     mkss = [.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-    '''mkss[0] = mkss[15] = .2  # seats
-    mkss[6] = mkss[13] = mkss[17] = 1.  # body
-    mkss[12] = mkss[4] = .01  # windshield'''
+    mkss[0] = mkss[15] = .2  # seats
+    mkss[6] = mkss[13] = mkss[17] = .8  # body
+    mkss[12] = mkss[4] = .01  # windshield
     # msigmas[28] = 2
     mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss, octree_perspective=rp.txpos(data_t).mean(axis=0))
 except ValueError:
@@ -286,7 +290,7 @@ bounce_colors = ['blue', 'red', 'green', 'yellow']
 for bounce in range(len(ray_origins)):
     fig = getMeshFig(f'Bounce {bounce}')
     for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
-        valids = nrp[0] > 1e-10
+        valids = nrp[0] > 0.
         sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
         fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0] * sc,
                           v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=10,
