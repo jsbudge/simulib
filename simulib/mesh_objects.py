@@ -1,10 +1,6 @@
-import itertools
-import multiprocessing as mp
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints
-
-BOX_CUSHION = .1
+from .mesh_functions import detectPoints, genOctree
 
 
 class Mesh(object):
@@ -21,7 +17,7 @@ class Mesh(object):
         max_bound = aabb.get_max_bound()
         min_bound = aabb.get_min_bound()
         root_box = np.array([min_bound, max_bound])
-        boxes = genOctree(root_box, num_box_levels, mesh_tri_vertices if use_box_pts else None, octree_perspective)
+        boxes = genOctree(root_box, num_box_levels, mesh_tri_vertices if use_box_pts else None, mesh_normals if use_box_pts else None, octree_perspective)
 
         mesh_box_idx = np.zeros((mesh_tri_idx.shape[0], len(boxes)), dtype=bool)
         # Get the box index for each triangle, for exclusion in the GPU calculations
@@ -90,45 +86,67 @@ class Mesh(object):
         return detectPoints(self.octree, self.sorted_idx, self.idx_key, self.tri_idx, self.vertices, self.normals,
                             self.materials, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
 
-def splitBox(bounding_box, npo: np.ndarray = None, perspective: np.ndarray = None):
-    splits = np.zeros((8, 2, 3))
-    if npo is None:
-        box_hull = np.array([bounding_box[0] - BOX_CUSHION, bounding_box.mean(axis=0),
-                             bounding_box[1] + BOX_CUSHION])
-    elif len(npo) > 0:
-        box_hull = np.array([npo.min(axis=(0, 1)) - BOX_CUSHION, np.mean(npo, axis=(0, 1)), npo.max(axis=(0, 1)) + BOX_CUSHION])
-    else:
-        box_hull = np.zeros((3, 3))
-    for bidx, (x, y, z) in enumerate(itertools.product(range(2), range(2), range(2))):
-        splits[bidx, :] = np.array([[box_hull[x, 0], box_hull[y, 1], box_hull[z, 2]],
-                                    [box_hull[x + 1, 0], box_hull[y + 1, 1], box_hull[z + 1, 2]]])
-    if perspective is not None:
-        split_mean = splits.mean(axis=1)
-        dists = np.linalg.norm(split_mean - perspective, axis=1)
-        dists[np.sum(split_mean, axis=1) == 0] = 0.
-        splits = splits[np.argsort(dists)]
-    return splits
 
 
-def getPts(points, octree, p):
-    return points[np.all(np.logical_and(points[:, :, 0] >= octree[p, 0, 0], points[:, :, 0] <= octree[p, 1, 0]), axis=1) &
-                     np.all(np.logical_and(points[:, :, 1] >= octree[p, 0, 1], points[:, :, 1] <= octree[p, 1, 1]), axis=1) &
-                     np.all(np.logical_and(points[:, :, 2] >= octree[p, 0, 2], points[:, :, 2] <= octree[p, 1, 2]), axis=1)]
+
+def getPts(points, normals, octree, p):
+    poss_tris = (
+                np.all(np.logical_and(points[:, :, 0] >= octree[p, 0, 0], points[:, :, 0] <= octree[p, 1, 0]), axis=1) &
+                np.all(np.logical_and(points[:, :, 1] >= octree[p, 0, 1], points[:, :, 1] <= octree[p, 1, 1]), axis=1) &
+                np.all(np.logical_and(points[:, :, 2] >= octree[p, 0, 2], points[:, :, 2] <= octree[p, 1, 2]), axis=1))
+    pidx = np.arange(points.shape[0])
+    if sum(poss_tris) == 0:
+        return [], []
+    pidx = pidx[poss_tris]
+    bpts = points
+    # Bounding Box test
+    '''poss_tris = (np.any(np.logical_and(points[:, :, 0] >= octree[p, 0, 0], points[:, :, 0] <= octree[p, 1, 0]), axis=1) &
+                 np.any(np.logical_and(points[:, :, 1] >= octree[p, 0, 1], points[:, :, 1] <= octree[p, 1, 1]), axis=1) &
+                 np.any(np.logical_and(points[:, :, 2] >= octree[p, 0, 2], points[:, :, 2] <= octree[p, 1, 2]), axis=1))
+    if sum(poss_tris) == 0:
+        return [], []
+    pidx = pidx[poss_tris]
+    bpts = points[poss_tris]
+    bn = normals[poss_tris]
+    c = (octree[p, 0] + octree[p, 1]) / 2
+    extent = (octree[p, 1] - octree[p, 0]) / 2
+    tvs = bpts - c[None, None, :]
+    ax = np.eye(3)
+    for v, n in itertools.product(range(3), range(3)):
+        vn = n + 1 if n < 2 else 0
+        axis = np.cross(ax[v], tvs[:, vn, :] - tvs[:, n, :])
+        pp = np.sum(tvs * axis[:, :, None], axis=1)
+        r = sum(e * abs(np.sum(a * axis, axis=1)) for e, a in zip(extent, ax))
+        poss_tris = np.max(np.array([-np.max(pp, axis=1), np.min(pp, axis=1)]), axis=0) - r <= 0
+        if sum(poss_tris) == 0:
+            return [], []
+        bpts = bpts[poss_tris]
+        bn = bn[poss_tris]
+        tvs = bpts - c[None, None, :]
+        pidx = pidx[poss_tris]
+
+    # Test the normal last
+    pp = np.sum(tvs * bn[:, :, None], axis=1)
+    r = sum(e * abs(np.sum(a * bn, axis=1)) for e, a in zip(extent, ax))
+    poss_tris = np.max(np.array([-np.max(pp, axis=1), np.min(pp, axis=1)]), axis=0) - r <= 0
+    pidx = pidx[poss_tris]'''
+    return bpts[poss_tris], pidx
 
 
-def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray = None, perspective: np.ndarray = None):
-    octree = np.zeros((sum(8**n for n in range(num_levels)), 2, 3))
-    octree[0, ...] = bounding_box
-    for level in range(num_levels - 1):
-        level_idx = sum(8**l for l in range(level))
-        next_level_idx = sum(8 ** l for l in range(level + 1))
-        with mp.Pool(processes=mp.cpu_count() - 1) as pool:
-            if points is None:
-                npo = [None for _ in range(level_idx, next_level_idx)]
-            else:
-                npo = [pool.apply(getPts, args=(points, octree, p)) for p in range(level_idx, next_level_idx)]
-            results = [pool.apply(splitBox, args=(octree[p + level_idx], npo[p], perspective)) for p in range(8**level)]
+def reassign_pts(npo, oct_sect):
+    '''for n in range(len(npo) - 1):
+        for b in range(n + 1, len(npo)):
+            if len(npo[n][0]) == 0 or len(npo[b][0]) == 0:
+                continue
+            # Check if boxes overlap at all
+            if np.all([oct_sect[n, 1, q] >= oct_sect[b, 0, q] and oct_sect[b, 1, q] >= oct_sect[n, 0, q] for q in range(3)]):
+                if npo[n][0].shape[0] < npo[b][0].shape[0]:
+                    dupes = np.logical_not([nn in npo[n][1] for nn in npo[b][1]])
+                    npo[b] = (npo[b][0][dupes], npo[b][1][dupes])
+                else:
+                    dupes = np.logical_not([nn in npo[b][1] for nn in npo[n][1]])
+                    npo[n] = (npo[n][0][dupes], npo[n][1][dupes])'''
+    return [n[0] for n in npo]
 
-        for idx, r in enumerate(results):
-            octree[next_level_idx + idx * 8:next_level_idx + (idx + 1) * 8] = r
-    return octree
+
+

@@ -506,15 +506,19 @@ def getMaxThreads(pts_per_tri: int = 0):
     maxThreads = int(np.sqrt(gpuDevice.MAX_THREADS_PER_BLOCK))
     sqrtMaxThreads = maxThreads // 2
     if pts_per_tri <= 0:
-        return sqrtMaxThreads * 2, sqrtMaxThreads
+        return sqrtMaxThreads, sqrtMaxThreads
     sqrtMaxThreads = sqrtMaxThreads // pts_per_tri
     return sqrtMaxThreads, sqrtMaxThreads, pts_per_tri
 
 
 def optimizeThreadBlocks(threads_per_block, threads):
     assert len(threads) == len(threads_per_block), 'threads dimension must equal threads_per_block dimension'
-    poss_configs = [np.array([th % n for n in range(1, tpb)]) for th, tpb in zip(threads, threads_per_block)]
-    return tuple(
-        max(1, th // (np.max(np.where(pc == pc.min())[0]) + 1))
+    poss_configs = [np.array([th % n for n in range(2, tpb)]) for th, tpb in zip(threads, threads_per_block)]
+    new_tpb = tuple(
+        (max(1, np.max(np.where(pc == pc.max())[0]) + 2) if np.all(pc > 0) else np.max(np.where(pc == 0)[0]) + 2) if th > 1 else 1
         for th, pc in zip(threads, poss_configs)
+    )
+    return new_tpb, tuple(
+        max(1, th // pc) + (1 if th % pc != 0 else 0) if th > 1 else 1
+        for th, pc in zip(threads, new_tpb)
     )

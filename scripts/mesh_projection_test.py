@@ -33,12 +33,12 @@ rx_gain = 22  # dB
 tx_gain = 22  # dB
 rec_gain = 100  # dB
 ant_transmit_power = 100  # watts
-noise_power_db = -110
+noise_power_db = -120
 npulses = 64
 plp = .75
 fdelay = 10.
 upsample = 8
-num_bounces = 2
+num_bounces = 1
 nbox_levels = 5
 nstreams = 2
 points_to_sample = 2**15
@@ -58,9 +58,9 @@ data_t = sdr_f[0].pulse_time[idx_t]
 
 pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-# gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=128, ncols=128, az=-68.5715881976 * DTR)
+# gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=128, ncols=128, az=-68.5715881976 * DTR)
 # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=128, ncols=128)
-gx, gy, gz = bg.getGrid(grid_origin, 400, 400, nrows=1024, ncols=1024)
+gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=1024, ncols=1024)
 grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 

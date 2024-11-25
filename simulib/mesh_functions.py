@@ -1,6 +1,8 @@
+import itertools
+import multiprocessing as mp
 from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
-    calcBounceWithoutReflect
+    calcBounceWithoutReflect, assignBoxPoints, splitBox, calcBoxOverlap
 from .simulation_functions import azelToVec
 import numpy as np
 import open3d as o3d
@@ -10,6 +12,8 @@ import nvtx
 c0 = 299792458.0
 fs = 2e9
 _float = np.float32
+
+BOX_CUSHION = .01
 
 
 def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d.geometry.TriangleMesh:
@@ -29,7 +33,7 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
         brit = 0
         scaling = 2
         while len(tm.triangles) > points and brit < 10:
-            scaling *= 1.5
+            scaling *= len(tm.triangles) / points
             tm = mesh.simplify_vertex_clustering(vertex_size * scaling)
             tm.remove_duplicated_vertices()
             tm.remove_unreferenced_vertices()
@@ -92,8 +96,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     debug_raypower = []
 
     # GPU device calculations
-    threads_per_block = getMaxThreads()
-    bprun = optimizeThreadBlocks(threads_per_block, (npulses, npoints))
+    threads_per_block, bprun = optimizeThreadBlocks(getMaxThreads(), (npulses, npoints))
 
     # These are the mesh constants that don't change with intersection points
 
@@ -187,8 +190,7 @@ def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray
                             npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, pointing_az, pointing_el):
     npulses = a_obs_pt.shape[0]
     # GPU device calculations
-    threads_per_block = getMaxThreads()
-    bprun = optimizeThreadBlocks(threads_per_block, (npulses, npoints))
+    threads_per_block, bprun = optimizeThreadBlocks(getMaxThreads(), (npulses, npoints))
 
     # These are the mesh constants that don't change with intersection points
     tri_norm_gpu = cuda.to_device(tri_norm.astype(_float))
@@ -221,3 +223,70 @@ def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray
         )
 
     return points[:npoints, :]
+
+
+def splitNextLevel(box_hull: np.ndarray = None, perspective: np.ndarray = None):
+    splits = np.zeros((8, 2, 3))
+    for bidx, (x, y, z) in enumerate(itertools.product(range(2), range(2), range(2))):
+        splits[bidx, :] = np.array([[box_hull[x, 0], box_hull[y, 1], box_hull[z, 2]],
+                                    [box_hull[x + 1, 0], box_hull[y + 1, 1], box_hull[z + 1, 2]]])
+    if perspective is not None:
+        split_mean = splits.mean(axis=1)
+        dists = np.linalg.norm(split_mean - perspective, axis=1)
+        dists[np.sum(split_mean, axis=1) == 0] = 0.
+        splits = splits[np.argsort(dists)]
+    return splits
+
+
+def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray = None, normals: np.ndarray = None,
+              perspective: np.ndarray = None):
+    max_tpb = getMaxThreads()
+    pts_gpu = cuda.to_device(points.astype(_float))
+    max_ex = points.max(axis=1)
+    min_ex = points.min(axis=1)
+    max_gpu = cuda.to_device(max_ex.astype(_float))
+    min_gpu = cuda.to_device(min_ex.astype(_float))
+    octree = np.zeros((sum(8 ** n for n in range(num_levels)), 2, 3))
+    octree[0, ...] = bounding_box
+    for level in range(num_levels - 1):
+        level_idx = sum(8 ** l for l in range(level))
+        next_level_idx = sum(8 ** l for l in range(level + 1))
+        threads_per_block, bprun = optimizeThreadBlocks(max_tpb, (points.shape[0], next_level_idx - level_idx))
+        octree_gpu = cuda.to_device(octree[level_idx:next_level_idx].astype(_float))
+        ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], octree_gpu.shape[0])).astype(bool))
+        assignBoxPoints[bprun, threads_per_block](pts_gpu, octree_gpu, ptidx_gpu)
+
+        box_idxes = ptidx_gpu.copy_to_host()
+
+        box_inter_gpu = cuda.to_device(np.zeros((octree_gpu.shape[0], octree_gpu.shape[0]), dtype=_float))
+        threads_per_block, bprun = optimizeThreadBlocks(max_tpb, (next_level_idx - level_idx, next_level_idx - level_idx))
+        calcBoxOverlap[bprun, threads_per_block](ptidx_gpu, octree_gpu, max_gpu, min_gpu, box_inter_gpu)
+        overlaps = box_inter_gpu.copy_to_host()
+
+        aind, bind = np.tril_indices(box_idxes.shape[1])
+        for a, b in zip(aind, bind):
+            if overlaps[a, b] > 0 and overlaps[b, a] > 0:
+                if overlaps[a, b] < overlaps[b, a]:
+                    box_idxes[box_idxes[:, a] & box_idxes[:, b], b] = False
+                else:
+                    box_idxes[box_idxes[:, a] & box_idxes[:, b], a] = False
+
+        # split_gpu = cuda.to_device(np.array([points[box_idxes[:, n]].mean(axis=(0, 1)) for n in range(box_idxes.shape[1])]).astype(_float))
+        # extent_gpu = cuda.to_device((np.inf * np.ones(split_gpu.shape)).astype(_float))
+
+        # splitBox[bprun, threads_per_block](max_gpu, min_gpu, ptidx_gpu, split_gpu, extent_gpu)
+        # splits = split_gpu.copy_to_host()
+
+        with mp.Pool(processes=mp.cpu_count() - 1) as pool:
+            if points is None:
+                npo = [None for _ in range(level_idx, next_level_idx)]
+            else:
+                # npo = [np.array([min_ex[box_idxes[:, n]].min(axis=0), splits[n], max_ex[box_idxes[:, n]].max(axis=0)]) for n in range(box_idxes.shape[1])]
+                npo = [np.array([min_ex[box_idxes[:, n]].min(axis=0), points[box_idxes[:, n]].mean(axis=(0, 1)), max_ex[box_idxes[:, n]].max(axis=0)])
+                       if np.sum(box_idxes[:, n]) > 0 else np.zeros((3, 3)) for n in range(box_idxes.shape[1])]
+            results = [pool.apply(splitNextLevel, args=(npo[p], perspective)) for p in
+                       range(8 ** level)]
+
+        for idx, r in enumerate(results):
+            octree[next_level_idx + idx * 8:next_level_idx + (idx + 1) * 8] = r
+    return octree

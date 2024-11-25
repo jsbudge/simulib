@@ -340,3 +340,88 @@ def calcIntersectionPoints(ray_origin, ray_dir, ray_power, bounding_box, tri_box
             ray_origin[tt, ray_idx, 2] = inter.z
         else:
             ray_power[tt, ray_idx] = 0.
+            
+            
+@cuda.jit(device=True)
+def seperatingAxisTest(axis, extent, tut0, tut1, tut2):
+    r = extent.x * abs(dot(make_float3(1, 0, 0), axis)) + extent.y * abs(
+        dot(make_float3(0, 1, 0), axis)) + extent.z * abs(dot(make_float3(0, 0, 1), axis))
+    return (
+        max(
+            -max(dot(tut0, axis), dot(tut1, axis), dot(tut2, axis)),
+            min(dot(tut0, axis), dot(tut1, axis), dot(tut2, axis)),
+        )
+        <= r
+    )
+    
+
+
+@cuda.jit()
+def assignBoxPoints(points, octree, point_idx):
+    pt, box = cuda.grid(ndim=2)
+    if pt < points.shape[0] and box < octree.shape[0]:
+        # Bounding Box test
+        if (((points[pt, 0, 0] >= octree[box, 0, 0] and points[pt, 0, 0] <= octree[box, 1, 0]) or (points[pt, 1, 0] >= octree[box, 0, 0] and points[pt, 1, 0] <= octree[box, 1, 0]) or (points[pt, 2, 0] >= octree[box, 0, 0] and points[pt, 2, 0] <= octree[box, 1, 0])) and
+            ((points[pt, 0, 1] >= octree[box, 0, 1] and points[pt, 0, 1] <= octree[box, 1, 1]) or (points[pt, 1, 1] >= octree[box, 0, 1] and points[pt, 1, 1] <= octree[box, 1, 1]) or (points[pt, 2, 1] >= octree[box, 0, 1] and points[pt, 2, 1] <= octree[box, 1, 1])) and
+             ((points[pt, 0, 2] >= octree[box, 0, 2] and points[pt, 0, 2] <= octree[box, 1, 2]) or (points[pt, 1, 2] >= octree[box, 0, 2] and points[pt, 1, 2] <= octree[box, 1, 2]) or (points[pt, 2, 2] >= octree[box, 0, 2] and points[pt, 2, 2] <= octree[box, 1, 2]))):
+            c = make_float3(octree[box, 0, 0] + octree[box, 1, 0], octree[box, 0, 1] + octree[box, 1, 1], octree[box, 0, 2] + octree[box, 1, 2]) * .5
+            extent = make_float3(-octree[box, 0, 0] + octree[box, 1, 0], -octree[box, 0, 1] + octree[box, 1, 1], -octree[box, 0, 2] + octree[box, 1, 2]) * .5
+            tut0 = make_float3(points[pt, 0, 0], points[pt, 0, 1], points[pt, 0, 2]) - c
+            tut1 = make_float3(points[pt, 1, 0], points[pt, 1, 1], points[pt, 1, 2]) - c
+            tut2 = make_float3(points[pt, 2, 0], points[pt, 2, 1], points[pt, 2, 2]) - c
+
+            if seperatingAxisTest(cross(make_float3(1, 0, 0), tut1 - tut0), extent, tut0, tut1, tut2):
+                if seperatingAxisTest(cross(make_float3(0, 1, 0), tut1 - tut0), extent, tut0, tut1, tut2):
+                    if seperatingAxisTest(cross(make_float3(0, 0, 1), tut1 - tut0), extent, tut0, tut1, tut2):
+                        if seperatingAxisTest(cross(make_float3(1, 0, 0), tut2 - tut1), extent, tut0, tut1, tut2):
+                            if seperatingAxisTest(cross(make_float3(0, 1, 0), tut2 - tut1), extent, tut0, tut1, tut2):
+                                if seperatingAxisTest(cross(make_float3(0, 0, 1), tut2 - tut1), extent, tut0, tut1, tut2):
+                                    if seperatingAxisTest(cross(make_float3(1, 0, 0), tut0 - tut2), extent, tut0, tut1, tut2):
+                                        if seperatingAxisTest(cross(make_float3(0, 1, 0), tut0 - tut2), extent, tut0, tut1, tut2):
+                                            if seperatingAxisTest(cross(make_float3(0, 0, 1), tut0 - tut2), extent,
+                                                                  tut0, tut1, tut2):
+                                                if seperatingAxisTest(cross(tut1 - tut0, tut2 - tut1), extent,
+                                                                      tut0, tut1, tut2):
+                                                    point_idx[pt, box] = True
+
+
+@cuda.jit()
+def splitBox(maxes, mines, point_idx, octree_splits, octree_vals):
+    pt, box = cuda.grid(ndim=2)
+    if pt < maxes.shape[0] and box < octree_splits.shape[0]:
+        for n in prange(3):
+            mx = maxes[pt, n]
+            sum_num = 0
+            sum_denom = 0
+            sum_balance = 0
+            for i in prange(maxes.shape[0]):
+                if point_idx[i, box]:
+                    sum_num += 1 if maxes[i, n] <= mx else 0
+                    sum_denom += 1 if mx <= mines[i, n] else 0
+                    sum_balance += 1 if maxes[i, n] <= mx or mx <= mines[i, n] else 0
+            val = (1 + abs(sum_num / (sum_denom + 1e-9) - 1)) * sum_balance
+            cuda.atomic.min(octree_vals, (box, n), val)
+            if octree_vals[box, n] >= val:
+                octree_splits[box, n] = mx
+                
+                
+@cuda.jit()
+def calcBoxOverlap(box_idxes, octree_vals, maxes, mines, box_inter):
+    pt, box = cuda.grid(ndim=2)
+    if box_inter.shape[0] > pt != box < box_inter.shape[0]:
+        asum = 0
+        octa_min = make_float3(octree_vals[pt, 0, 0], octree_vals[pt, 0, 1], octree_vals[pt, 0, 2])
+        octa_max = make_float3(octree_vals[pt, 1, 0], octree_vals[pt, 1, 1], octree_vals[pt, 1, 2])
+        for i in prange(maxes.shape[0]):
+            if box_idxes[i, pt] and box_idxes[i, box]:
+                diff = make_float3(maxes[i, 0], maxes[i, 1], maxes[i, 2]) - octa_max
+                asum += max(diff.x, 0)
+                asum += max(diff.y, 0)
+                asum += max(diff.z, 0)
+                diff = octa_min - make_float3(mines[i, 0], mines[i, 1], mines[i, 2])
+                asum += max(diff.x, 0)
+                asum += max(diff.y, 0)
+                asum += max(diff.z, 0)
+        box_inter[pt, box] = asum
+    
+

@@ -161,8 +161,7 @@ def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndar
     gz_gpu = cuda.to_device(gz)
 
     # GPU device calculations
-    threads_per_block = getMaxThreads()
-    bpg_bpj = optimizeThreadBlocks(threads_per_block, nbpj_pts)
+    threads_per_block, bpg_bpj = optimizeThreadBlocks(getMaxThreads(), nbpj_pts)
     rbj = np.zeros(nbpj_pts, dtype=np.complex128)
 
     with cuda.pinned(panrx, elrx, posrx, postx, rbj, pulse_data):
@@ -197,8 +196,7 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
         gz_gpu = cuda.to_device(gz)
 
         # GPU device calculations
-        threads_per_block = getMaxThreads()
-        bpg_bpj = optimizeThreadBlocks(threads_per_block, nbpj_pts)
+        threads_per_block, bpg_bpj = optimizeThreadBlocks(getMaxThreads(), nbpj_pts)
 
         # Run through loop to get data simulated
         # Data blocks for imaging
