@@ -1,6 +1,7 @@
 from io import BytesIO
 import numpy as np
 import requests
+from pygeodesy import GeoidPGM, LatLon_
 from scipy.interpolate import interpn
 from scipy.spatial.transform import Rotation as rot
 from itertools import product
@@ -32,7 +33,7 @@ def getDTEDName(lat, lon):
     direw = 'w' if tmplon < 0 else 'e'
     dirns = 's' if tmplat < 0 else 'n'
     if os.name == 'nt':
-        return 'Z:\\dted\\%s%03d\\%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+        return 'E:\\dted\\%s%03d\\%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
     else:
         return '/data1/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
 
@@ -61,27 +62,15 @@ def findPowerOf2(x):
     return int(2 ** (np.ceil(np.log2(x))))
 
 
-def undulationEGM96(lat, lon, egmdatfile=None):
-    if egmdatfile is None:
-        if os.name == 'nt':
-            egmdatfile = "Z:\\dted\\EGM96.DAT"
-        else:
-            egmdatfile = "/data1/dted/EGM96.DAT"
-    with open(egmdatfile, "rb") as f:
-        emg96 = np.fromfile(f, 'double', 1441 * 721, '')
-        eg_n = np.ceil(lat / .25) * .25
-        eg_s = np.floor(lat / .25) * .25
-        eg_e = np.ceil(lon / .25) * .25
-        eg_w = np.floor(lon / .25) * .25
-        eg1 = emg96[((eg_w + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_n + 90 + .25) / .25 - 1).astype(int)]
-        eg2 = emg96[((eg_w + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_s + 90 + .25) / .25 - 1).astype(int)]
-        eg3 = emg96[((eg_e + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_n + 90 + .25) / .25 - 1).astype(int)]
-        eg4 = emg96[((eg_e + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_s + 90 + .25) / .25 - 1).astype(int)]
-        egc = (eg2 / ((eg_e - eg_w) * (eg_n - eg_s))) * (eg_e - lon) * (eg_n - lat) + \
-              (eg4 / ((eg_e - eg_w) * (eg_n - eg_s))) * (lon - eg_w) * (eg_n - lat) + \
-              (eg1 / ((eg_e - eg_w) * (eg_n - eg_s))) * (eg_e - lon) * (lat - eg_s) + \
-              (eg3 / ((eg_e - eg_w) * (eg_n - eg_s))) * (lon - eg_w) * (lat - eg_s)
-    return egc
+def undulationEGM96(lat, lon):
+    # Create an EGM96 geoid object
+    egm96 = GeoidPGM('C:\\Users\\Jeff\\repo\\simulib\\simulib\\geoids\\egm96-5.pgm')
+
+    # Calculate undulation at a specific location
+    if isinstance(lat, float):
+        return egm96(LatLon_(lat, lon))
+    else:
+        return [egm96(LatLon_(la, lo)) for la, lo in zip(lat, lon)]
 
 
 def getElevationMap(lats, lons, und=True, interp_method='linear'):

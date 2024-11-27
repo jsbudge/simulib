@@ -204,6 +204,12 @@ class SDREnvironment(Environment):
         except TypeError:
             asi = sdr.loadASI(sdr.files['asi'][0])
             grid = abs(asi)
+        except FileNotFoundError:
+            print('ASI not found.')
+            asi = np.random.rand(2000, 2000)
+            asi[250, 250] = 10
+            asi[750, 750] = 10
+            grid = asi
         self._sdr = sdr
         self._asi = asi
         self.heading = np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])

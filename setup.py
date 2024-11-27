@@ -13,5 +13,5 @@ setup(
    author_email='jbudge@artemisinc.net',
    url="http://www.foopackage.example/",
    packages=['simulib'],  #same as name
-   install_requires=['numpy', 'scipy', 'numba', 'open3d', 'nvtx', 'tqdm', 'plotly', 'matplotlib', 'sdrparse'], #external packages as dependencies
+   install_requires=['numpy', 'scipy', 'numba', 'open3d', 'tqdm', 'plotly', 'matplotlib', 'sdrparse'], #external packages as dependencies
 )

@@ -1,11 +1,9 @@
 import numpy as np
 from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states
-import nvtx
 from .cuda_kernels import getMaxThreads, backproject, genRangeProfile, optimizeThreadBlocks
 from .grid_helper import SDREnvironment
 from .platform_helper import SDRPlatform, RadarPlatform
-import cupy
 from tqdm import tqdm
 from sdrparse import load, SDRParse
 
@@ -64,13 +62,13 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
 
     # Chirp and matched filter calculations
     bpj_wavelength = a_sdr.getBackprojectWavelength(a_channel)
-    mfilt_gpu = cupy.array(a_sdr.genMatchedFilter(0, fft_len=fft_len), dtype=np.complex128)
+    mfilt_gpu = cuda.to_device(a_sdr.genMatchedFilter(0, fft_len=fft_len), dtype=np.complex128)
 
     # Calculate out points on the ground
     gx, gy, gz = a_bg.getGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
-    gx_gpu = cupy.array(gx, dtype=_float)
-    gy_gpu = cupy.array(gy, dtype=_float)
-    gz_gpu = cupy.array(gz, dtype=_float)
+    gx_gpu = cuda.to_device(gx, dtype=_float)
+    gy_gpu = cuda.to_device(gy, dtype=_float)
+    gz_gpu = cuda.to_device(gz, dtype=_float)
 
     if a_debug:
         pts_debug = cupy.zeros((3, *gx.shape), dtype=_float)
@@ -91,20 +89,20 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
     r_bpj_final = np.zeros(nbpj_pts, dtype=np.complex128)
     for ts, frames in getPulseTimeGen(a_sdr[a_channel].pulse_time, a_sdr[a_channel].frame_num, a_cpi_len, True):
         tmp_len = len(ts)
-        panrx_gpu = cupy.array(a_rp.pan(ts), dtype=_float)
-        elrx_gpu = cupy.array(a_rp.tilt(ts), dtype=_float)
-        posrx_gpu = cupy.array(a_rp.rxpos(ts), dtype=_float)
-        postx_gpu = cupy.array(a_rp.txpos(ts), dtype=_float)
-        bpj_grid = cupy.zeros(nbpj_pts, dtype=np.complex128)
+        panrx_gpu = cuda.to_device(a_rp.pan(ts), dtype=_float)
+        elrx_gpu = cuda.to_device(a_rp.tilt(ts), dtype=_float)
+        posrx_gpu = cuda.to_device(a_rp.rxpos(ts), dtype=_float)
+        postx_gpu = cuda.to_device(a_rp.txpos(ts), dtype=_float)
+        bpj_grid = cuda.to_device(np.zeros(nbpj_pts, dtype=np.complex128))
 
         # Reset the grid for truth data
-        rtdata = cupy.fft.fft(cupy.array(a_sdr.getPulses(frames, a_channel)[1],
+        rtdata = np.fft.fft(cuda.to_device(a_sdr.getPulses(frames, a_channel)[1],
                                          dtype=np.complex128), fft_len, axis=0) * mfilt_gpu[:, None]
-        upsample_data = cupy.zeros((up_fft_len, tmp_len), dtype=np.complex128)
+        upsample_data = cuda.to_device(np.zeros((up_fft_len, tmp_len), dtype=np.complex128))
         upsample_data[:fft_len // 2, :] = rtdata[:fft_len // 2, :]
         upsample_data[-fft_len // 2:, :] = rtdata[-fft_len // 2:, :]
-        rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * a_upsample, :]
-        cupy.cuda.Device().synchronize()
+        rtdata = np.fft.ifft(upsample_data, axis=0)[:nsam * a_upsample, :]
+        cuda.synchronize()
 
         backproject[bpg_bpj, threads_per_block](
             postx_gpu,
@@ -128,7 +126,7 @@ def runBackproject(a_sdr: SDRParse, a_rp: SDRPlatform, a_bg: SDREnvironment, a_f
             angs_debug,
             a_debug and ts[0] < a_rp.gpst.mean() <= ts[-1],
         )
-        cupy.cuda.Device().synchronize()
+        cuda.synchronize()
 
         if (ts[0] < a_rp.gpst.mean() <= ts[-1]) and a_debug:
             r_debug_data = (a_rp.pos(ts[-1]).T, rtdata.get(), angs_debug.get(), pts_debug.get())
@@ -181,7 +179,6 @@ def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndar
 
     return rbj
 
-@nvtx.annotate(color='red')
 def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray], elrx: list[np.ndarray],
                            posrx: list[np.ndarray], postx: list[np.ndarray], gz: np.ndarray, wavelength: float,
                            near_range_s: float, upsample_fs: float, az_half_bw: float, el_half_bw: float,
@@ -254,17 +251,17 @@ def genSimPulseData(a_rp: RadarPlatform,
     # Calculate out points on the ground
     gx, gy, gz = a_bg.getGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
     rg = a_bg.getRefGrid(a_origin, a_grid_width, a_grid_height, *nbpj_pts, a_bg.heading if a_rotate_grid else 0)
-    gx_gpu = cupy.array(gx, dtype=_float)
-    gy_gpu = cupy.array(gy, dtype=_float)
-    gz_gpu = cupy.array(gz, dtype=_float)
-    refgrid_gpu = cupy.array(rg, dtype=_float)
+    gx_gpu = cuda.to_device(gx, dtype=_float)
+    gy_gpu = cuda.to_device(gy, dtype=_float)
+    gz_gpu = cuda.to_device(gz, dtype=_float)
+    refgrid_gpu = cuda.to_device(rg, dtype=_float)
 
     if a_debug:
-        pts_debug = cupy.zeros((3, *gx.shape), dtype=_float)
-        angs_debug = cupy.zeros((3, *gx.shape), dtype=_float)
+        pts_debug = cuda.to_device(np.zeros((3, *gx.shape), dtype=_float))
+        angs_debug = cuda.to_device(np.zeros((3, *gx.shape), dtype=_float))
     else:
-        pts_debug = cupy.zeros((1, 1), dtype=_float)
-        angs_debug = cupy.zeros((1, 1), dtype=_float)
+        pts_debug = cuda.to_device(np.zeros((1, 1), dtype=_float))
+        angs_debug = cuda.to_device(np.zeros((1, 1), dtype=_float))
 
     # GPU device calculations
     threads_per_block = getMaxThreads()
@@ -274,7 +271,7 @@ def genSimPulseData(a_rp: RadarPlatform,
                            (10 ** (a_ant_gain / 20)) ** 2
                            * bpj_wavelength ** 2 / (4 * np.pi) ** 3)
     noise_level = 10 ** (a_noise_level / 20) / np.sqrt(2) / a_upsample
-    chirp_gpu = cupy.array(a_chirp, dtype=np.complex128)
+    chirp_gpu = cuda.to_device(a_chirp, dtype=np.complex128)
     rng_states = create_xoroshiro128p_states(threads_per_block[0] * bpg_bpj[0], seed=1)
 
     # Run through loop to get data simulated
@@ -282,12 +279,12 @@ def genSimPulseData(a_rp: RadarPlatform,
     frame_idx = a_sdr[a_channel].frame_num if a_sdr else np.arange(len(dt))
     for ts, frames in getPulseTimeGen(dt, frame_idx, a_cpi_len, True):
         tmp_len = len(ts)
-        panrx_gpu = cupy.array(a_rp.pan(ts), dtype=_float)
-        elrx_gpu = cupy.array(a_rp.tilt(ts), dtype=_float)
-        posrx_gpu = cupy.array(a_rp.rxpos(ts), dtype=_float)
-        postx_gpu = cupy.array(a_rp.txpos(ts), dtype=_float)
-        pd_r = cupy.zeros((nsam, tmp_len), dtype=_float)
-        pd_i = cupy.zeros((nsam, tmp_len), dtype=_float)
+        panrx_gpu = cuda.to_device(a_rp.pan(ts), dtype=_float)
+        elrx_gpu = cuda.to_device(a_rp.tilt(ts), dtype=_float)
+        posrx_gpu = cuda.to_device(a_rp.rxpos(ts), dtype=_float)
+        postx_gpu = cuda.to_device(a_rp.txpos(ts), dtype=_float)
+        pd_r = cuda.to_device(np.zeros((nsam, tmp_len), dtype=_float))
+        pd_i = cuda.to_device(np.zeros((nsam, tmp_len), dtype=_float))
 
         genRangeProfile[bpg_bpj, threads_per_block](gx_gpu, gy_gpu, gz_gpu, refgrid_gpu, postx_gpu, posrx_gpu,
                                                     panrx_gpu, elrx_gpu, panrx_gpu, elrx_gpu, pd_r, pd_i,
@@ -296,14 +293,14 @@ def genSimPulseData(a_rp: RadarPlatform,
                                                     receive_power_scale, 1, a_debug)
 
         pdata = pd_r + 1j * pd_i
-        rtdata = cupy.fft.fft(pdata, fft_len, axis=0) * chirp_gpu[:, None]
-        upsample_data = cupy.array(np.random.normal(0, noise_level, (up_fft_len, tmp_len)) +
+        rtdata = np.fft.fft(pdata, fft_len, axis=0) * chirp_gpu[:, None]
+        upsample_data = cuda.to_device(np.random.normal(0, noise_level, (up_fft_len, tmp_len)) +
                                    1j * np.random.normal(0, noise_level, (up_fft_len, tmp_len)),
                                    dtype=np.complex128)
         upsample_data[:fft_len // 2, :] += rtdata[:fft_len // 2, :]
         upsample_data[-fft_len // 2:, :] += rtdata[-fft_len // 2:, :]
         # rtdata = cupy.fft.ifft(upsample_data, axis=0)[:nsam * a_upsample, :]
-        cupy.cuda.Device().synchronize()
+        cuda.synchronize()
         yield upsample_data.get()
 
     del panrx_gpu

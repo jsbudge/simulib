@@ -2,12 +2,11 @@ import itertools
 import multiprocessing as mp
 from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
-    calcBounceWithoutReflect, assignBoxPoints, splitBox, calcBoxOverlap
+    calcBounceWithoutReflect, assignBoxPoints, calcBoxOverlap
 from .simulation_functions import azelToVec
 import numpy as np
 import open3d as o3d
 from .cuda_kernels import getMaxThreads, optimizeThreadBlocks
-import nvtx
 
 c0 = 299792458.0
 fs = 2e9
@@ -77,7 +76,6 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
 
 
 
-@nvtx.annotate(color='blue')
 def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, num_bounces: int=3,

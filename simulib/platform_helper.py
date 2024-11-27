@@ -1,7 +1,6 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
-
 from typing import Type
 from .simulation_functions import llh2enu, findPowerOf2
 

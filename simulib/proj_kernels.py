@@ -1,22 +1,7 @@
 import cmath
 import math
-from profile import runctx
-
-from simulation_functions import factors
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from tqdm import tqdm
 from numba import cuda
-from line_profiler_pycharm import profile
-import cupy
-from simulation_functions import findPowerOf2, azelToVec
 import numpy as np
-import open3d as o3d
-from cuda_kernels import applyRadiationPattern, applyRadiationPatternCPU, getMaxThreads
-import plotly.express as px
-from sklearn.cluster import KMeans
-import plotly.io as pio
-from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_normal_float32, xoroshiro128p_uniform_float32
-
 c0 = 299792458.0
 TAC = 125e6
 fs = 2e9

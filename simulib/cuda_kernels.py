@@ -504,7 +504,7 @@ def ambiguity(s1, s2, prf, dopp_bins, a_fs, mag=True, normalize=True):
 def getMaxThreads(pts_per_tri: int = 0):
     gpuDevice = cuda.get_current_device()
     maxThreads = int(np.sqrt(gpuDevice.MAX_THREADS_PER_BLOCK))
-    sqrtMaxThreads = maxThreads // 2
+    sqrtMaxThreads = maxThreads
     if pts_per_tri <= 0:
         return sqrtMaxThreads, sqrtMaxThreads
     sqrtMaxThreads = sqrtMaxThreads // pts_per_tri

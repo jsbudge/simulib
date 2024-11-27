@@ -2,7 +2,6 @@ import ctypes  # C interop helpers
 import math
 from enum import Enum
 
-import cupy as cp  # CUDA bindings
 import numpy as np  # Packing of structures in C-compatible format
 from numba import cuda, float32, int32, types, uint8, uint32
 from numba.core.extending import overload
