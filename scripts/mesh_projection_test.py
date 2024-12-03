@@ -248,7 +248,7 @@ if __name__ == '__main__':
                 i=mesh.tri_idx[:, 0],
                 j=mesh.tri_idx[:, 1],
                 k=mesh.tri_idx[:, 2],
-                # facecolor=triangle_colors,
+                facecolor=triangle_colors,
                 showscale=True
             )
         ])
@@ -262,23 +262,23 @@ if __name__ == '__main__':
     px.scatter(db(single_pulse[0].flatten())).show()
     px.scatter(db(single_mf_pulse[0].flatten())).show()
 
-    plt.figure('Data')
+    '''plt.figure('Data')
     plt.imshow(db(single_mf_pulse * 1e8))
     plt.xlabel('Interpolated Range Bin')
     plt.ylabel('Pulse Number')
     plt.title('Example CPI - Generated Data')
     plt.colorbar()
     plt.axis('tight')
-    plt.show()
+    plt.show()'''
 
-    px.imshow(db(single_mf_pulse * 1e8))
+    px.imshow(db(single_mf_pulse * 1e8)).show()
 
-    plt.figure('Backprojection')
+    # plt.figure('Backprojection')
     db_bpj = db(bpj_grid)
-    plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2])
+    '''plt.imshow(db_bpj, cmap='gray', origin='lower', clim=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2])
     plt.axis('tight')
     plt.axis('off')
-    plt.show()
+    plt.show()'''
 
     px.imshow(db_bpj, origin='lower', color_continuous_scale='gray',
               range_color=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2]).show()
