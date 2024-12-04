@@ -1,7 +1,6 @@
 from io import BytesIO
 import numpy as np
 import requests
-from pygeodesy import GeoidPGM, LatLon_
 from scipy.interpolate import interpn
 from scipy.spatial.transform import Rotation as rot
 from itertools import product
@@ -13,6 +12,9 @@ import os
 from functools import reduce
 from dted import Tile, LatLon
 from PIL import Image
+from importlib import resources as impresources
+from simulib import geoids
+
 
 pio.renderers.default = 'browser'
 
@@ -54,7 +56,7 @@ def db(x):
     if isinstance(ret, np.ndarray):
         ret[ret < 1e-15] = 1e-15
     else:
-        ret = ret if ret < 1e-15 else 1e-15
+        ret = min(ret, 1e-15)
     return 20 * np.log10(ret)
 
 
@@ -63,14 +65,23 @@ def findPowerOf2(x):
 
 
 def undulationEGM96(lat, lon):
-    # Create an EGM96 geoid object
-    egm96 = GeoidPGM('C:\\Users\\Jeff\\repo\\simulib\\simulib\\geoids\\egm96-5.pgm')
-
-    # Calculate undulation at a specific location
-    if isinstance(lat, float):
-        return egm96(LatLon_(lat, lon))
-    else:
-        return [egm96(LatLon_(la, lo)) for la, lo in zip(lat, lon)]
+    inp_file = (impresources.files(geoids) / 'EGM96.DAT')
+    with inp_file.open("rb") as f:  # or "rt" as text file with universal newlines
+        egm96 = np.fromfile(f, 'double', 1441 * 721, '')
+    eg_n = np.ceil(lat / .25) * .25
+    eg_s = np.floor(lat / .25) * .25
+    eg_e = np.ceil(lon / .25) * .25
+    eg_w = np.floor(lon / .25) * .25
+    eg1 = egm96[((eg_w + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_n + 90 + .25) / .25 - 1).astype(int)]
+    eg2 = egm96[((eg_w + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_s + 90 + .25) / .25 - 1).astype(int)]
+    eg3 = egm96[((eg_e + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_n + 90 + .25) / .25 - 1).astype(int)]
+    eg4 = egm96[((eg_e + 180 + .25) / .25).astype(int) - 1 + 1441 * ((eg_s + 90 + .25) / .25 - 1).astype(int)]
+    return (
+        (eg2 / ((eg_e - eg_w) * (eg_n - eg_s))) * (eg_e - lon) * (eg_n - lat)
+        + (eg4 / ((eg_e - eg_w) * (eg_n - eg_s))) * (lon - eg_w) * (eg_n - lat)
+        + (eg1 / ((eg_e - eg_w) * (eg_n - eg_s))) * (eg_e - lon) * (lat - eg_s)
+        + (eg3 / ((eg_e - eg_w) * (eg_n - eg_s))) * (lon - eg_w) * (lat - eg_s)
+    )
 
 
 def getElevationMap(lats, lons, und=True, interp_method='linear'):

@@ -41,12 +41,13 @@ if __name__ == '__main__':
     upsample = 8
     num_bounces = 1
     nbox_levels = 5
-    nstreams = 1
-    points_to_sample = 2**15
+    nstreams = 2
+    points_to_sample = 2**0
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**16
     grid_origin = (40.139343, -111.663541, 1360.10812)
-    fnme = 'E:\SDR_DATA\RAW\\08072024\SAR_08072024_111617.sar'
+    fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
+    triangle_colors=None
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
@@ -69,10 +70,10 @@ if __name__ == '__main__':
     mesh = o3d.geometry.TriangleMesh()
     mesh_ids = []
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+    mesh_ids = np.asarray(mesh.triangle_material_ids)
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -86,11 +87,11 @@ if __name__ == '__main__':
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
-    mesh = readCombineMeshFile('E:\meshes\plot.obj', points=30000000)
+    '''mesh = readCombineMeshFile('E:\meshes\plot.obj', points=30000000)
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     mesh_ids = np.asarray(mesh.triangle_material_ids)
-    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)
+    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
 
 
     '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
@@ -154,7 +155,7 @@ if __name__ == '__main__':
     # Load in boxes and meshes for speedup of ray tracing
     print('Loading mesh box structure...', end='')
     ptsam = min(points_to_sample, max_pts_per_run)
-    try:
+    '''try:
         msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
         msigmas[0] = msigmas[15] = .5  # seats
         msigmas[6] = msigmas[13] = msigmas[17] = .5  # body
@@ -168,12 +169,11 @@ if __name__ == '__main__':
         mkss[6] = mkss[13] = mkss[17] = .8  # body
         mkss[12] = mkss[4] = .01  # windshield
         # msigmas[28] = 2
-        mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss, octree_perspective=rp.txpos(data_t).mean(axis=0))
+        mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss)
     except ValueError:
         print('Error in getting material sigmas.')
-        mesh = Mesh(mesh, num_box_levels=nbox_levels, octree_perspective=rp.txpos(data_t).mean(axis=0))
-    except IndexError:
-        mesh = Mesh(mesh, num_box_levels=nbox_levels, octree_perspective=rp.txpos(data_t).mean(axis=0))
+        mesh = Mesh(mesh, num_box_levels=nbox_levels)'''
+    mesh = Mesh(mesh, num_box_levels=nbox_levels)
     print('Done.')
 
     sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))

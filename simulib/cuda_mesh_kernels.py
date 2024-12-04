@@ -185,8 +185,10 @@ def traverseOctreeAndIntersection(ro, rd, bounding_box, rho, tri_box_idx, tri_bo
                                 inv_rng = 1 / int_rng
                                 b = tb + 0.
                                 # This is the phong reflection model to get nrho
-                                nrho = (tri_material[ti, 1] * max(0, dot(ro - tinter, tn) * inv_rng) * rho +
-                                                tri_material[ti, 2] * max(0, 1 - tri_material[ti, 0] * (1 - dot(b, ro) * inv_rng)) ** 2 * rho) * (inv_rng * inv_rng)
+                                nrho = ((tri_material[ti, 1] * max(0, dot(ro - tinter, tn) * inv_rng) * rho +
+                                                tri_material[ti, 2] * max(0, 1 - tri_material[ti, 0] *
+                                                                          (1 - dot(b, ro) * inv_rng)) ** 2 * rho) *
+                                        (inv_rng * inv_rng))
                                 inter = tinter + 0.
                                 did_intersect = True
                 else:
@@ -351,7 +353,7 @@ def seperatingAxisTest(axis, extent, tut0, tut1, tut2):
             -max(dot(tut0, axis), dot(tut1, axis), dot(tut2, axis)),
             min(dot(tut0, axis), dot(tut1, axis), dot(tut2, axis)),
         )
-        <= r
+        < r
     )
     
 
@@ -361,7 +363,7 @@ def assignBoxPoints(points, octree, point_idx):
     pt, box = cuda.grid(ndim=2)
     if pt < points.shape[0] and box < octree.shape[0]:
         # Bounding Box test
-        if (((points[pt, 0, 0] >= octree[box, 0, 0] and points[pt, 0, 0] <= octree[box, 1, 0]) or (points[pt, 1, 0] >= octree[box, 0, 0] and points[pt, 1, 0] <= octree[box, 1, 0]) or (points[pt, 2, 0] >= octree[box, 0, 0] and points[pt, 2, 0] <= octree[box, 1, 0])) and
+        if (((octree[box, 0, 0] <= points[pt, 0, 0] <= octree[box, 1, 0]) or (points[pt, 1, 0] >= octree[box, 0, 0] and points[pt, 1, 0] <= octree[box, 1, 0]) or (points[pt, 2, 0] >= octree[box, 0, 0] and points[pt, 2, 0] <= octree[box, 1, 0])) and
             ((points[pt, 0, 1] >= octree[box, 0, 1] and points[pt, 0, 1] <= octree[box, 1, 1]) or (points[pt, 1, 1] >= octree[box, 0, 1] and points[pt, 1, 1] <= octree[box, 1, 1]) or (points[pt, 2, 1] >= octree[box, 0, 1] and points[pt, 2, 1] <= octree[box, 1, 1])) and
              ((points[pt, 0, 2] >= octree[box, 0, 2] and points[pt, 0, 2] <= octree[box, 1, 2]) or (points[pt, 1, 2] >= octree[box, 0, 2] and points[pt, 1, 2] <= octree[box, 1, 2]) or (points[pt, 2, 2] >= octree[box, 0, 2] and points[pt, 2, 2] <= octree[box, 1, 2]))):
             c = make_float3(octree[box, 0, 0] + octree[box, 1, 0], octree[box, 0, 1] + octree[box, 1, 1], octree[box, 0, 2] + octree[box, 1, 2]) * .5
@@ -383,26 +385,6 @@ def assignBoxPoints(points, octree, point_idx):
                                                 if seperatingAxisTest(cross(tut1 - tut0, tut2 - tut1), extent,
                                                                       tut0, tut1, tut2):
                                                     point_idx[pt, box] = True
-
-
-@cuda.jit()
-def splitBox(maxes, mines, point_idx, octree_splits, octree_vals):
-    pt, box = cuda.grid(ndim=2)
-    if pt < maxes.shape[0] and box < octree_splits.shape[0]:
-        for n in prange(3):
-            mx = maxes[pt, n]
-            sum_num = 0
-            sum_denom = 0
-            sum_balance = 0
-            for i in prange(maxes.shape[0]):
-                if point_idx[i, box]:
-                    sum_num += 1 if maxes[i, n] <= mx else 0
-                    sum_denom += 1 if mx <= mines[i, n] else 0
-                    sum_balance += 1 if maxes[i, n] <= mx or mx <= mines[i, n] else 0
-            val = (1 + abs(sum_num / (sum_denom + 1e-9) - 1)) * sum_balance
-            cuda.atomic.min(octree_vals, (box, n), val)
-            if octree_vals[box, n] >= val:
-                octree_splits[box, n] = mx
                 
                 
 @cuda.jit()

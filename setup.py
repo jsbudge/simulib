@@ -1,6 +1,5 @@
 from setuptools import setup
 from pathlib import Path
-
 ROOT_DIR = Path(__file__).absolute().parent
 
 setup(
@@ -14,4 +13,7 @@ setup(
    url="http://www.foopackage.example/",
    packages=['simulib'],  #same as name
    install_requires=['numpy', 'scipy', 'numba', 'open3d', 'tqdm', 'plotly', 'matplotlib', 'sdrparse'], #external packages as dependencies
+   package_dir={'geoid_data': 'simulib'},
+   package_data={'geoid_data': ['geoids/*.DAT']},
 )
+
