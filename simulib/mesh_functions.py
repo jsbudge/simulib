@@ -385,14 +385,12 @@ def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray 
               perspective: np.ndarray = None):
     max_tpb = getMaxThreads()
     pts_gpu = cuda.to_device(points.astype(_float))
-    max_ex = points.max(axis=1)
-    min_ex = points.min(axis=1)
-    max_gpu = cuda.to_device(max_ex.astype(_float))
-    min_gpu = cuda.to_device(min_ex.astype(_float))
     octree = np.zeros((sum(8 ** n for n in range(num_levels)), 2, 3))
     octree[0, ...] = bounding_box
+    max_ex = points.max(axis=1)
+    min_ex = points.min(axis=1)
     print('Building octree level ', end='')
-    for level in range(num_levels - 1):
+    for level in range(num_levels):
         print(f'{level}...', end='')
         level_idx = sum(8 ** l for l in range(level))
         next_level_idx = sum(8 ** l for l in range(level + 1))
@@ -404,31 +402,32 @@ def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray 
 
         box_idxes = ptidx_gpu.copy_to_host()
 
-        box_inter_gpu = cuda.to_device(np.zeros((octree_gpu.shape[0], octree_gpu.shape[0]), dtype=_float))
-        threads_per_block, bprun = optimizeThreadBlocks(max_tpb,
-                                                        (next_level_idx - level_idx, next_level_idx - level_idx))
-        calcBoxOverlap[bprun, threads_per_block](ptidx_gpu, octree_gpu, max_gpu, min_gpu, box_inter_gpu)
-        overlaps = box_inter_gpu.copy_to_host()
 
-        aind, bind = np.tril_indices(box_idxes.shape[1])
-        for a, b in zip(aind, bind):
-            if overlaps[a, b] > 0 and overlaps[b, a] > 0:
-                if overlaps[a, b] < overlaps[b, a]:
-                    box_idxes[box_idxes[:, a] & box_idxes[:, b], b] = False
-                else:
-                    box_idxes[box_idxes[:, a] & box_idxes[:, b], a] = False
+        # max_gpu = cuda.to_device(max_ex.astype(_float))
+        # min_gpu = cuda.to_device(min_ex.astype(_float))
+        full_boxes = np.any(box_idxes, axis=0)
 
-        with mp.Pool(processes=mp.cpu_count() - 1) as pool:
-            if points is None:
-                npo = [None for _ in range(level_idx, next_level_idx)]
+        for idx in range(box_idxes.shape[1]):
+            if full_boxes[idx]:
+                octree[level_idx + idx] = np.array([np.array([min_ex[box_idxes[:, idx]].min(axis=0),
+                                                              octree[level_idx + idx, 0]]).max(axis=0),
+                                                    np.array([max_ex[box_idxes[:, idx]].max(axis=0),
+                                                              octree[level_idx + idx, 1]]).min(axis=0)])
             else:
-                npo = [np.array([min_ex[box_idxes[:, n]].min(axis=0), points[box_idxes[:, n]].mean(axis=(0, 1)),
-                                 max_ex[box_idxes[:, n]].max(axis=0)])
-                       if np.sum(box_idxes[:, n]) > 0 else np.zeros((3, 3)) for n in range(box_idxes.shape[1])]
-            results = [pool.apply(splitNextLevel, args=(npo[p], perspective)) for p in
-                       range(8 ** level)]
+                octree[level_idx + idx] = 0.
+        if level < num_levels - 1:
+            octree_gpu = cuda.to_device(octree[level_idx:next_level_idx].astype(_float))
+            ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], octree_gpu.shape[0])).astype(bool))
+            assignBoxPoints[bprun, threads_per_block](pts_gpu, octree_gpu, ptidx_gpu)
 
-        for idx, r in enumerate(results):
-            octree[next_level_idx + idx * 8:next_level_idx + (idx + 1) * 8] = r
+            box_idxes = ptidx_gpu.copy_to_host()
+            with mp.Pool(processes=mp.cpu_count() - 1) as pool:
+                npo = [np.array([octree[l, 0], points[box_idxes[:, l - level_idx]].mean(axis=(0, 1)), octree[l, 1]])
+                       if np.any(box_idxes[:, l - level_idx]) else np.zeros((3, 3)) for l in range(level_idx, next_level_idx)]
+                results = [pool.apply(splitNextLevel, args=(npo[p], perspective)) for p in
+                           range(8 ** level)]
+
+            for idx, r in enumerate(results):
+                octree[next_level_idx + idx * 8:next_level_idx + (idx + 1) * 8] = r
 
     return octree

@@ -42,7 +42,7 @@ if __name__ == '__main__':
     num_bounces = 1
     nbox_levels = 5
     nstreams = 2
-    points_to_sample = 2**0
+    points_to_sample = 2**16
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**16
     grid_origin = (40.139343, -111.663541, 1360.10812)
