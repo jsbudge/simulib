@@ -13,31 +13,7 @@ class Mesh(object):
         mesh_normals = np.asarray(a_mesh.triangle_normals)
         mesh_tri_vertices = mesh_vertices[mesh_tri_idx]
 
-        aabb = a_mesh.get_axis_aligned_bounding_box()
-        max_bound = aabb.get_max_bound()
-        min_bound = aabb.get_min_bound()
-        root_box = np.array([min_bound, max_bound])
-        boxes = genOctree(root_box, num_box_levels, mesh_tri_vertices if use_box_pts else None, octree_perspective)
-
-        mesh_box_idx = np.zeros((mesh_tri_idx.shape[0], len(boxes)), dtype=bool)
-        # Get the box index for each triangle, for exclusion in the GPU calculations
-        for b_idx, box in enumerate(boxes):
-            is_inside = (box[0, 0] < mesh_tri_vertices[:, :, 0]) & (mesh_tri_vertices[:, :, 0] < box[1, 0])
-            for dim in range(1, 3):
-                is_inside = is_inside & (box[0, dim] < mesh_tri_vertices[:, :, dim]) & (
-                            mesh_tri_vertices[:, :, dim] < box[1, dim])
-            mesh_box_idx[:, b_idx] = np.any(is_inside, axis=1)
-        meshx, meshy = np.where(mesh_box_idx)
-        alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
-        sorted_tri_idx = alltri_idxes[np.argsort(alltri_idxes[:, 0])]
-        sorted_tri_idx = sorted_tri_idx[sorted_tri_idx[:, 0] >= sum(8 ** n for n in range(num_box_levels - 1))]
-        box_num, start_idxes = np.unique(sorted_tri_idx[:, 0], return_index=True)
-        mesh_extent = np.diff(start_idxes, append=[sorted_tri_idx.shape[0]])
-        mesh_idx_key = np.zeros((boxes.shape[0], 2)).astype(int)
-        mesh_idx_key[box_num, 0] = start_idxes
-        mesh_idx_key[box_num, 1] = mesh_extent
-
-        # Simple calculation to get the grass and dirt with a bigger beta
+        # Material triangle stuff
         try:
             if material_sigmas is None:
                 mesh_tri_colors = np.asarray(a_mesh.vertex_colors)[mesh_tri_idx].mean(axis=1)
@@ -61,6 +37,24 @@ class Mesh(object):
 
         tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
                                        mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
+
+        # Generate octree and associate triangles with boxes
+        aabb = a_mesh.get_axis_aligned_bounding_box()
+        max_bound = aabb.get_max_bound()
+        min_bound = aabb.get_min_bound()
+        root_box = np.array([min_bound, max_bound])
+        boxes, mesh_box_idx = genOctree(root_box, num_box_levels, mesh_tri_vertices, octree_perspective, use_box_pts=use_box_pts)
+
+        meshx, meshy = np.where(mesh_box_idx)
+        alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
+        sorted_tri_idx = alltri_idxes[np.argsort(alltri_idxes[:, 0])]
+        sorted_tri_idx = sorted_tri_idx[sorted_tri_idx[:, 0] >= sum(8 ** n for n in range(num_box_levels - 1))]
+        box_num, start_idxes = np.unique(sorted_tri_idx[:, 0], return_index=True)
+        mesh_extent = np.diff(start_idxes, append=[sorted_tri_idx.shape[0]])
+        mesh_idx_key = np.zeros((boxes.shape[0], 2)).astype(int)
+        mesh_idx_key[box_num, 0] = start_idxes
+        mesh_idx_key[box_num, 1] = mesh_extent
+
 
         # Set them all as properties of the object
         self.tri_idx = mesh_tri_idx

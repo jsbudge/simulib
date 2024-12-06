@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 from pathlib import Path
 ROOT_DIR = Path(__file__).absolute().parent
 
@@ -11,9 +11,10 @@ setup(
    author='Jeff Budge',
    author_email='jbudge@artemisinc.net',
    url="http://www.foopackage.example/",
-   packages=['simulib'],  #same as name
+   packages=find_packages(),  #same as name
    install_requires=['numpy', 'scipy', 'numba', 'open3d', 'tqdm', 'plotly', 'matplotlib', 'sdrparse'], #external packages as dependencies
-   package_dir={'geoid_data': 'simulib'},
-   package_data={'geoid_data': ['geoids/*.DAT']},
+   package_dir={'simulib': 'simulib'},
+   package_data={'simulib': ['geoids/*.DAT']},
+   include_package_data=True,
 )
 

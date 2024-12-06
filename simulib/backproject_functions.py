@@ -193,7 +193,7 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
         gz_gpu = cuda.to_device(gz)
 
         # GPU device calculations
-        threads_per_block, bpg_bpj = optimizeThreadBlocks(getMaxThreads(), nbpj_pts)
+        # threads_per_block, bpg_bpj = optimizeThreadBlocks(getMaxThreads(), nbpj_pts)
 
         # Run through loop to get data simulated
         # Data blocks for imaging
@@ -206,7 +206,7 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
                 postx_gpu = cuda.to_device(ptx, stream=stream)
                 bpj_grid = cuda.to_device(rbj, stream=stream)
                 rtdata = cuda.to_device(data, stream=stream)
-                backproject[bpg_bpj, threads_per_block, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu,
+                backproject[cuda.get_current_device().MULTIPROCESSOR_COUNT * 32, 256, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu,
                                                                 elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid,
                                                                 wavelength, near_range_s, upsample_fs, az_half_bw,
                                                                 el_half_bw, a_poly_num)

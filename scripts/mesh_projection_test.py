@@ -2,7 +2,7 @@ from numba import cuda
 import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
-from simulib import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
+from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
 from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float
 from tqdm import tqdm
 import numpy as np
@@ -35,19 +35,20 @@ if __name__ == '__main__':
     rec_gain = 100  # dB
     ant_transmit_power = 100  # watts
     noise_power_db = -120
-    npulses = 64
+    npulses = 32
     plp = .75
     fdelay = 10.
     upsample = 8
-    num_bounces = 1
+    num_bounces = 2
     nbox_levels = 5
-    nstreams = 2
+    nstreams = 1
     points_to_sample = 2**16
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**16
     grid_origin = (40.139343, -111.663541, 1360.10812)
     fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
-    triangle_colors=None
+    triangle_colors = None
+    do_randompts = False
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
@@ -82,7 +83,7 @@ if __name__ == '__main__':
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6, scale=4)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     mesh_ids = np.asarray(mesh.triangle_material_ids)'''
@@ -103,13 +104,15 @@ if __name__ == '__main__':
     mesh_ids = np.asarray(car.triangle_material_ids)
     mesh += car
     
-    building = readCombineMeshFile('/home/jeff/Documents/target_meshes/hangar.gltf', points=1e9, scale=.8)
+    building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9,
+                                   scale=.033).rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     stretch = np.eye(4)
-    stretch[0, 0] = 2
-    # building = building.transform(stretch)
-    building = building.translate(llh2enu(40.139670, -111.663759, 1380, bg.ref) + np.array([-10, -10, -6.]),
-                                  relative=False).rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, 42.51 * DTR])))
+    stretch[2, 2] = 2.5
+    building = building.transform(stretch)
+    building = building.translate(llh2enu(40.139642, -111.663817, 1380, bg.ref) + np.array([-20, -40, -12.]),
+                                  relative=False)
+    building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
+    building = building.compute_triangle_normals()
     mesh_ids = np.concatenate((mesh_ids, np.asarray(building.triangle_material_ids) + mesh_ids.max()))
     mesh += building
     
@@ -169,26 +172,29 @@ if __name__ == '__main__':
         mkss[6] = mkss[13] = mkss[17] = .8  # body
         mkss[12] = mkss[4] = .01  # windshield
         # msigmas[28] = 2
-        mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss)
+        mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss, use_box_pts=True)
     except ValueError:
         print('Error in getting material sigmas.')
-        mesh = Mesh(mesh, num_box_levels=nbox_levels)'''
+        mesh = Mesh(mesh, num_box_levels=nbox_levels, use_box_pts=True)'''
     mesh = Mesh(mesh, num_box_levels=nbox_levels)
     print('Done.')
 
-    sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
-
+    if do_randompts:
+        sample_points = ptsam
+    else:
+        sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
 
     # Locate the extrema to speed up the optimization
     flight_path = rp.txpos(sdr_f[0].pulse_time)
-    pmax = sample_points.max(axis=0)
+    sp = mesh.vertices if do_randompts else sample_points
+    pmax = sp.max(axis=0)
     vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
                      pmax[2] - flight_path[:, 2]]).T
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     max_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
-    pmin = sample_points.min(axis=0)
+    pmin = sp.min(axis=0)
     vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
                      pmin[2] - flight_path[:, 2]]).T
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
@@ -223,7 +229,10 @@ if __name__ == '__main__':
         splits = np.array([0, points_to_sample])
     for s in range(len(splits) - 1):
         if s > 0:
-            sample_points = mesh.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+            if do_randompts:
+                sample_points = ptsam
+            else:
+                sample_points = mesh.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
         for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
             txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
             rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
@@ -351,3 +360,16 @@ if __name__ == '__main__':
             fig.add_trace(drawbox(b))
 
     fig.show()
+
+    tri_pcd = o3d.geometry.PointCloud()
+    tri_pcd.points = o3d.utility.Vector3dVector(mesh.vertices[mesh.tri_idx].mean(axis=1))
+    tri_pcd.normals = o3d.utility.Vector3dVector(mesh.normals)
+    o3d.visualization.draw_geometries([tri_pcd])
+
+    '''import simplekml
+    from simulib import enu2llh
+    kml = simplekml.Kml()
+    lat, lon, alt = enu2llh(flight_path[:, 0], flight_path[:, 1], flight_path[:, 2], bg.ref)
+    lin = kml.newlinestring(name='Flight Line', coords=[(lo, la, al - 1380) for la, lo, al in zip(lat, lon, alt)])
+    kml.save('/home/jeff/repo/test.kml')'''
+

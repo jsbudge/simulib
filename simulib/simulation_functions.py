@@ -15,7 +15,6 @@ from PIL import Image
 from importlib import resources as impresources
 from simulib import geoids
 
-
 pio.renderers.default = 'browser'
 
 WGS_A = 6378137.0

@@ -9,7 +9,7 @@ from scipy.ndimage import sobel
 from simulib.grid_helper import SDREnvironment
 from scipy.interpolate import RegularGridInterpolator
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
-from simulib import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
+from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
 from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float
 from tqdm import tqdm
 import numpy as np

@@ -260,17 +260,17 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
     :param debug_flag: bool. If True, populates the calc_pts and calc_angs arrays.
     :return: Nothing, technically. final_grid is the returned product.
     """
-    pcol, prow = cuda.grid(ndim=2)
-    if pcol < gx.shape[0] and prow < gx.shape[1]:
-        # Load in all the parameters that don't change
+    blockx = cuda.grid(ndim=1)
+    # Load in all the parameters that don't change
+    k = 2 * np.pi / wavelength
+    for idx in range(blockx, gx.shape[0] * gx.shape[1], cuda.blockDim.x * cuda.gridDim.x):
         acc_val = 0
-        nPulses = pulse_data.shape[1]
-        n_samples = pulse_data.shape[0]
-        k = 2 * np.pi / wavelength
+        pcol = idx // gx.shape[0]
+        prow = idx % gx.shape[0]
         gl = make_float3(gx[pcol, prow], gy[pcol, prow], gz[pcol, prow])
 
         # Grab pulse data and sum up for this pixel
-        for tt in range(nPulses):
+        for tt in range(pulse_data.shape[1]):
             # Get LOS vector in XYZ and spherical coordinates at pulse time
             # Tx first
             tx_rng = length(gl - make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2]))
@@ -285,36 +285,21 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
 
             # Get index into range compressed data
             bi1 = int(((tx_rng + rx_rng) / c0 - 2 * near_range_s) * source_fs) + 1
-            if bi1 >= n_samples or bi1 < 0:
+            if bi1 >= pulse_data.shape[0] or bi1 < 0:
                 continue
-
-            # Attenuation of beam in elevation and azimuth
-            # att = applyRadiationPattern(r_el, r_az, panrx[tt], elrx[tt], pantx[tt], eltx[tt],
-            #                             bw_az, bw_el)
-            # att = 1.
-            # Azimuth window to reduce sidelobes
-            # Gaussian window
-            # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
-            # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
 
             if poly == 0:
                 # This is how APS does it (for reference, I guess)
-                a = pulse_data[bi1, tt]
+                acc_val += pulse_data[bi1, tt] * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(az_diffrx, bw_az, .5)
             elif poly == 1:
                 bi0 = bi1 - 1
                 # Linear interpolation between bins (slower but more accurate)
                 bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
                 bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
-                a = (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
-                    / (bi1_rng - bi0_rng)
+                acc_val += (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
+                    / (bi1_rng - bi0_rng) * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(az_diffrx, bw_az, .5)
 
-            # Multiply by phase reference function, attenuation and azimuth window
-            # if tt == 0:
-            #     print('att ', att, 'rng', tx_rng, 'bin', bi1, 'az_diff', az_diffrx, 'el_diff', el_diffrx)
-            acc_val += a * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(az_diffrx, bw_az, .5)#  * att
         final_grid[pcol, prow] = acc_val
-        # if pcol == 110 and prow == 110:
-        #     print(a.real, k, two_way_rng, att, az_win, acc_val.real, final_grid[pcol, prow].real)
 
 
 @cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
@@ -511,7 +496,23 @@ def getMaxThreads(pts_per_tri: int = 0):
     return sqrtMaxThreads, sqrtMaxThreads, pts_per_tri
 
 
-def optimizeThreadBlocks(threads_per_block, threads):
+def optimizeThreadBlocks(total_threads, thread_split):
+    gpuDevice = cuda.get_current_device()
+    best = (0, 0)
+    closest = np.inf
+    mt = min(thread_split, gpuDevice.MAX_THREADS_PER_BLOCK)
+    for n in range(total_threads // gpuDevice.MULTIPROCESSOR_COUNT, 1, -1):
+        split = total_threads / (n * gpuDevice.MULTIPROCESSOR_COUNT)
+        overhang = split % 1
+        if overhang == 0:
+            return n * gpuDevice.MULTIPROCESSOR_COUNT, mt
+        if overhang < closest:
+            best = (n * gpuDevice.MULTIPROCESSOR_COUNT, mt)
+            closest = overhang + 0.
+    return best
+
+
+def optimizeThreadBlocks2d(threads_per_block, threads):
     assert len(threads) == len(threads_per_block), 'threads dimension must equal threads_per_block dimension'
     poss_configs = [np.array([th % n for n in range(2, tpb)]) for th, tpb in zip(threads, threads_per_block)]
     new_tpb = tuple(
