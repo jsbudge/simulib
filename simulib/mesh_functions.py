@@ -6,7 +6,7 @@ from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt,
 from .simulation_functions import azelToVec
 import numpy as np
 import open3d as o3d
-from .cuda_kernels import getMaxThreads, optimizeThreadBlocks, optimizeThreadBlocks2d
+from .cuda_kernels import getMaxThreads, optimizeThreadBlocks, optimizeThreadBlocks2d, optimizeStridedThreadBlocks2d
 
 c0 = 299792458.0
 fs = 2e9
@@ -206,7 +206,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     debug_raydirs = []
     debug_raypower = []
 
-    threads, blocks = optimizeThreadBlocks2d(getMaxThreads(), (npulses, npoints))
+    threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
 
     # These are the mesh constants that don't change with intersection points
 
@@ -247,7 +247,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
                 pd_r_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
                 pd_i_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
                 # Calculate out the attenuation from the beampattern
-                calcOriginDirAtt[blocks, threads, stream](transmit_xyz_gpu, sample_points_gpu, az_gpu, el_gpu,
+                calcOriginDirAtt[blocks_strided, threads_strided, stream](transmit_xyz_gpu, sample_points_gpu, az_gpu, el_gpu,
                                                            params_gpu, ray_dir_gpu, ray_origin_gpu, ray_power_gpu)
                 # Since we know the first ray can see the receiver, this is a special call to speed things up
                 '''if num_bounces == 1 and not debug:
@@ -258,7 +258,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
                                                                      receive_xyz_gpu,
                                                                      az_gpu, el_gpu, params_gpu)
                 else:'''
-                calcBounceInit[blocks, threads, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
+                calcBounceInit[blocks_strided, threads_strided, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
                                                          ray_power_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
                                                                  bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
                                                          tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
@@ -271,7 +271,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
                     debug_raypower.append(ray_power_gpu.copy_to_host(stream=stream))
                 if num_bounces > 1:
                     for _ in range(1, num_bounces):
-                        calcBounceLoop[blocks, threads, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
+                        calcBounceLoop[blocks_strided, threads_strided, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
                                                                          ray_power_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
                                                                  bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
                                                                          tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
@@ -334,18 +334,34 @@ def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray
 
     # Calculate out direction vectors for the beam to hit
     points = []
-    threads, blocks = optimizeThreadBlocks2d(getMaxThreads(), (npulses, npoints))
+    threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
     while len(points) < npoints:
         ray_power_gpu = cuda.to_device(np.ones((npulses, npoints)))
-        rdirs = azelToVec(np.sort(pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))),
-                      pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints))).T.swapaxes(0, 1)
+
+        # Group az and el for faster traversal of octree
+        n_anchors = min(16, npoints)
+        if npoints < n_anchors**2:
+            azes = pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))
+            eles = np.sort(pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints)))
+        else:
+            az_anchors, el_anchors = np.meshgrid(np.linspace(-bw_az, bw_az, n_anchors), np.linspace(-bw_el, bw_el, n_anchors))
+            azes = np.concatenate([pointing_az[:, None] + np.random.uniform(a - bw_az / n_anchors, a + bw_az / n_anchors,
+                                                                            (npulses, npoints // n_anchors**2)) for a in
+                                   az_anchors.flatten()], axis=1)
+            eles = np.concatenate([pointing_el[:, None] + np.random.uniform(a - bw_el / n_anchors, a + bw_el / n_anchors,
+                                                                            (npulses, npoints // n_anchors**2)) for a in
+                                   el_anchors.flatten()], axis=1)
+        rdirs = azelToVec(azes,eles).T.swapaxes(0, 1)
         ray_dir_gpu = cuda.to_device(np.ascontiguousarray(rdirs.astype(_float)))
 
-        calcIntersectionPoints[blocks, threads](ray_origins_gpu, ray_dir_gpu, ray_power_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
+        calcIntersectionPoints[blocks_strided, threads_strided](ray_origins_gpu, ray_dir_gpu, ray_power_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
                                                                  bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
                                                              tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
                                                              tri_norm_gpu, tri_material_gpu, receive_xyz_gpu)
-        newpoints = ray_origins_gpu.copy_to_host()[ray_power_gpu.copy_to_host().astype(bool)]
+
+        pts_used = ray_power_gpu.copy_to_host().astype(bool)
+
+        newpoints = ray_origins_gpu.copy_to_host()[pts_used]
         points = (
             newpoints
             if newpoints.shape[0] > npoints or len(points) == 0
@@ -438,14 +454,13 @@ def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray 
         print(f'{level}...', end='')
         level_idx = sum(8 ** l for l in range(level))
         next_level_idx = sum(8 ** l for l in range(level + 1))
-        blocks, threads = optimizeThreadBlocks(points.shape[0] * (next_level_idx - level_idx), next_level_idx - level_idx)
+        threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((points.shape[0], next_level_idx - level_idx))
 
         if use_box_pts:
-            # threads_per_block, bprun = optimizeThreadBlocks(max_tpb, (points.shape[0], next_level_idx - level_idx))
             centered_octree_gpu = cuda.to_device(octree[level_idx:next_level_idx].mean(axis=1).astype(_float))
             extent_octree_gpu = cuda.to_device((np.diff(octree[level_idx:next_level_idx], axis=1) * .5)[:, 0].astype(_float))
             ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], centered_octree_gpu.shape[0])).astype(bool))
-            assignBoxPoints[blocks, threads](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
+            assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
                                                       ptz0_gpu, ptz1_gpu, ptz2_gpu, centered_octree_gpu, extent_octree_gpu, ptidx_gpu)
 
             box_idxes = ptidx_gpu.copy_to_host()
@@ -481,11 +496,10 @@ def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray 
                             [split_box[0, 0], split_box[1, 1], (split_box[1, 2] + split_box[0, 2]) / 2])
                     use_box_idx += 1
                     # octree[level_idx + idx] = 0.
-        # threads_per_block, bprun = optimizeThreadBlocks(max_tpb, (points.shape[0], next_level_idx - level_idx))
         centered_octree_gpu = cuda.to_device(octree[level_idx:next_level_idx].mean(axis=1).astype(_float))
         extent_octree_gpu = cuda.to_device((np.diff(octree[level_idx:next_level_idx], axis=1) * .5)[:, 0].astype(_float))
         ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], centered_octree_gpu.shape[0])).astype(bool))
-        assignBoxPoints[blocks, threads](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
+        assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
                                                       ptz0_gpu, ptz1_gpu, ptz2_gpu, centered_octree_gpu, extent_octree_gpu, ptidx_gpu)
         box_idxes = ptidx_gpu.copy_to_host()
         full_boxes = np.any(box_idxes, axis=0)

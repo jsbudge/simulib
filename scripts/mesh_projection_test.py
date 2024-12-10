@@ -41,8 +41,8 @@ if __name__ == '__main__':
     upsample = 8
     num_bounces = 2
     nbox_levels = 5
-    nstreams = 1
-    points_to_sample = 2**16
+    nstreams = 2
+    points_to_sample = 2**18
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**16
     grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -61,8 +61,8 @@ if __name__ == '__main__':
 
     pointing_vec = rp.boresight(data_t).mean(axis=0)
 
-    # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=128, ncols=128, az=-68.5715881976 * DTR)
-    # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=128, ncols=128)
+    # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
+    # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
     gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=1024, ncols=1024)
     grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
@@ -71,10 +71,10 @@ if __name__ == '__main__':
     mesh = o3d.geometry.TriangleMesh()
     mesh_ids = []
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)
+    mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -83,10 +83,10 @@ if __name__ == '__main__':
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6, scale=4)
+    mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6, scale=4)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+    mesh_ids = np.asarray(mesh.triangle_material_ids)
 
     '''mesh = readCombineMeshFile('E:\meshes\plot.obj', points=30000000)
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
@@ -107,9 +107,9 @@ if __name__ == '__main__':
     building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9,
                                    scale=.033).rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     stretch = np.eye(4)
-    stretch[2, 2] = 2.5
+    stretch[2, 2] = 2.8
     building = building.transform(stretch)
-    building = building.translate(llh2enu(40.139642, -111.663817, 1380, bg.ref) + np.array([-20, -40, -12.]),
+    building = building.translate(llh2enu(40.139642, -111.663817, 1380, bg.ref) + np.array([-30, -50, -12.]),
                                   relative=False)
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     building = building.compute_triangle_normals()
@@ -308,7 +308,7 @@ if __name__ == '__main__':
             valids = nrp[0] > 0.
             sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
             fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0] * sc,
-                              v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=10,
+                              v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=40,
                                   colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
 
         fig.show()
@@ -323,7 +323,7 @@ if __name__ == '__main__':
     for ro, rd, nrp in zip(ray_origins, ray_directions, ray_powers):
         sc = ((1 + nrp[0, valids] / nrp[0, valids].max()) * 10)[::1000]
         fig.add_trace(go.Cone(x=ro[0, valids, 0][::1000], y=ro[0, valids, 1][::1000], z=ro[0, valids, 2][::1000], u=rd[0, valids, 0][::1000] * sc,
-                          v=rd[0, valids, 1][::1000] * sc, w=rd[0, valids, 2][::1000] * sc, anchor='tail'))
+                          v=rd[0, valids, 1][::1000] * sc, w=rd[0, valids, 2][::1000] * sc, anchor='tail', sizemode='absolute'))
     fig.update_layout(
             scene=dict(zaxis=dict(range=[-30, 100]),
                        xaxis=dict(range=[2150, 2550]),
@@ -361,6 +361,13 @@ if __name__ == '__main__':
 
     fig.show()
 
+    fig = px.scatter_3d(x=sample_points[:256, 0], y=sample_points[:256, 1], z=sample_points[:256, 2])
+    for n in range(256, 8192, 256):
+        fig.add_trace(
+            go.Scatter3d(x=sample_points[n:n + 256, 0], y=sample_points[n:n + 256, 1], z=sample_points[n:n + 256, 2],
+                         mode='markers'))
+    fig.show()
+
     tri_pcd = o3d.geometry.PointCloud()
     tri_pcd.points = o3d.utility.Vector3dVector(mesh.vertices[mesh.tri_idx].mean(axis=1))
     tri_pcd.normals = o3d.utility.Vector3dVector(mesh.normals)
@@ -372,4 +379,7 @@ if __name__ == '__main__':
     lat, lon, alt = enu2llh(flight_path[:, 0], flight_path[:, 1], flight_path[:, 2], bg.ref)
     lin = kml.newlinestring(name='Flight Line', coords=[(lo, la, al - 1380) for la, lo, al in zip(lat, lon, alt)])
     kml.save('/home/jeff/repo/test.kml')'''
+
+
+
 

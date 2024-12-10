@@ -260,46 +260,43 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
     :param debug_flag: bool. If True, populates the calc_pts and calc_angs arrays.
     :return: Nothing, technically. final_grid is the returned product.
     """
-    blockx = cuda.grid(ndim=1)
     # Load in all the parameters that don't change
     k = 2 * np.pi / wavelength
-    for idx in range(blockx, gx.shape[0] * gx.shape[1], cuda.blockDim.x * cuda.gridDim.x):
-        acc_val = 0
-        pcol = idx // gx.shape[0]
-        prow = idx % gx.shape[0]
-        gl = make_float3(gx[pcol, prow], gy[pcol, prow], gz[pcol, prow])
+    x, y = cuda.grid(ndim=2)
+    x_stride, y_stride = cuda.gridsize(2)
+    for pcol in range(x, gx.shape[0], x_stride):
+        for prow in range(y, gx.shape[1], y_stride):
+            acc_val = 0
+            gl = make_float3(gx[pcol, prow], gy[pcol, prow], gz[pcol, prow])
 
-        # Grab pulse data and sum up for this pixel
-        for tt in range(pulse_data.shape[1]):
-            # Get LOS vector in XYZ and spherical coordinates at pulse time
-            # Tx first
-            tx_rng = length(gl - make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2]))
+            # Grab pulse data and sum up for this pixel
+            for tt in range(pulse_data.shape[1]):
+                # Get LOS vector in XYZ and spherical coordinates at pulse time
+                # Tx first
+                tx_rng = length(gl - make_float3(source_xyz[tt, 0], source_xyz[tt, 1], source_xyz[tt, 2]))
 
-            # Rx
-            _, rx_rng, r_az, r_el = getRangeAndAngles(gl, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
+                # Rx
+                rx_rng = length(gl - make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
+                r_az = math.atan2(gl.x - receive_xyz[tt, 0], gl.y - receive_xyz[tt, 1])
+                # _, rx_rng, r_az, r_el = getRangeAndAngles(gl, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
 
-            # Check to see if it's outside of our beam
-            az_diffrx = diff(r_az, panrx[tt])
-            if (abs(az_diffrx) > bw_az) or (abs(diff(r_el, elrx[tt])) > bw_el):
-                continue
+                # Get index into range compressed data
+                bi1 = int(((tx_rng + rx_rng) / c0 - 2 * near_range_s) * source_fs) + 1
+                if bi1 >= pulse_data.shape[0] or bi1 < 0:
+                    continue
 
-            # Get index into range compressed data
-            bi1 = int(((tx_rng + rx_rng) / c0 - 2 * near_range_s) * source_fs) + 1
-            if bi1 >= pulse_data.shape[0] or bi1 < 0:
-                continue
+                if poly == 0:
+                    # This is how APS does it (for reference, I guess)
+                    acc_val += pulse_data[bi1, tt] * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(diff(r_az, panrx[tt]), bw_az, .5)
+                elif poly == 1:
+                    bi0 = bi1 - 1
+                    # Linear interpolation between bins (slower but more accurate)
+                    bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
+                    bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
+                    acc_val += (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
+                        / (bi1_rng - bi0_rng) * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(diff(r_az, panrx[tt]), bw_az, .5)
 
-            if poly == 0:
-                # This is how APS does it (for reference, I guess)
-                acc_val += pulse_data[bi1, tt] * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(az_diffrx, bw_az, .5)
-            elif poly == 1:
-                bi0 = bi1 - 1
-                # Linear interpolation between bins (slower but more accurate)
-                bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
-                bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
-                acc_val += (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
-                    / (bi1_rng - bi0_rng) * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(az_diffrx, bw_az, .5)
-
-        final_grid[pcol, prow] = acc_val
+            final_grid[pcol, prow] = acc_val
 
 
 @cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
@@ -523,3 +520,20 @@ def optimizeThreadBlocks2d(threads_per_block, threads):
         max(1, th // pc) + (1 if th % pc != 0 else 0) if th > 1 else 1
         for th, pc in zip(threads, new_tpb)
     )
+
+
+def optimizeStridedThreadBlocks2d(threads):
+    gpuDevice = cuda.get_current_device()
+    maxThreads = int(gpuDevice.MAX_THREADS_PER_BLOCK**(1 / len(threads)))
+    threads_per_block = (maxThreads for _ in threads)
+    poss_configs = [np.array([th % n for n in range(2, tpb)]) for th, tpb in zip(threads, threads_per_block)]
+    new_tpb = tuple(
+        (max(1, np.max(np.where(pc == pc.max())[0]) + 2) if np.all(pc > 0) else np.max(np.where(pc == 0)[0]) + 2) if th > 1 else 1
+        for th, pc in zip(threads, poss_configs)
+    )
+
+    n_proc_per_thread = (gpuDevice.MULTIPROCESSOR_COUNT if threads[0] > threads[1] else 1,
+                         gpuDevice.MULTIPROCESSOR_COUNT if threads[1] >= threads[0] else 1)
+
+    new_bpg = tuple(np.argsort([th / (tpb * n_proc * n) % 1 for n in range(1, int(th / (tpb * n_proc)))])[-1] * n_proc if th > (tpb * n_proc * 2) else int(th // tpb) for th, tpb, n_proc in zip(threads, new_tpb, n_proc_per_thread))
+    return new_tpb, new_bpg

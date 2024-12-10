@@ -1,7 +1,8 @@
 import numpy as np
 from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states
-from .cuda_kernels import getMaxThreads, backproject, genRangeProfile, optimizeThreadBlocks
+from .cuda_kernels import getMaxThreads, backproject, genRangeProfile, optimizeThreadBlocks, \
+    optimizeStridedThreadBlocks2d
 from .grid_helper import SDREnvironment
 from .platform_helper import SDRPlatform, RadarPlatform
 from tqdm import tqdm
@@ -185,6 +186,7 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
                            gx: np.ndarray = None, gy: np.ndarray = None, a_poly_num: int = 0,
                            streams: list[cuda.stream]=None) -> np.ndarray:
     nbpj_pts = gz.shape
+    threads_strided, blocks_strided = optimizeStridedThreadBlocks2d(nbpj_pts)
 
     # Calculate out points on the ground
     with cuda.defer_cleanup():
@@ -206,7 +208,7 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
                 postx_gpu = cuda.to_device(ptx, stream=stream)
                 bpj_grid = cuda.to_device(rbj, stream=stream)
                 rtdata = cuda.to_device(data, stream=stream)
-                backproject[cuda.get_current_device().MULTIPROCESSOR_COUNT * 32, 256, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu,
+                backproject[blocks_strided, threads_strided, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu,
                                                                 elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid,
                                                                 wavelength, near_range_s, upsample_fs, az_half_bw,
                                                                 el_half_bw, a_poly_num)
