@@ -1,6 +1,6 @@
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints, genOctree
+from .mesh_functions import detectPoints, genOctree, detectPointsScene
 
 
 class Mesh(object):
@@ -66,6 +66,7 @@ class Mesh(object):
         self.idx_key = mesh_idx_key
         self.center = a_mesh.get_center()
         self.ntri = mesh_tri_idx.shape[0]
+        self.octree_levels = num_box_levels
 
     def sample(self, sample_points: int, view_pos: np.ndarray, bw_az: float = None, bw_el: float = None):
         # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
@@ -84,6 +85,7 @@ class Mesh(object):
 
 
 class Scene(object):
+    tree = list()
     
     def __init__(self, meshes: list[Mesh] = None):
         self.meshes = [] if meshes is None else meshes
@@ -94,31 +96,36 @@ class Scene(object):
         
         
         
-    def __add__(self, a: list[Mesh]):
-        ntree = np.zeros((len(a), 2, 3))
-        for idx, m in enumerate(a):
-            ntree[idx] = m.octree[0]
-        self.tree = np.concatenate((self.tree, ntree), axis=0)
-        self.meshes += a
+    def add(self, a: list[Mesh] | Mesh):
+        if isinstance(a, list):
+            ntree = np.zeros((len(a), 2, 3))
+            for idx, m in enumerate(a):
+                ntree[idx] = m.octree[0]
+            self.tree = np.concatenate((self.tree, ntree), axis=0) if len(self.tree) != 0 else ntree
+            self.meshes += a
+        else:
+            self.tree = np.concatenate((self.tree, np.expand_dims(a.octree[0], 0)), axis=0) if len(self.tree) != 0 else np.expand_dims(a.octree[0], 0)
+            self.meshes += [a]
         
     def __str__(self):
         return f'Scene with {len(self.meshes)} meshes.'
     
     def sample(self, sample_points: int, view_pos: np.ndarray, bw_az: float = None, bw_el: float = None):
-        total_tris = sum(m.ntri for m in self.meshes)
-        mesh_points = []
-        for m in self.meshes:
-            sp = int(m.ntri / total_tris * sample_points)
+        if bw_az is None:
+            bw_az = 0.
+            bw_el = 0.
+            center = np.mean(self.bounding_box(), axis=0)
             # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
-            pvecs = m.center - view_pos
+            pvecs = center - view_pos
             pointing_az = np.arctan2(pvecs[:, 0], pvecs[:, 1])
             pointing_el = -np.arcsin(pvecs[:, 2] / np.linalg.norm(pvecs, axis=1))
-            mesh_views = m.vertices[None, :, :] - view_pos[:, None, :]
-            if bw_az is None:
-                view_az = np.arctan2(mesh_views[:, :, 0], mesh_views[:, :, 1])
-                view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
-                bw_az = abs(pointing_az[:, None] - view_az).max()
-                bw_el = abs(pointing_el[:, None] - view_el).max()
-            mesh_points.append(detectPoints(m.octree, m.sorted_idx, m.idx_key, m.tri_idx, m.vertices, m.normals,
-                                m.materials, sp, view_pos, bw_az, bw_el, pointing_az, pointing_el))
-        return np.concatenate(mesh_points)
+            mesh_views = np.vstack(self.tree)[None, :, :] - view_pos[:, None, :]
+            view_az = np.arctan2(mesh_views[:, :, 0], mesh_views[:, :, 1])
+            view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
+            bw_az = max(bw_az, abs(pointing_az[:, None] - view_az).max())
+            bw_el = max(bw_el, abs(pointing_el[:, None] - view_el).max())
+        return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
+
+    def bounding_box(self):
+        return np.array([[np.min(np.array([m.octree[0, 0, :] for m in self.meshes]), axis=0)],
+                 [np.max(np.array([m.octree[0, 1, :] for m in self.meshes]), axis=0)]]).squeeze(1)

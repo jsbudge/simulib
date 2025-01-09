@@ -524,7 +524,7 @@ def optimizeThreadBlocks2d(threads_per_block, threads):
 
 def optimizeStridedThreadBlocks2d(threads):
     gpuDevice = cuda.get_current_device()
-    maxThreads = int(gpuDevice.MAX_THREADS_PER_BLOCK**(1 / len(threads)))
+    maxThreads = int(gpuDevice.MAX_THREADS_PER_BLOCK**(1 / len(threads)) - 4)
     threads_per_block = (maxThreads for _ in threads)
     poss_configs = [np.array([th % n for n in range(2, tpb)]) for th, tpb in zip(threads, threads_per_block)]
     new_tpb = tuple(

@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow
-from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
+    getMeshFig, getSceneFig, drawOctreeBox
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -12,7 +13,7 @@ import plotly.io as pio
 import plotly.graph_objects as go
 from sdrparse import load
 
-from simulib.mesh_objects import Mesh
+from simulib.mesh_objects import Mesh, Scene
 
 pio.renderers.default = 'browser'
 
@@ -30,8 +31,8 @@ def addNoise(range_profile, chirp, npower, mf, fft_len):
 
 if __name__ == '__main__':
     fc = 9.6e9
-    rx_gain = 22  # dB
-    tx_gain = 22  # dB
+    rx_gain = 32  # dB
+    tx_gain = 32  # dB
     rec_gain = 100  # dB
     ant_transmit_power = 100  # watts
     noise_power_db = -120
@@ -39,12 +40,12 @@ if __name__ == '__main__':
     plp = .75
     fdelay = 10.
     upsample = 8
-    num_bounces = 2
+    num_bounces = 1
     nbox_levels = 5
-    nstreams = 2
-    points_to_sample = 2**18
+    nstreams = 1
+    points_to_sample = 2**16
     num_mesh_triangles = 1000000
-    max_pts_per_run = 2**16
+    max_pts_per_run = 2**17
     grid_origin = (40.139343, -111.663541, 1360.10812)
     fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
     triangle_colors = None
@@ -68,13 +69,14 @@ if __name__ == '__main__':
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
     print('Loading mesh...', end='')
-    mesh = o3d.geometry.TriangleMesh()
-    mesh_ids = []
+    # mesh = o3d.geometry.TriangleMesh()
+    scene = Scene()
+    # mesh_ids = []
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)'''
+    scene.add(Mesh(mesh, num_box_levels=nbox_levels))
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -83,15 +85,15 @@ if __name__ == '__main__':
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     mesh_ids = np.asarray(mesh.triangle_material_ids)'''
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6, scale=4)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6, scale=4)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)
+    scene.add(Mesh(mesh, num_box_levels=nbox_levels))'''
 
-    '''mesh = readCombineMeshFile('E:\meshes\plot.obj', points=30000000)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=30000000)
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)
+    scene.add(Mesh(mesh, num_box_levels=nbox_levels))
     triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
 
 
@@ -101,11 +103,23 @@ if __name__ == '__main__':
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     mesh_extent = car.get_max_bound() - car.get_min_bound()
     car = car.translate(np.array([gx.mean() + 1.5, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2]), relative=False)
-    mesh_ids = np.asarray(car.triangle_material_ids)
-    mesh += car
+    msigmas = [2. for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
+    msigmas[0] = msigmas[15] = .5  # seats
+    msigmas[6] = msigmas[13] = msigmas[17] = .5  # body
+    msigmas[12] = msigmas[4] = .2  # windshield
+    mkds = [.5 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
+    mkds[0] = mkds[15] = .8  # seats
+    mkds[6] = mkds[13] = mkds[17] = .8  # body
+    mkds[12] = mkds[4] = .1  # windshield
+    mkss = [.5 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
+    mkss[0] = mkss[15] = .2  # seats
+    mkss[6] = mkss[13] = mkss[17] = .8  # body
+    mkss[12] = mkss[4] = .01  # windshield
+    scene.add(Mesh(car, num_box_levels=4, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss,
+                use_box_pts=True))
     
-    building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9,
-                                   scale=.033).rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+    building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
+    building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     stretch = np.eye(4)
     stretch[2, 2] = 2.8
     building = building.transform(stretch)
@@ -113,8 +127,7 @@ if __name__ == '__main__':
                                   relative=False)
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     building = building.compute_triangle_normals()
-    mesh_ids = np.concatenate((mesh_ids, np.asarray(building.triangle_material_ids) + mesh_ids.max()))
-    mesh += building
+    scene.add(Mesh(building, num_box_levels=3))
     
     gpx, gpy, gpz = bg.getGrid(grid_origin, 201 / 2, 199 / 2, nrows=201, ncols=199, az=-68.5715881976 * DTR)
     gnd_points = np.array([gpx.flatten(), gpy.flatten(), gpz.flatten()]).T
@@ -131,21 +144,14 @@ if __name__ == '__main__':
     ground.compute_vertex_normals()
     ground.compute_triangle_normals()
     ground.normalize_normals()
-    mesh += ground
-    if len(mesh_ids) > 0:
-        mesh_ids = np.concatenate((mesh_ids, np.array([mesh_ids.max() + 1 for _ in range(len(ground.triangles))])))
-    else:
-        mesh_ids = np.zeros(len(ground.triangles)).astype(int)'''
+    scene.add(Mesh(ground, num_box_levels=4))'''
 
-    grid_extent = np.array([gx.max() - gx.min(), gy.max() - gy.min(), gz.max() - gz.min()])
-    mesh.triangle_material_ids = o3d.utility.IntVector([int(m) for m in mesh_ids])
-    face_points = np.asarray(mesh.vertices)
     print('Done.')
 
     # This is all the constants in the radar equation for this simulation
     radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
                    10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
-    noise_power = 10**(noise_power_db / 10)
+    noise_power = 0 # 10**(noise_power_db / 10)
 
     # Generate a chirp
     chirp_bandwidth = 400e6
@@ -158,37 +164,18 @@ if __name__ == '__main__':
     # Load in boxes and meshes for speedup of ray tracing
     print('Loading mesh box structure...', end='')
     ptsam = min(points_to_sample, max_pts_per_run)
-    '''try:
-        msigmas = [2. for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-        msigmas[0] = msigmas[15] = .5  # seats
-        msigmas[6] = msigmas[13] = msigmas[17] = .5  # body
-        msigmas[12] = msigmas[4] = .2  # windshield
-        mkds = [.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-        mkds[0] = mkds[15] = .8  # seats
-        mkds[6] = mkds[13] = mkds[17] = .8  # body
-        mkds[12] = mkds[4] = .1  # windshield
-        mkss = [.5 for _ in range(np.asarray(mesh.triangle_material_ids).max() + 1)]
-        mkss[0] = mkss[15] = .2  # seats
-        mkss[6] = mkss[13] = mkss[17] = .8  # body
-        mkss[12] = mkss[4] = .01  # windshield
-        # msigmas[28] = 2
-        mesh = Mesh(mesh, num_box_levels=nbox_levels, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss, use_box_pts=True)
-    except ValueError:
-        print('Error in getting material sigmas.')
-        mesh = Mesh(mesh, num_box_levels=nbox_levels, use_box_pts=True)'''
-    mesh = Mesh(mesh, num_box_levels=nbox_levels)
     print('Done.')
 
     if do_randompts:
         sample_points = ptsam
     else:
-        sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+        sample_points = scene.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
 
     # Locate the extrema to speed up the optimization
     flight_path = rp.txpos(sdr_f[0].pulse_time)
-    sp = mesh.vertices if do_randompts else sample_points
+    sp = scene.bounding_box()
     pmax = sp.max(axis=0)
     vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
                      pmax[2] - flight_path[:, 2]]).T
@@ -205,7 +192,7 @@ if __name__ == '__main__':
 
     # Single pulse for debugging
     print('Generating single pulse...')
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromMesh(mesh, sample_points,
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
                                                                                  [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
                                                                                  [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                                  rp.az_half_bw, rp.el_half_bw,
@@ -232,40 +219,19 @@ if __name__ == '__main__':
             if do_randompts:
                 sample_points = ptsam
             else:
-                sample_points = mesh.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+                sample_points = scene.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
         for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
             txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
             rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
             pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
             tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-            trp = getRangeProfileFromMesh(mesh, sample_points, txposes, rxposes, pans, tilts,
+            trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                           radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s,
                                           num_bounces=num_bounces, streams=streams)
             mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
             bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
                                                 c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
                                                 gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
-
-
-    def getMeshFig(title='Title Goes Here', zrange=100):
-        fig = go.Figure(data=[
-            go.Mesh3d(
-                x=mesh.vertices[:, 0],
-                y=mesh.vertices[:, 1],
-                z=mesh.vertices[:, 2],
-                # i, j and k give the vertices of triangles
-                i=mesh.tri_idx[:, 0],
-                j=mesh.tri_idx[:, 1],
-                k=mesh.tri_idx[:, 2],
-                facecolor=triangle_colors,
-                showscale=True
-            )
-        ])
-        fig.update_layout(
-            title=title,
-            scene=dict(zaxis=dict(range=[-30, zrange])),
-        )
-        return fig
 
     px.scatter(db(single_rp[0][0].flatten())).show()
     px.scatter(db(single_pulse[0].flatten())).show()
@@ -279,8 +245,6 @@ if __name__ == '__main__':
     plt.colorbar()
     plt.axis('tight')
     plt.show()'''
-
-    px.imshow(db(single_mf_pulse * 1e8)).show()
 
     # plt.figure('Backprojection')
     db_bpj = db(bpj_grid)
@@ -297,13 +261,13 @@ if __name__ == '__main__':
     sc = 1 / (scaling[1] - scaling[0])
     scaled_rp = (ray_powers[0] - sc_min) * sc
 
-    fig = getMeshFig('Full Mesh', flight_path[:, 2].mean() + 10)
+    fig = getSceneFig(scene, title='Full Mesh', zrange=flight_path[:, 2].mean() + 10)
     fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
     fig.show()
 
     bounce_colors = ['blue', 'red', 'green', 'yellow']
     for bounce in range(len(ray_origins)):
-        fig = getMeshFig(f'Bounce {bounce}')
+        fig = getSceneFig(scene, title=f'Bounce {bounce}')
         for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
             valids = nrp[0] > 0.
             sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
@@ -313,7 +277,7 @@ if __name__ == '__main__':
 
         fig.show()
 
-    fig = getMeshFig('Ray trace')
+    fig = getSceneFig(scene, title='Ray trace')
     init_pos = np.repeat(rp.txpos(data_t[0]).reshape((1, -1)), ro.shape[1], 0)
     valids = np.sum([nrp[0] > 0.0 for nrp in ray_powers], axis=0) == len(ray_powers)
     ln = np.stack([init_pos[valids]] + [ro[0, valids] for ro in ray_origins]).swapaxes(0, 1)[::1000, :, :]
@@ -331,34 +295,12 @@ if __name__ == '__main__':
         )
     fig.show()
 
+    fig = getSceneFig(scene)
 
-    def drawbox(box):
-        vertices = []
-        for z in range(2):
-            vertices.extend(
-                (
-                    [box[0, 0], box[0, 1], box[z, 2]],
-                    [box[1, 0], box[0, 1], box[z, 2]],
-                    [box[1, 0], box[0, 1], box[int(not z), 2]],
-                    [box[1, 0], box[0, 1], box[z, 2]],
-                    [box[1, 0], box[1, 1], box[z, 2]],
-                    [box[1, 0], box[1, 1], box[int(not z), 2]],
-                    [box[1, 0], box[1, 1], box[z, 2]],
-                    [box[0, 0], box[1, 1], box[z, 2]],
-                    [box[0, 0], box[1, 1], box[int(not z), 2]],
-                    [box[0, 0], box[1, 1], box[z, 2]],
-                    [box[0, 0], box[0, 1], box[z, 2]],
-                )
-            )
-        vertices = np.array(vertices)
-        return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
-
-    fig = getMeshFig()
-
-    for b in mesh.octree[sum(8**n for n in range(nbox_levels - 1)):]:
-        if np.sum(b) != 0:
-            fig.add_trace(drawbox(b))
-
+    for mesh in scene.meshes:
+        for b in mesh.octree[sum(8**n for n in range(mesh.octree_levels - 1)):]:
+            if np.sum(b) != 0:
+                fig.add_trace(drawOctreeBox(b))
     fig.show()
 
     fig = px.scatter_3d(x=sample_points[:256, 0], y=sample_points[:256, 1], z=sample_points[:256, 2])
@@ -368,10 +310,10 @@ if __name__ == '__main__':
                          mode='markers'))
     fig.show()
 
-    tri_pcd = o3d.geometry.PointCloud()
+    '''tri_pcd = o3d.geometry.PointCloud()
     tri_pcd.points = o3d.utility.Vector3dVector(mesh.vertices[mesh.tri_idx].mean(axis=1))
     tri_pcd.normals = o3d.utility.Vector3dVector(mesh.normals)
-    o3d.visualization.draw_geometries([tri_pcd])
+    o3d.visualization.draw_geometries([tri_pcd])'''
 
     '''import simplekml
     from simulib import enu2llh
