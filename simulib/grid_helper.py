@@ -108,7 +108,7 @@ class Environment(object):
                              fill_value=0).reshape(x.shape, order='C'),
                      self.getGridParams(pos, width, height, (nrows, ncols), az))
 
-    def sample(self, x: float, y: float) -> float:
+    def sample(self, x: float, y: float) -> ndarray:
         irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2

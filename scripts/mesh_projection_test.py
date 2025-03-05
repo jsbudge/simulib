@@ -43,7 +43,7 @@ if __name__ == '__main__':
     num_bounces = 1
     nbox_levels = 5
     nstreams = 1
-    points_to_sample = 2**16
+    points_to_sample = 2**18
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -97,12 +97,12 @@ if __name__ == '__main__':
     triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
 
 
-    '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
+    car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
                                points=num_mesh_triangles)  # Has just over 500000 points in the file
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     mesh_extent = car.get_max_bound() - car.get_min_bound()
-    car = car.translate(np.array([gx.mean() + 1.5, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2]), relative=False)
+    car = car.translate(np.array([gx.mean() - 50, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2 - 16]), relative=False)
     msigmas = [2. for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
     msigmas[0] = msigmas[15] = .5  # seats
     msigmas[6] = msigmas[13] = msigmas[17] = .5  # body
@@ -118,7 +118,7 @@ if __name__ == '__main__':
     scene.add(Mesh(car, num_box_levels=4, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss,
                 use_box_pts=True))
     
-    building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
+    '''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     stretch = np.eye(4)
     stretch[2, 2] = 2.8
@@ -166,16 +166,24 @@ if __name__ == '__main__':
     ptsam = min(points_to_sample, max_pts_per_run)
     print('Done.')
 
+    # If we need to split the point raster, do so
+    if points_to_sample > max_pts_per_run:
+        splits = np.concatenate((np.arange(0, points_to_sample, max_pts_per_run), [points_to_sample]))
+    else:
+        splits = np.array([0, points_to_sample])
+
     if do_randompts:
         sample_points = ptsam
     else:
-        sample_points = scene.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+        sample_points = [scene.sample(int(splits[s + 1] - splits[s]),
+                                      view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+                         for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
 
     # Locate the extrema to speed up the optimization
     flight_path = rp.txpos(sdr_f[0].pulse_time)
-    sp = scene.bounding_box()
+    sp = scene.bounding_box
     pmax = sp.max(axis=0)
     vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
                      pmax[2] - flight_path[:, 2]]).T
@@ -192,7 +200,7 @@ if __name__ == '__main__':
 
     # Single pulse for debugging
     print('Generating single pulse...')
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points[0],
                                                                                  [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
                                                                                  [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                                  rp.az_half_bw, rp.el_half_bw,
@@ -209,29 +217,19 @@ if __name__ == '__main__':
     print('Running main loop...')
     # Get the data into CPU memory for later
     # MAIN LOOP
-    # If we need to split the point raster, do so
-    if points_to_sample > max_pts_per_run:
-        splits = np.concatenate((np.arange(0, points_to_sample, max_pts_per_run), [points_to_sample]))
-    else:
-        splits = np.array([0, points_to_sample])
-    for s in range(len(splits) - 1):
-        if s > 0:
-            if do_randompts:
-                sample_points = ptsam
-            else:
-                sample_points = scene.sample(int(splits[s + 1] - splits[s]), view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
-        for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
-            txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-            rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-            pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-            tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-            trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
-                                          radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s,
-                                          num_bounces=num_bounces, streams=streams)
-            mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
-            bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
-                                                c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
-                                                gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
+    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
+        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        trp = [getRangeProfileFromScene(scene, sam, txposes, rxposes, pans, tilts,
+                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s,
+                                      num_bounces=num_bounces, streams=streams) for sam in sample_points]
+        trp = [sum(i) for i in zip(*trp)]
+        mf_pulses = [np.ascontiguousarray(upsamplePulse(addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True, time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
+        bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
+                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
+                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
 
     px.scatter(db(single_rp[0][0].flatten())).show()
     px.scatter(db(single_pulse[0].flatten())).show()
@@ -321,6 +319,10 @@ if __name__ == '__main__':
     lat, lon, alt = enu2llh(flight_path[:, 0], flight_path[:, 1], flight_path[:, 2], bg.ref)
     lin = kml.newlinestring(name='Flight Line', coords=[(lo, la, al - 1380) for la, lo, al in zip(lat, lon, alt)])
     kml.save('/home/jeff/repo/test.kml')'''
+
+    np.save('./single_rp_car', single_rp)
+    np.save('./single_mf_pulse_car', single_mf_pulse)
+    np.save('./single_pulse_car', single_pulse)
 
 
 

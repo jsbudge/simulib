@@ -1,3 +1,5 @@
+from functools import cached_property, singledispatch
+
 import open3d as o3d
 import numpy as np
 from .mesh_functions import detectPoints, genOctree, detectPointsScene
@@ -94,18 +96,20 @@ class Scene(object):
             for idx, m in enumerate(meshes):
                 self.tree[idx] = m.octree[0]
         
-        
-        
-    def add(self, a: list[Mesh] | Mesh):
-        if isinstance(a, list):
-            ntree = np.zeros((len(a), 2, 3))
-            for idx, m in enumerate(a):
-                ntree[idx] = m.octree[0]
-            self.tree = np.concatenate((self.tree, ntree), axis=0) if len(self.tree) != 0 else ntree
-            self.meshes += a
-        else:
-            self.tree = np.concatenate((self.tree, np.expand_dims(a.octree[0], 0)), axis=0) if len(self.tree) != 0 else np.expand_dims(a.octree[0], 0)
-            self.meshes += [a]
+
+    @singledispatch
+    def add(self, a):
+        self.tree = np.concatenate((self.tree, np.expand_dims(a.octree[0], 0)), axis=0) if len(
+            self.tree) != 0 else np.expand_dims(a.octree[0], 0)
+        self.meshes += [a]
+
+    @add.register
+    def _(self, a: list):
+        ntree = np.zeros((len(a), 2, 3))
+        for idx, m in enumerate(a):
+            ntree[idx] = m.octree[0]
+        self.tree = np.concatenate((self.tree, ntree), axis=0) if len(self.tree) != 0 else ntree
+        self.meshes += a
         
     def __str__(self):
         return f'Scene with {len(self.meshes)} meshes.'
@@ -114,7 +118,7 @@ class Scene(object):
         if bw_az is None:
             bw_az = 0.
             bw_el = 0.
-            center = np.mean(self.bounding_box(), axis=0)
+            center = np.mean(self.bounding_box, axis=0)
             # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
             pvecs = center - view_pos
             pointing_az = np.arctan2(pvecs[:, 0], pvecs[:, 1])
@@ -126,6 +130,7 @@ class Scene(object):
             bw_el = max(bw_el, abs(pointing_el[:, None] - view_el).max())
         return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
 
+    @cached_property
     def bounding_box(self):
         return np.array([[np.min(np.array([m.octree[0, 0, :] for m in self.meshes]), axis=0)],
                  [np.max(np.array([m.octree[0, 1, :] for m in self.meshes]), axis=0)]]).squeeze(1)

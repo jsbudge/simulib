@@ -3,6 +3,7 @@ from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
 from typing import Type
 from .simulation_functions import llh2enu, findPowerOf2
+from functools import singledispatch
 
 c0 = 299792458.0
 TAC = 125e6
@@ -118,15 +119,19 @@ class Platform(object):
         self.pan = CubicSpline(gps_t, gphi)
         self.tilt = CubicSpline(gps_t, gtheta)
 
+    @singledispatch
     def boresight(self, t):
         # Get a boresight angle from the pan/tilt values
         r, p, y = self._att(t).T
-        if isinstance(t, float):
-            return getBoresightVector(self._gimbal_offset_mat, self._gimbal_pan(t), self._gimbal_tilt(t), y, p, r)
-        else:
-            return np.array([getBoresightVector(
-                self._gimbal_offset_mat, self._gimbal_pan(t[i]), self._gimbal_tilt(t[i]), y[i], p[i], r[i])
-                for i in range(len(t))]).squeeze(2)
+        return np.array([getBoresightVector(
+            self._gimbal_offset_mat, self._gimbal_pan(t[i]), self._gimbal_tilt(t[i]), y[i], p[i], r[i])
+            for i in range(len(t))]).squeeze(2)
+
+    @boresight.register
+    def _(self, t: float):
+        # Get a boresight angle from the pan/tilt values
+        r, p, y = self._att(t).T
+        return getBoresightVector(self._gimbal_offset_mat, self._gimbal_pan(t), self._gimbal_tilt(t), y, p, r)
 
     @property
     def pos(self):
