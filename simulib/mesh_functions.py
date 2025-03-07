@@ -11,7 +11,6 @@ from .cuda_kernels import optimizeStridedThreadBlocks2d
 import plotly.graph_objects as go
 
 c0 = 299792458.0
-fs = 2e9
 _float = np.float32
 
 BOX_CUSHION = .01
@@ -82,13 +81,13 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
 
 def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
-                            bw_el: float, nsam: int, fc: float, near_range_s: float, num_bounces: int=3,
+                            bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
                             debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
     # This is here because the single mesh function is more highly optimized for a single mesh and should therefore
     # be used.
     if len(scene.meshes) == 1:
         return getRangeProfileFromMesh(scene.meshes[0], sampled_points, tx_pos, rx_pos, pan, tilt, 
-                                       radar_equation_constant, bw_az, bw_el, nsam, fc, near_range_s, num_bounces, 
+                                       radar_equation_constant, bw_az, bw_el, nsam, fc, fs, near_range_s, num_bounces,
                                        debug, streams)
     npulses = tx_pos[0].shape[0]
     if isinstance(sampled_points, int):
@@ -144,7 +143,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
                                                                           ray_power_gpu)
 
                 for _ in range(num_bounces):
-                    ray_intersection_gpu = cuda.to_device(np.ones((npulses, npoints, 3)) * np.inf, )
+                    ray_intersection_gpu = cuda.to_device(np.ones((npulses, npoints, 3)) * 1e9, )
                     ray_bounce_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, )
                     ray_bounce_power_gpu = cuda.device_array((npulses, npoints), dtype=_float, )
 
@@ -233,7 +232,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
 
 def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
-                            bw_el: float, nsam: int, fc: float, near_range_s: float, num_bounces: int=3,
+                            bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
                             debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
     """
     Generate a range profile, given a Mesh object and some other values
