@@ -1,3 +1,4 @@
+import torch
 from numba import cuda
 import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
@@ -34,35 +35,35 @@ def addNoise(range_profile, chirp, npower, mf, fft_len):
 
 if __name__ == '__main__':
     fc = 9.6e9
-    rx_gain = 25  # dB
-    tx_gain = 25  # dB
-    rec_gain = 60  # dB
+    rx_gain = 30  # dB
+    tx_gain = 30  # dB
+    rec_gain = 150  # dB
     ant_transmit_power = 100  # watts
-    noise_power_db = -120
-    npulses = 32
-    plp = .75
+    noise_power_db = -300
+    npulses = 128
+    plp = .9
     fdelay = 0.
-    upsample = 8
+    upsample = 1
     num_bounces = 1
     nbox_levels = 5
     nstreams = 1
-    points_to_sample = 2**18
+    points_to_sample = 2**12
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
-    grid_origin = (40.139343, -111.663541, 1360.10812)
-    fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
-    # fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
-    # grid_origin = np.array([40.093229, -111.768341, 1353.06885])
+    # grid_origin = (40.139343, -111.663541, 1360.10812)
+    # fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
+    fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
+    grid_origin = np.array([40.093229, -111.768341, 1353.06885])
     # grid_origin = (40.198354, -111.924774, 1560.)
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     do_randompts = False
-    nbpj_pts = (1024, 1024)
+    nbpj_pts = (512, 1024)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
     sdr_f = load(fnme)
-    fs = sdr_f[0].fs
+    fs = 125e6  # sdr_f[0].fs
     rp_sdr = SDRPlatform(sdr_f, origin=grid_origin, channel=0, fs=fs)
     flight_path = rp_sdr.txpos(rp_sdr.gpst)
     att_path = rp_sdr.att(rp_sdr.gpst)
@@ -109,7 +110,7 @@ if __name__ == '__main__':
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
+    gx, gy, gz = bg.getGrid(grid_origin, 150, 300, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
     # Shift position
     glat, glon, galt = enu2llh(gx.flatten(), gy.flatten(), gz.flatten(), bg.ref)
     gx, gy, gz = llh2enu(glat, glon, galt, rp.origin)
@@ -180,10 +181,10 @@ if __name__ == '__main__':
     building = building.compute_triangle_normals()
     scene.add(Mesh(building, num_box_levels=3))'''
     
-    '''gpx, gpy, gpz = bg.getGrid(grid_origin, 1000, 1000, nrows=256, ncols=256)
+    '''gpx, gpy, gpz = bg.getGrid(grid_origin, 300, 300, nrows=256, ncols=256)
     # Shift position
     gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
-    gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt, rp.origin)
+    gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, rp.origin)
     gnd_points = np.array([gpx, gpy, gpz]).T[::100]
     # gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
     # gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
@@ -249,7 +250,7 @@ if __name__ == '__main__':
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
     pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr_f[0].frame_num[-1])]
-    # pulse_lims = [0, sdr_f[0].nframes]
+    pulse_lims = [0, sdr_f[0].nframes]
     streams = [cuda.stream() for _ in range(nstreams)]
 
     # Single pulse for debugging
@@ -290,7 +291,7 @@ if __name__ == '__main__':
         bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
-        torch_data.append(mf_pulses[0])
+        torch_data.append(trp[0])
         torch_pos.append(txposes[0])
         torch_pans.append(pans[0])
         torch_tilts.append(tilts[0])
@@ -387,9 +388,20 @@ if __name__ == '__main__':
 
     px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
 
-    np.save('./single_rp_car', single_rp)
-    np.save('./single_mf_pulse_car', single_mf_pulse)
-    np.save('./single_pulse_car', single_pulse)
+    # Get the data ready for NeRF training
+    pulses = np.stack([t[0] for t in torch_data])
+    poses = np.stack([t[0] for t in torch_pos])
+    panses = np.stack([t[0] for t in torch_pans])
+    tiltses = np.stack([t[0] for t in torch_tilts])
+    norm_std = np.std(pulses[pulses != 0])
+    pulses = pulses / norm_std
+    pulses = torch.view_as_real(torch.tensor(pulses))
+    data = torch.cat([torch.tensor(poses), torch.tensor(panses).unsqueeze(-1), torch.tensor(tiltses).unsqueeze(-1)], dim=-1)
+
+    torch.save([data, pulses, norm_std, np.float32(rp.az_half_bw), np.float32(rp.el_half_bw), sdr_f[0].fc], f'/home/jeff/repo/nerf/data/simulator_train.pt')
+
+    # Save out the sample points for nerf dataloader
+    torch.save(sample_points, f'/home/jeff/repo/nerf/data/simulator_points.pt')
 
 
 

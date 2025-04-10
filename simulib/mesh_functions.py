@@ -87,7 +87,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
     # be used.
     if len(scene.meshes) == 1:
         return getRangeProfileFromMesh(scene.meshes[0], sampled_points, tx_pos, rx_pos, pan, tilt, 
-                                       radar_equation_constant, bw_az, bw_el, nsam, fc, fs, near_range_s, num_bounces,
+                                       radar_equation_constant, bw_az, bw_el, nsam, fc, near_range_s, fs, num_bounces,
                                        debug, streams)
     npulses = tx_pos[0].shape[0]
     if isinstance(sampled_points, int):
