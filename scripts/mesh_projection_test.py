@@ -35,25 +35,25 @@ def addNoise(range_profile, chirp, npower, mf, fft_len):
 
 if __name__ == '__main__':
     fc = 9.6e9
-    rx_gain = 30  # dB
-    tx_gain = 30  # dB
-    rec_gain = 150  # dB
+    rx_gain = 32  # dB
+    tx_gain = 32  # dB
+    rec_gain = 100  # dB
     ant_transmit_power = 100  # watts
-    noise_power_db = -300
-    npulses = 128
-    plp = .9
-    fdelay = 0.
-    upsample = 1
+    noise_power_db = -120
+    npulses = 64
+    plp = .75
+    fdelay = 10.
+    upsample = 4
     num_bounces = 1
     nbox_levels = 5
     nstreams = 1
-    points_to_sample = 2**12
+    points_to_sample = 2**17
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
-    # fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
-    fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
-    grid_origin = np.array([40.093229, -111.768341, 1353.06885])
+    fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
+    # fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
+    grid_origin = np.array([40.138044, -111.660027, 1365.8849123907273])
     # grid_origin = (40.198354, -111.924774, 1560.)
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
@@ -63,61 +63,20 @@ if __name__ == '__main__':
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
     sdr_f = load(fnme)
-    fs = 125e6  # sdr_f[0].fs
-    rp_sdr = SDRPlatform(sdr_f, origin=grid_origin, channel=0, fs=fs)
-    flight_path = rp_sdr.txpos(rp_sdr.gpst)
-    att_path = rp_sdr.att(rp_sdr.gpst)
-    try:
-        pan = np.interp(sdr_f.gps_data['systime'].values, sdr_f.gimbal['systime'].values.astype(int),
-                        sdr_f.gimbal['pan'].values.astype(np.float64))
-        tilt = np.interp(sdr_f.gps_data['systime'].values, sdr_f.gimbal['systime'].values.astype(int),
-                         sdr_f.gimbal['tilt'].values.astype(np.float64))
-    except TypeError:
-        pan = np.zeros_like(sdr_f.gps_data['systime'].values)
-        tilt = np.zeros_like(sdr_f.gps_data['systime'].values)
-    pan = np.interp(rp_sdr.gpst, sdr_f.gps_data.index.values, pan)
-    tilt = np.interp(rp_sdr.gpst, sdr_f.gps_data.index.values, tilt)
-    goff = np.array(
-        [sdr_f.gim.x_offset, sdr_f.gim.y_offset, sdr_f.gim.z_offset])
-    grot = np.array([sdr_f.gim.roll * DTR, sdr_f.gim.pitch * DTR, sdr_f.gim.yaw * DTR])
-    tx_num = sdr_f[0].trans_num
-    tx_offset = np.array(
-        [sdr_f.port[tx_num].x, sdr_f.port[tx_num].y, sdr_f.port[tx_num].z])
-    rx_num = sdr_f[0].rec_num
-    rx_offset = np.array(
-        [sdr_f.port[rx_num].x, sdr_f.port[rx_num].y, sdr_f.port[rx_num].z])
-    rp = RadarPlatform(e=flight_path[:, 0], n=flight_path[:, 1], u=flight_path[:, 2], r=att_path[:, 0],
-                       p=att_path[:, 1], y=att_path[:, 2], t=rp_sdr.gpst, tx_offset=tx_offset, rx_offset=rx_offset,
-                         gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
-                         dep_angle=sdr_f.ant[0].dep_ang / DTR, squint_angle=sdr_f.ant[sdr_f.port[tx_num].assoc_ant].squint / DTR,
-                         az_bw=sdr_f.ant[sdr_f.port[tx_num].assoc_ant].az_bw / DTR,
-                         el_bw=sdr_f.ant[sdr_f.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, tx_num=tx_num,
-                         rx_num=rx_num)
-    rp.origin = rp_sdr.origin
-    bg = SDREnvironment(sdr_f, origin=grid_origin)
-    # bg, rp = getRadarAndEnvironment(sdr_f)
+    bg, rp = getRadarAndEnvironment(sdr_f)
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
-            rp.getRadarParams(rp.pos(rp.gpst)[:, 2].mean(), plp, upsample))
-    '''nsam = nsam // 8
-    nr = nr // 8
-    fft_len = fft_len // 8
-    up_fft_len = up_fft_len // 8'''
-    idx_t = sdr_f[0].frame_num[sdr_f[0].nframes // 2 : sdr_f[0].nframes // 2 + npulses]
+        rp.getRadarParams(0., plp, upsample))
+    idx_t = sdr_f[0].frame_num[sdr_f[0].nframes // 2: sdr_f[0].nframes // 2 + npulses]
     data_t = sdr_f[0].pulse_time[idx_t]
+    fs = rp.fs
 
 
     pointing_vec = rp.boresight(data_t).mean(axis=0)
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 150, 300, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
-    # Shift position
-    glat, glon, galt = enu2llh(gx.flatten(), gy.flatten(), gz.flatten(), bg.ref)
-    gx, gy, gz = llh2enu(glat, glon, galt, rp.origin)
-    grid_pts = np.array([gx, gy, gz]).T
-    gx = gx.reshape(nbpj_pts)
-    gy = gy.reshape(nbpj_pts)
-    gz = gz.reshape(nbpj_pts)
+    gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=1024, ncols=1024)
+    grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
     print('Loading mesh...', end='')
@@ -127,7 +86,7 @@ if __name__ == '__main__':
 
     mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, rp.origin), relative=False)
+    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(Mesh(mesh, num_box_levels=nbox_levels))
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
@@ -209,6 +168,8 @@ if __name__ == '__main__':
     noise_power = 10**(noise_power_db / 10)
 
     # Generate a chirp
+    # fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
+    # mf_chirp = sdr_f.genMatchedFilter(0, fft_len=fft_len)
     chirp_bandwidth = sdr_f[0].bw * 2
     chirp = genChirp(nr, fs, fc, chirp_bandwidth)
     fft_chirp = np.fft.fft(chirp, fft_len)
@@ -250,7 +211,6 @@ if __name__ == '__main__':
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
     pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr_f[0].frame_num[-1])]
-    pulse_lims = [0, sdr_f[0].nframes]
     streams = [cuda.stream() for _ in range(nstreams)]
 
     # Single pulse for debugging
@@ -259,7 +219,7 @@ if __name__ == '__main__':
                                                                                  [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
                                                                                  [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                                  rp.az_half_bw, rp.el_half_bw,
-                                                                                 nsam, fc, fs, near_range_s,
+                                                                                 nsam, fc, near_range_s, fs,
                                                                                  num_bounces=num_bounces,
                                                                                  debug=True, streams=streams)
     single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
@@ -272,17 +232,17 @@ if __name__ == '__main__':
     print('Running main loop...')
     # Get the data into CPU memory for later
     # MAIN LOOP
-    torch_data = []
+    '''torch_data = []
     torch_pos = []
     torch_pans = []
-    torch_tilts = []
+    torch_tilts = []'''
     for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
         txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         trp = [getRangeProfileFromScene(scene, sam, txposes, rxposes, pans, tilts,
-                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, fs, near_range_s,
+                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
                                       num_bounces=num_bounces, streams=streams) for sam in sample_points]
         trp = [sum(i) for i in zip(*trp)]
         mf_pulses = [np.ascontiguousarray(upsamplePulse(
@@ -291,10 +251,10 @@ if __name__ == '__main__':
         bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
-        torch_data.append(trp[0])
+        '''torch_data.append(trp[0])
         torch_pos.append(txposes[0])
         torch_pans.append(pans[0])
-        torch_tilts.append(tilts[0])
+        torch_tilts.append(tilts[0])'''
 
 
     px.scatter(db(single_rp[0][0].flatten())).show()
@@ -389,7 +349,7 @@ if __name__ == '__main__':
     px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
 
     # Get the data ready for NeRF training
-    pulses = np.stack([t[0] for t in torch_data])
+    '''pulses = np.stack([t[0] for t in torch_data])
     poses = np.stack([t[0] for t in torch_pos])
     panses = np.stack([t[0] for t in torch_pans])
     tiltses = np.stack([t[0] for t in torch_tilts])
@@ -401,7 +361,7 @@ if __name__ == '__main__':
     torch.save([data, pulses, norm_std, np.float32(rp.az_half_bw), np.float32(rp.el_half_bw), sdr_f[0].fc], f'/home/jeff/repo/nerf/data/simulator_train.pt')
 
     # Save out the sample points for nerf dataloader
-    torch.save(sample_points, f'/home/jeff/repo/nerf/data/simulator_points.pt')
+    torch.save(sample_points, f'/home/jeff/repo/nerf/data/simulator_points.pt')'''
 
 
 

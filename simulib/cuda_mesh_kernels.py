@@ -49,6 +49,11 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
 
 @cuda.jit(device=True, fast_math=True)
+def calcConicalIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
+    pass
+
+
+@cuda.jit(device=True, fast_math=True)
 def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
     r, r_rng, r_az, r_el = getRangeAndAngles(inter, re)
@@ -329,34 +334,42 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, boxminx, boxmin
 @cuda.jit()
 def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
                    tri_box_idx, tri_box_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
-                   tilt, params):
+                   tilt, params, conical_sampling):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
-            did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, ray_power[tt, ray_idx], tri_box_idx,
-                                                                                   tri_box_key, tri_idx, tri_vert,
-                                                                                   tri_norm, tri_material, 0)
-            if did_intersect:
-                acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
-                                                           pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
-                if but >= 0:
-                    acc_real = acc_real if abs(acc_real) < np.inf else 0.
-                    acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
-                    cuda.atomic.add(pd_r, (tt, but), acc_real)
-                    cuda.atomic.add(pd_i, (tt, but), acc_imag)
-
-                ray_origin[tt, ray_idx, 0] = inter.x
-                ray_origin[tt, ray_idx, 1] = inter.y
-                ray_origin[tt, ray_idx, 2] = inter.z
-                ray_dir[tt, ray_idx, 0] = b.x
-                ray_dir[tt, ray_idx, 1] = b.y
-                ray_dir[tt, ray_idx, 2] = b.z
-                ray_power[tt, ray_idx] = nrho
-                ray_distance[tt, ray_idx] = rng
-            else:
-                ray_power[tt, ray_idx] = 0.
+            # Set up rays for conical approximation supersampling
+            for xd in conical_sampling:
+                for yd in conical_sampling:
+                    rec_xyz = make_float3(receive_xyz[tt, 0] + xd, receive_xyz[tt, 1] + yd, receive_xyz[tt, 2])
+                    did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz,
+                                                                                     make_float3(ray_dir[tt, ray_idx, 0],
+                                                                                                 ray_dir[tt, ray_idx, 1],
+                                                                                                 ray_dir[tt, ray_idx, 2]),
+                                                                                     boxminx, boxminy, boxminz, boxmaxx,
+                                                                                     boxmaxy, boxmaxz, ray_power[tt, ray_idx],
+                                                                                     tri_box_idx, tri_box_key, tri_idx,
+                                                                                     tri_vert, tri_norm, tri_material, 0)
+                    if did_intersect:
+                        acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
+                                                                   pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
+                        if but >= 0:
+                            acc_real = acc_real if abs(acc_real) < np.inf else 0.
+                            acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
+                            cuda.atomic.add(pd_r, (tt, but), acc_real)
+                            cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                            if xd == 0. and yd == 0.:
+                                ray_origin[tt, ray_idx, 0] = inter.x
+                                ray_origin[tt, ray_idx, 1] = inter.y
+                                ray_origin[tt, ray_idx, 2] = inter.z
+                                ray_dir[tt, ray_idx, 0] = b.x
+                                ray_dir[tt, ray_idx, 1] = b.y
+                                ray_dir[tt, ray_idx, 2] = b.z
+                                ray_power[tt, ray_idx] = nrho
+                                ray_distance[tt, ray_idx] = rng
+                    else:
+                        ray_power[tt, ray_idx] = 0.
 
 
 @cuda.jit()

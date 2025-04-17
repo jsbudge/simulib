@@ -271,6 +271,8 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     # boxes_gpu = cuda.to_device(mesh.octree.astype(_float))
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
                                           radar_equation_constant]).astype(_float))
+    conical_sampling_gpu = cuda.to_device(np.array([-c0 / (2 * fc), c0 / (2 * fc), 0]).astype(_float))
+    # conical_sampling_gpu = cuda.to_device(np.array([-1., 1., 0]).astype(_float))
 
     pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
     pd_i = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
@@ -299,7 +301,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
                                                          tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
                                                          tri_norm_gpu, tri_material_gpu, pd_r_gpu, pd_i_gpu,
                                                          receive_xyz_gpu,
-                                                         az_gpu, el_gpu, params_gpu)
+                                                         az_gpu, el_gpu, params_gpu, conical_sampling_gpu)
                 if debug:
                     debug_rays.append(ray_origin_gpu.copy_to_host(stream=stream))
                     debug_raydirs.append(ray_dir_gpu.copy_to_host(stream=stream))
