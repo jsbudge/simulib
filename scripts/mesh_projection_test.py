@@ -47,9 +47,8 @@ if __name__ == '__main__':
     num_bounces = 1
     nbox_levels = 5
     nstreams = 1
-    points_to_sample = 2**17
+    point_spread = .3  # np.pi * (c0 / fc)**2
     num_mesh_triangles = 1000000
-    max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
     fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
     # fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
@@ -58,7 +57,7 @@ if __name__ == '__main__':
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     do_randompts = False
-    nbpj_pts = (512, 1024)
+    nbpj_pts = (512, 512)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
@@ -176,24 +175,6 @@ if __name__ == '__main__':
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = fft_chirp.conj() * taytay
 
-
-    # Load in boxes and meshes for speedup of ray tracing
-    print('Loading mesh box structure...', end='')
-    ptsam = min(points_to_sample, max_pts_per_run)
-    print('Done.')
-
-    # If we need to split the point raster, do so
-    if points_to_sample > max_pts_per_run:
-        splits = np.concatenate((np.arange(0, points_to_sample, max_pts_per_run), [points_to_sample]))
-    else:
-        splits = np.array([0, points_to_sample])
-
-    if do_randompts:
-        sample_points = ptsam
-    else:
-        sample_points = [scene.sample(int(splits[s + 1] - splits[s]),
-                                      view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
-                         for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
 
@@ -215,7 +196,7 @@ if __name__ == '__main__':
 
     # Single pulse for debugging
     print('Generating single pulse...')
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points[0],
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, point_spread,
                                                                                  [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
                                                                                  [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                                  rp.az_half_bw, rp.el_half_bw,
@@ -241,9 +222,9 @@ if __name__ == '__main__':
         rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        trp = [getRangeProfileFromScene(scene, sam, txposes, rxposes, pans, tilts,
+        trp = [getRangeProfileFromScene(scene, point_spread, txposes, rxposes, pans, tilts,
                                       radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
-                                      num_bounces=num_bounces, streams=streams) for sam in sample_points]
+                                      num_bounces=num_bounces, streams=streams)]
         trp = [sum(i) for i in zip(*trp)]
         mf_pulses = [np.ascontiguousarray(upsamplePulse(
             addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True,

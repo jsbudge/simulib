@@ -57,6 +57,11 @@ class Mesh(object):
         mesh_idx_key[box_num, 0] = start_idxes
         mesh_idx_key[box_num, 1] = mesh_extent
 
+        # Calculate out the number of points needed on the triangle to get even coverage across mesh
+        ab = mesh_tri_vertices[:, 0] - mesh_tri_vertices[:, 1]
+        ac = mesh_tri_vertices[:, 0] - mesh_tri_vertices[:, 2]
+        self.tri_areas = np.linalg.norm(np.cross(ab, ac), axis=-1) / 2
+
 
         # Set them all as properties of the object
         self.tri_idx = mesh_tri_idx

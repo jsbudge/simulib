@@ -47,7 +47,6 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
     return True, normalize(det * rd - vn * dot(det * rd, vn) * 2.), ro + det * rd
 
-
 @cuda.jit(device=True, fast_math=True)
 def calcConicalIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
     pass
@@ -66,7 +65,6 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
         return acc_val.real, acc_val.imag, rng_bin
 
     return 0, 0, -1
-
 
 @cuda.jit(device=True, fast_math=True)
 def findOctreeBox(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, box):
@@ -101,7 +99,8 @@ def findOctreeBox(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, 
 
 
 @cuda.jit(device=True, fast_math=True)
-def traverseOctreeForOcclusion(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, tri_box_idx, tri_box_key, tri_idx, tri_vert, tri_norm):
+def traverseOctreeForOcclusion(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, tri_box_idx, tri_box_key, 
+                               tri_idx, tri_vert, tri_norm):
     """
     Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
     params:
@@ -206,9 +205,8 @@ def traverseOctreeAndIntersection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, bo
             else:
                 box <<= 3
                 jump = True
-        else:
-            if box == 8:
-                break
+        elif box == 8:
+            break
         box += 1
         if (box - 1) >> 3 != (box - 2) >> 3 and not jump:
             if box == 9:
@@ -221,7 +219,7 @@ def traverseOctreeAndIntersection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, bo
 
 @cuda.jit(device=True, fast_math=True)
 def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, rho, tri_box_idx,
-                                  tri_box_key, tri_idx, tri_vert, tri_norm, tri_material, rng):
+                                  tri_box_key, tri_idx, tri_vert, tri_norm, tri_material, rng, init_tri_idx):
     """
     Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
     params:
@@ -262,7 +260,7 @@ def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxm
                                                make_float3(tri_vert[ti_idx.z, 0],
                                                            tri_vert[ti_idx.z, 1],
                                                            tri_vert[ti_idx.z, 2]), tn, True))
-                    if curr_intersect:
+                    if curr_intersect and t_idx == init_tri_idx:
                         tmp_rng = length(ro - tinter)
                         if 1. < tmp_rng < int_rng:
                             int_rng = tmp_rng + rng
@@ -278,9 +276,8 @@ def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxm
             else:
                 box <<= 3
                 jump = True
-        else:
-            if box == 8:
-                break
+        elif box == 8:
+            break
         box += 1
         if (box - 1) >> 3 != (box - 2) >> 3 and not jump:
             if box == 9:
@@ -290,86 +287,50 @@ def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxm
 
     return did_intersect, nrho, inter, int_rng, b
 
+
 @cuda.jit()
-def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
-                   tri_box_idx, tri_box_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
+def calcBounceInit(trans_xyz, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
+                   tri_box_idx, tri_box_key, tri_vert, tri_idx, tri_norm, tri_material, pts_per_tri, pd_r, pd_i, receive_xyz, pan,
                    tilt, params):
     t, r = cuda.grid(ndim=2)
-    tt_stride, ray_stride = cuda.gridsize(2)
-    for tt in prange(t, ray_dir.shape[0], tt_stride):
-        for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            # Load in all the parameters that don't change
-            rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
-            rng = ray_distance[tt, ray_idx]
-            did_intersect, nrho, inter, int_rng, b = traverseOctreeAndReflection(
-                make_float3(ray_origin[tt, ray_idx, 0], ray_origin[tt, ray_idx, 1], ray_origin[tt, ray_idx, 2]),
-                make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
-                ray_power[tt, ray_idx], tri_box_idx,tri_box_key, tri_idx, tri_vert,
-                                                                                   tri_norm, tri_material, rng)
-            if did_intersect:
-                rng += int_rng
-                # Check for occlusion against the receiver
-                if not traverseOctreeForOcclusion(inter, normalize(rec_xyz - inter), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, tri_box_idx, tri_box_key,
-                                                                           tri_idx, tri_vert, tri_norm):
-                    acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
-                                                               pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
-                    if but >= 0:
-                        acc_real = acc_real if abs(acc_real) < np.inf else 0.
-                        acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
-                        cuda.atomic.add(pd_r, (tt, but), acc_real)
-                        cuda.atomic.add(pd_i, (tt, but), acc_imag)
+    tt_stride, tri_stride = cuda.gridsize(2)
+    for tt in prange(t, receive_xyz.shape[0], tt_stride):
+        # Get the transmitter location for this time
+        t_xyz = make_float3(trans_xyz[tt, 0], trans_xyz[tt, 1], trans_xyz[tt, 2])
+        for ti in prange(r, tri_idx.shape[0], tri_stride):
+            # Calculate out coordinates on triangle (using barycentric coordinates)
+            for lam0 in prange(pts_per_tri[ti]):
+                for lam1 in prange(pts_per_tri[ti]):
+                    l0 = (lam0 + 1) / pts_per_tri[ti] * .5
+                    l1 = (lam1 + 1) / pts_per_tri[ti] * .5
+                    l2 = 1. - l0 - l1
+                    tx = l0 * tri_vert[tri_idx[ti, 0], 0] + l1 * tri_vert[tri_idx[ti, 1], 0] + l2 * tri_vert[tri_idx[ti, 2], 0]
+                    ty = l0 * tri_vert[tri_idx[ti, 0], 1] + l1 * tri_vert[tri_idx[ti, 1], 1] + l2 * tri_vert[
+                        tri_idx[ti, 2], 1]
+                    tz = l0 * tri_vert[tri_idx[ti, 0], 2] + l1 * tri_vert[tri_idx[ti, 1], 2] + l2 * tri_vert[
+                        tri_idx[ti, 2], 2]
 
-                ray_origin[tt, ray_idx, 0] = inter.x
-                ray_origin[tt, ray_idx, 1] = inter.y
-                ray_origin[tt, ray_idx, 2] = inter.z
-                ray_dir[tt, ray_idx, 0] = b.x
-                ray_dir[tt, ray_idx, 1] = b.y
-                ray_dir[tt, ray_idx, 2] = b.z
-                ray_power[tt, ray_idx] = nrho
-            else:
-                ray_distance[tt, ray_idx] = rng
-                ray_power[tt, ray_idx] = 0.
+                    # Get direction and attenuation values
+                    rd = normalize(make_float3(tx, ty, tz) - t_xyz)
+                    rp = (params[5] * applyOneWayRadiationPattern(pan[tt], tilt[tt], math.atan2(rd.x, rd.y), -math.asin(rd.z),
+                                                                  params[3], params[4]))
 
-
-@cuda.jit()
-def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
-                   tri_box_idx, tri_box_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
-                   tilt, params, conical_sampling):
-    t, r = cuda.grid(ndim=2)
-    tt_stride, ray_stride = cuda.gridsize(2)
-    for tt in prange(t, ray_dir.shape[0], tt_stride):
-        for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            # Set up rays for conical approximation supersampling
-            for xd in conical_sampling:
-                for yd in conical_sampling:
-                    rec_xyz = make_float3(receive_xyz[tt, 0] + xd, receive_xyz[tt, 1] + yd, receive_xyz[tt, 2])
-                    did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz,
-                                                                                     make_float3(ray_dir[tt, ray_idx, 0],
-                                                                                                 ray_dir[tt, ray_idx, 1],
-                                                                                                 ray_dir[tt, ray_idx, 2]),
+                    did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(t_xyz,
+                                                                                     rd,
                                                                                      boxminx, boxminy, boxminz, boxmaxx,
-                                                                                     boxmaxy, boxmaxz, ray_power[tt, ray_idx],
+                                                                                     boxmaxy, boxmaxz, rp,
                                                                                      tri_box_idx, tri_box_key, tri_idx,
-                                                                                     tri_vert, tri_norm, tri_material, 0)
+                                                                                     tri_vert, tri_norm, tri_material, 0, ti)
                     if did_intersect:
-                        acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
-                                                                   pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
+                        acc_real, acc_imag, but = calcReturnAndBin(inter, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1],
+                                                                                      receive_xyz[tt, 2]), rng, params[1],
+                                                                   params[2], pd_r.shape[1], pan[tt], tilt[tt], params[3],
+                                                                   params[4], params[0], nrho)
                         if but >= 0:
                             acc_real = acc_real if abs(acc_real) < np.inf else 0.
                             acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                             cuda.atomic.add(pd_r, (tt, but), acc_real)
                             cuda.atomic.add(pd_i, (tt, but), acc_imag)
-                            if xd == 0. and yd == 0.:
-                                ray_origin[tt, ray_idx, 0] = inter.x
-                                ray_origin[tt, ray_idx, 1] = inter.y
-                                ray_origin[tt, ray_idx, 2] = inter.z
-                                ray_dir[tt, ray_idx, 0] = b.x
-                                ray_dir[tt, ray_idx, 1] = b.y
-                                ray_dir[tt, ray_idx, 2] = b.z
-                                ray_power[tt, ray_idx] = nrho
-                                ray_distance[tt, ray_idx] = rng
-                    else:
-                        ray_power[tt, ray_idx] = 0.
 
 
 @cuda.jit()
