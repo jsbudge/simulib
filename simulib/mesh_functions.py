@@ -624,6 +624,65 @@ def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray 
     return octree, tri_box_idxes
 
 
+def genBVH(bounding_box: np.ndarray, num_levels: int = 10, points: np.ndarray = None, min_tri_per_box: int = 64):
+    bvh = np.zeros((2**num_levels + 1, 2, 3))
+    ntris = np.zeros(bvh.shape[0])
+    centroids = points.mean(axis=1)
+    # Root node
+    bvh[0] = bounding_box
+    for idx in range(bvh.shape[0] // 2):
+        left_node = idx * 2 + 1
+        right_node = idx * 2 + 2
+        # Find the major separating axis
+        ma = np.argmax(abs(bvh[idx, 0] - bvh[idx, 1]))
+
+        # Get split to even number of triangles per split
+        pts_include = np.ones((points.shape[0]))
+        for n in range(3):
+            pts_include = np.logical_and(pts_include, np.logical_and(bvh[idx, 0, n] <= centroids[:, n],
+                                                                     centroids[:, n] <= bvh[idx, 1, n]))
+        if sum(pts_include) == 0:
+            continue
+
+        center = centroids[pts_include].mean(axis=0)
+        '''elif min_tri_per_box * 2 - 15 <= sum(pts_include) <= min_tri_per_box * 2 + 15:
+            center = np.median(centroids[pts_include], axis=0)
+        else:
+            center = centroids[pts_include].mean(axis=0)'''
+        bvh[left_node] = bvh[idx]
+        bvh[left_node, :, ma] = [bvh[idx, 0, ma], center[ma]]
+        bvh[right_node] = bvh[idx]
+        bvh[right_node, :, ma] = [center[ma], bvh[idx, 1, ma]]
+
+        # Shrink each node to fit points
+        for node in [left_node, right_node]:
+            pts_include = np.ones((points.shape[0]))
+            for n in range(3):
+                pts_include = np.logical_and(pts_include, np.logical_and(bvh[node, 0, n] <= centroids[:, n], centroids[:, n] <= bvh[node, 1, n]))
+            tri_inside_box = points[pts_include]
+            ntris[node] = tri_inside_box.shape[0]
+            if tri_inside_box.shape[0] == 0:
+                bvh[node] = np.zeros((2, 3))
+            else:
+                for n in range(3):
+                    bvh[node, :, n] = [max(bvh[node, 0, n], np.min(tri_inside_box[:, :, n])), min(bvh[node, 1, n], np.max(tri_inside_box[:, :, n]))]
+
+
+    leaves = []
+    for box in range(bvh.shape[0] // 2 + 1, bvh.shape[0], 1):
+        pts_include = np.ones((points.shape[0], 3))
+        for n in range(3):
+            pts_include = np.logical_and(pts_include, np.logical_and(bvh[box, 0, n] <= points[:, :, n],
+                                                                     points[:, :, n] <= bvh[box, 1, n]))
+        leaves.append(np.where(np.any(pts_include, axis=1))[0])
+
+    ntri_per_leaf = np.array([len(l) for l in leaves])
+    leaf_key = np.array([ntri_per_leaf, np.concatenate(([0], np.cumsum(ntri_per_leaf[:-1])))]).T
+    leaf_list = np.concatenate(leaves)
+
+    return bvh, leaf_key, leaf_list
+
+
 def getMeshFig(mesh, triangle_colors=None, title='Title Goes Here', zrange=100):
     fig = go.Figure(data=[
         go.Mesh3d(

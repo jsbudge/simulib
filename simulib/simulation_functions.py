@@ -437,6 +437,11 @@ def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20, fft_len=No
     return matchedFilter
 
 
+def getRadarCoeff(fc, ant_transmit_power, rx_gain, tx_gain, rec_gain):
+    return (c0 ** 2 / fc ** 2 * ant_transmit_power * 10 ** ((rx_gain + 2.15) / 10) * 10 ** ((tx_gain + 2.15) / 10) *
+     10 ** ((rec_gain + 2.15) / 10) / (4 * np.pi) ** 3)
+
+
 def window_taylor(N, nbar=4, sll=-30):
     """Taylor tapering window
     Taylor windows allows you to make tradeoffs between the

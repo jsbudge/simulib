@@ -39,7 +39,7 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
     # Compute intersection point
     det = inv_det * dot(v2 - v0, rcrosse)
-    if det < 1e-4:
+    if det < 1e-9:
         return False, None, None
 
     if not get_bounce:
@@ -61,7 +61,7 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
     rng_bin = int(((rng + r_rng) / c0 - 2 * near_range_s) * source_fs)
 
     if n_samples > rng_bin > 0:
-        acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
+        acc_val = (1. / #applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
                    (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng)))
         return acc_val.real, acc_val.imag, rng_bin
 
