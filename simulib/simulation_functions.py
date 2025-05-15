@@ -226,6 +226,13 @@ def genChirp(nnr, nfs, nfc, bandw):
     return np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / nfs))
 
 
+def get_radar_coeff(fc, ant_transmit_power, rx_gain, tx_gain, rec_gain):
+    return (
+            c0 ** 2 / fc ** 2 * ant_transmit_power * 10 ** ((rx_gain + 2.15) / 10) * 10 ** (
+                (tx_gain + 2.15) / 10) *
+            10 ** ((rec_gain + 2.15) / 10) / (4 * np.pi) ** 3)
+
+
 def rotate(az, nel, rot_mat):
     return rot.from_euler('zx', [[-az, 0.], [0., nel - np.pi / 2]]).apply(rot_mat)
 
@@ -315,7 +322,7 @@ def factors(n):
 
 
 def genTaylorWindow(baseband_fc: float, half_bw: float, fs: float, fft_len: int, nbar: int = 5,
-                    sll: float = -35) -> np.array:
+                    sll: float = -35, function = None) -> np.array:
     # Get the basebanded center, start and stop frequency of the chirp
     basebandedStartFreqHz = baseband_fc - half_bw
     basebandedStopFreqHz = baseband_fc + half_bw
@@ -338,6 +345,8 @@ def genTaylorWindow(baseband_fc: float, half_bw: float, fs: float, fft_len: int,
             taylorWindowExtended[:windowSize - (fft_len - bandStartInd)] = taylorWindow[fft_len - bandStartInd:]
         else:
             taylorWindowExtended[bandStartInd: bandStartInd + windowSize] = taylorWindow
+    nonzeros = taylorWindowExtended > 0
+    taylorWindowExtended[nonzeros] -= taylorWindowExtended[nonzeros].min()
     return taylorWindowExtended
 
 

@@ -7,7 +7,7 @@ from simulib.platform_helper import SDRPlatform, RadarPlatform
 from simulib.grid_helper import SDREnvironment
 
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
-from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh
+from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, get_radar_coeff
 from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
     getMeshFig, getSceneFig, drawOctreeBox
 from tqdm import tqdm
@@ -17,7 +17,8 @@ import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
 from sdrparse import load
-
+import matplotlib as mplib
+mplib.use('TkAgg')
 from simulib.mesh_objects import Mesh, Scene
 
 pio.renderers.default = 'browser'
@@ -27,27 +28,28 @@ TAC = 125e6
 DTR = np.pi / 180
 
 
-def addNoise(range_profile, chirp, npower, mf, fft_len):
-    data = (chirp * np.fft.fft(range_profile + np.random.normal(0, npower, range_profile.shape) +
-     1j * np.random.normal(0, npower, range_profile.shape), fft_len))
-    return data * mf
+def addNoise(range_profile, a_chirp, npower, mf, a_fft_len):
+    data = (a_chirp * np.fft.fft(range_profile, a_fft_len))
+    data = data * mf
+    data = np.fft.ifft(data) + np.random.normal(0, npower, data.shape) + 1j * np.random.normal(0, npower, data.shape)
+    return np.fft.fft(data)
 
 
 if __name__ == '__main__':
     fc = 9.6e9
-    rx_gain = 32  # dB
-    tx_gain = 32  # dB
+    rx_gain = 35  # dB
+    tx_gain = 35  # dB
     rec_gain = 100  # dB
     ant_transmit_power = 100  # watts
-    noise_power_db = -120
-    npulses = 64
-    plp = .75
+    noise_power_db = -300
+    npulses = 512
+    plp = 0.
     fdelay = 10.
-    upsample = 4
+    upsample = 8
     num_bounces = 1
     nbox_levels = 5
     nstreams = 1
-    point_spread = .3  # np.pi * (c0 / fc)**2
+    point_spread = np.pi * (c0 / fc)**2
     num_mesh_triangles = 1000000
     # grid_origin = (40.139343, -111.663541, 1360.10812)
     fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
@@ -65,6 +67,7 @@ if __name__ == '__main__':
     bg, rp = getRadarAndEnvironment(sdr_f)
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
         rp.getRadarParams(0., plp, upsample))
+    rp.el_half_bw *= 2
     idx_t = sdr_f[0].frame_num[sdr_f[0].nframes // 2: sdr_f[0].nframes // 2 + npulses]
     data_t = sdr_f[0].pulse_time[idx_t]
     fs = rp.fs
@@ -74,7 +77,7 @@ if __name__ == '__main__':
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=1024, ncols=1024)
+    gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
     grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -113,19 +116,15 @@ if __name__ == '__main__':
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     mesh_extent = car.get_max_bound() - car.get_min_bound()
     car = car.translate(np.array([gx.mean() - 50, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2 - 16]), relative=False)
-    msigmas = [2. for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
-    msigmas[0] = msigmas[15] = .5  # seats
-    msigmas[6] = msigmas[13] = msigmas[17] = .5  # body
-    msigmas[12] = msigmas[4] = .2  # windshield
+    msigmas = [1e6 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
+    msigmas[0] = msigmas[15] = 2.  # seats
+    msigmas[6] = msigmas[13] = msigmas[17] = 1e6  # body
+    msigmas[12] = msigmas[4] = 2.  # windshield
     mkds = [.5 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
-    mkds[0] = mkds[15] = .8  # seats
-    mkds[6] = mkds[13] = mkds[17] = .8  # body
-    mkds[12] = mkds[4] = .1  # windshield
-    mkss = [.5 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
-    mkss[0] = mkss[15] = .2  # seats
-    mkss[6] = mkss[13] = mkss[17] = .8  # body
-    mkss[12] = mkss[4] = .01  # windshield
-    scene.add(Mesh(car, num_box_levels=4, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss,
+    mkds[0] = mkds[15] = .01  # seats
+    mkds[6] = mkds[13] = mkds[17] = .0001  # body
+    mkds[12] = mkds[4] = .0001  # windshield
+    scene.add(Mesh(car, num_box_levels=4, material_sigmas=msigmas, material_kd=mkds,
                 use_box_pts=True))'''
     
     '''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
@@ -140,6 +139,7 @@ if __name__ == '__main__':
     scene.add(Mesh(building, num_box_levels=3))'''
     
     '''gpx, gpy, gpz = bg.getGrid(grid_origin, 300, 300, nrows=256, ncols=256)
+    gpz[:] = -17.
     # Shift position
     gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
     gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, rp.origin)
@@ -151,7 +151,7 @@ if __name__ == '__main__':
     ground = o3d.geometry.TriangleMesh()
     ground.vertices = o3d.utility.Vector3dVector(gnd_points)
     ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
-    ground = ground.simplify_vertex_clustering(5.)
+    ground = ground.simplify_vertex_clustering(15.)
     ground.remove_duplicated_vertices()
     ground.remove_unreferenced_vertices()
     ground.compute_vertex_normals()
@@ -162,18 +162,17 @@ if __name__ == '__main__':
     print('Done.')
 
     # This is all the constants in the radar equation for this simulation
-    radar_coeff = (c0**2 / fc**2 * ant_transmit_power * 10**((rx_gain + 2.15) / 10) * 10**((tx_gain + 2.15) / 10) *
-                   10**((rec_gain + 2.15) / 10) / (4 * np.pi)**3)
+    radar_coeff = get_radar_coeff(fc, ant_transmit_power, rx_gain, tx_gain, rec_gain)
     noise_power = 10**(noise_power_db / 10)
 
     # Generate a chirp
     # fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
     # mf_chirp = sdr_f.genMatchedFilter(0, fft_len=fft_len)
-    chirp_bandwidth = sdr_f[0].bw * 2
-    chirp = genChirp(nr, fs, fc, chirp_bandwidth)
+    chirp_bandwidth = sdr_f[0].bw
+    chirp = genChirp(nr, fs, fc, chirp_bandwidth) * 10
     fft_chirp = np.fft.fft(chirp, fft_len)
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
-    mf_chirp = fft_chirp.conj() * taytay
+    mf_chirp = taytay / fft_chirp  # fft_chirp.conj() * taytay
 
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
@@ -191,13 +190,14 @@ if __name__ == '__main__':
                      pmin[2] - flight_path[:, 2]]).T
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
-    pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr_f[0].frame_num[-1])]
+    # pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr_f[0].frame_num[-1])]
+    pulse_lims = [sdr_f[0].frame_num[0], sdr_f[0].frame_num[-1]]
     streams = [cuda.stream() for _ in range(nstreams)]
 
     # Single pulse for debugging
     print('Generating single pulse...')
     single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, point_spread,
-                                                                                 [rp.txpos(data_t).astype(_float)], [rp.rxpos(data_t).astype(_float)],
+                                                                                 [rp.txpos(data_t).astype(_float)], [rp.txpos(data_t).astype(_float)],
                                                                                  [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                                  rp.az_half_bw, rp.el_half_bw,
                                                                                  nsam, fc, near_range_s, fs,
@@ -218,10 +218,11 @@ if __name__ == '__main__':
     torch_pans = []
     torch_tilts = []'''
     for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
-        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        rxposes = [rp.rxpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+        ptimes = [sdr_f[0].pulse_time[frame[n]:frame[n] + npulses + 1] for n in range(nstreams)]
+        txposes = [rp.txpos(ptimes[n]).astype(_float) for n in range(nstreams)]
+        rxposes = [rp.txpos(ptimes[n]).astype(_float) for n in range(nstreams)]
+        pans = [rp.pan(ptimes[n]).astype(_float) for n in range(nstreams)]
+        tilts = [rp.tilt(ptimes[n]).astype(_float) for n in range(nstreams)]
         trp = [getRangeProfileFromScene(scene, point_spread, txposes, rxposes, pans, tilts,
                                       radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
                                       num_bounces=num_bounces, streams=streams)]
@@ -242,6 +243,8 @@ if __name__ == '__main__':
     px.scatter(db(single_pulse[0].flatten())).show()
     px.scatter(db(single_mf_pulse[0].flatten())).show()
 
+    # px.scatter(chirp.real).show()
+
     '''plt.figure('Data')
     plt.imshow(db(single_mf_pulse * 1e8))
     plt.xlabel('Interpolated Range Bin')
@@ -261,14 +264,16 @@ if __name__ == '__main__':
     px.imshow(db_bpj, origin='lower', color_continuous_scale='gray',
               range_color=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2]).show()
 
-    scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
+    fig = getSceneFig(scene, title='Full Mesh', zrange=flight_path[:, 2].mean() + 10)
+    fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
+    fig.show()
+
+    '''scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
     sc_min = scaling[0] - 1e-3
     sc = 1 / (scaling[1] - scaling[0])
     scaled_rp = (ray_powers[0] - sc_min) * sc
 
-    fig = getSceneFig(scene, title='Full Mesh', zrange=flight_path[:, 2].mean() + 10)
-    fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
-    fig.show()
+
 
     bounce_colors = ['blue', 'red', 'green', 'yellow']
     for bounce in range(len(ray_origins)):
@@ -292,13 +297,13 @@ if __name__ == '__main__':
     for ro, rd, nrp in zip(ray_origins, ray_directions, ray_powers):
         sc = ((1 + nrp[0, valids] / nrp[0, valids].max()) * 10)[::1000]
         fig.add_trace(go.Cone(x=ro[0, valids, 0][::1000], y=ro[0, valids, 1][::1000], z=ro[0, valids, 2][::1000], u=rd[0, valids, 0][::1000] * sc,
-                          v=rd[0, valids, 1][::1000] * sc, w=rd[0, valids, 2][::1000] * sc, anchor='tail', sizemode='absolute'))
+                          v=rd[0, valids, 1][::1000] * sc, w=rd[0, valids, 2][::1000] * sc, anchor='tail', sizemode='absolute'))'''
     '''fig.update_layout(
             scene=dict(zaxis=dict(range=[-30, 100]),
                        xaxis=dict(range=[2150, 2550]),
                        yaxis=dict(range=[-800, -1000])),
         )'''
-    fig.show()
+    # fig.show()
 
     fig = getSceneFig(scene)
 
@@ -308,12 +313,12 @@ if __name__ == '__main__':
                 fig.add_trace(drawOctreeBox(b))
     fig.show()
 
-    fig = px.scatter_3d(x=sample_points[0][:256, 0], y=sample_points[0][:256, 1], z=sample_points[0][:256, 2])
+    '''fig = px.scatter_3d(x=sample_points[0][:256, 0], y=sample_points[0][:256, 1], z=sample_points[0][:256, 2])
     for n in range(256, 8192, 256):
         fig.add_trace(
             go.Scatter3d(x=sample_points[0][n:n + 256, 0], y=sample_points[0][n:n + 256, 1], z=sample_points[0][n:n + 256, 2],
                          mode='markers'))
-    fig.show()
+    fig.show()'''
 
     '''tri_pcd = o3d.geometry.PointCloud()
     tri_pcd.points = o3d.utility.Vector3dVector(mesh.vertices[mesh.tri_idx].mean(axis=1))
@@ -328,6 +333,7 @@ if __name__ == '__main__':
     kml.save('/home/jeff/repo/test.kml')'''
 
     px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
+    px.scatter(x=np.fft.fftshift(np.arange(mf_chirp.shape[0])), y=db(np.fft.ifft(mf_chirp * fft_chirp))).show()
 
     # Get the data ready for NeRF training
     '''pulses = np.stack([t[0] for t in torch_data])
@@ -344,6 +350,29 @@ if __name__ == '__main__':
     # Save out the sample points for nerf dataloader
     torch.save(sample_points, f'/home/jeff/repo/nerf/data/simulator_points.pt')'''
 
+    # Test of backscattering
+    '''tx = flight_path[0]
+    normals = scene.meshes[0].normals
+    vertices = scene.meshes[0].vertices[scene.meshes[0].tri_idx]
+    sigma = .017
+    epsilon = 1e6
+    pts = vertices.mean(axis=1)
+    rd = pts - tx[None, :]
+    rd_rng = np.linalg.norm(rd, axis=1)
+    rd = rd / rd_rng[:, None]
+
+    cosa = abs(np.sum(rd * normals, axis=1))
+    sina = epsilon * np.sqrt(1. - (1. / epsilon * np.linalg.norm(np.cross(rd, normals), axis=1))**2)
+    Rs = abs((cosa - sina) / (cosa + sina)) ** 2
+
+    roughness = np.exp(-.5 * (2. * 2 * np.pi / (c0 / fc) * sigma * cosa) ** 2)  # Roughness calculations to get specular/scattering split
+    spec = np.zeros_like(roughness)
+    spec[cosa >= .9932] = 1
+    nrho = radar_coeff / rd_rng**2 * cosa * Rs * (
+                roughness * spec + (1. - roughness) * cosa ** 2)  # Final reflected power'''
 
 
+    plt.figure()
+    plt.imshow(db(single_rp[0]))
+    plt.axis('tight')
 

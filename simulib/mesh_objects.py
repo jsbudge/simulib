@@ -8,7 +8,7 @@ from .mesh_functions import detectPoints, genOctree, detectPointsScene
 class Mesh(object):
 
     def __init__(self, a_mesh: o3d.geometry.TriangleMesh, num_box_levels: int=4, material_sigmas: list=None,
-                 material_kd: list=None, material_ks: list = None, use_box_pts: bool = True, octree_perspective: np.ndarray = None):
+                 material_kd: list=None, use_box_pts: bool = True, octree_perspective: np.ndarray = None):
         # Generate bounding box tree
         mesh_tri_idx = np.asarray(a_mesh.triangles)
         mesh_vertices = np.asarray(a_mesh.vertices)
@@ -32,13 +32,23 @@ class Mesh(object):
         else:
             mesh_kd = np.array([material_kd[i] for i in np.asarray(a_mesh.triangle_material_ids)])
 
-        if material_ks is None:
-            mesh_ks = np.ones(len(a_mesh.triangles))
-        else:
-            mesh_ks = np.array([material_ks[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+        tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)) * 1e6,
+                                       mesh_kd.reshape((-1, 1)) * .0017], axis=1)
 
-        tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
-                                       mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
+        assert np.all(tri_material[:, 0] >= 1.), 'Material emissivity must be greater than one.'
+
+        # Calculate out the number of points needed on the triangle to get even coverage across mesh
+        ab = mesh_tri_vertices[:, 0] - mesh_tri_vertices[:, 1]
+        ac = mesh_tri_vertices[:, 0] - mesh_tri_vertices[:, 2]
+        tri_areas = np.linalg.norm(np.cross(ab, ac), axis=-1) / 2
+
+        # Rearrange based on triangle area to efficiently move things onto GPU
+        '''sorted_idxes = np.argsort(tri_areas)
+        mesh_normals = mesh_normals[sorted_idxes]
+        mesh_tri_vertices = mesh_tri_vertices[sorted_idxes]
+        tri_areas = tri_areas[sorted_idxes]
+        mesh_tri_idx = mesh_tri_idx[sorted_idxes]'''
+
 
         # Generate octree and associate triangles with boxes
         aabb = a_mesh.get_axis_aligned_bounding_box()
@@ -57,13 +67,8 @@ class Mesh(object):
         mesh_idx_key[box_num, 0] = start_idxes
         mesh_idx_key[box_num, 1] = mesh_extent
 
-        # Calculate out the number of points needed on the triangle to get even coverage across mesh
-        ab = mesh_tri_vertices[:, 0] - mesh_tri_vertices[:, 1]
-        ac = mesh_tri_vertices[:, 0] - mesh_tri_vertices[:, 2]
-        self.tri_areas = np.linalg.norm(np.cross(ab, ac), axis=-1) / 2
-
-
         # Set them all as properties of the object
+        self.tri_areas = tri_areas
         self.tri_idx = mesh_tri_idx
         self.vertices = mesh_vertices
         self.normals = mesh_normals
@@ -102,13 +107,11 @@ class Scene(object):
                 self.tree[idx] = m.octree[0]
         
 
-    @singledispatch
     def add(self, a):
         self.tree = np.concatenate((self.tree, np.expand_dims(a.octree[0], 0)), axis=0) if len(
             self.tree) != 0 else np.expand_dims(a.octree[0], 0)
         self.meshes += [a]
 
-    @add.register
     def _(self, a: list):
         ntree = np.zeros((len(a), 2, 3))
         for idx, m in enumerate(a):
@@ -135,7 +138,7 @@ class Scene(object):
             bw_el = max(bw_el, abs(pointing_el[:, None] - view_el).max())
         return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
 
-    @cached_property
+    @property
     def bounding_box(self):
         return np.array([[np.min(np.array([m.octree[0, 0, :] for m in self.meshes]), axis=0)],
                  [np.max(np.array([m.octree[0, 1, :] for m in self.meshes]), axis=0)]]).squeeze(1)

@@ -39,7 +39,7 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
     # Compute intersection point
     det = inv_det * dot(v2 - v0, rcrosse)
-    if det < 1e-4:
+    if det < 1e-9:
         return False, None, None
 
     if not get_bounce:
@@ -60,7 +60,7 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
     rng_bin = int(((rng + r_rng) / c0 - 2 * near_range_s) * source_fs)
 
     if n_samples > rng_bin > 0:
-        acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
+        acc_val = (1. / #applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
                    (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng)))
         return acc_val.real, acc_val.imag, rng_bin
 
@@ -219,7 +219,7 @@ def traverseOctreeAndIntersection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, bo
 
 @cuda.jit(device=True, fast_math=True)
 def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, rho, tri_box_idx,
-                                  tri_box_key, tri_idx, tri_vert, tri_norm, tri_material, rng, init_tri_idx):
+                                  tri_box_key, tri_idx, tri_vert, tri_norm, tri_material, rng, init_tri_idx, wavenumber):
     """
     Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
     params:
@@ -237,6 +237,7 @@ def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxm
     occlusion_only: bool = set to True to return when the ray intersects something without checking any other triangles
     """
     int_rng = np.inf
+    tmp_rng = np.inf
     did_intersect = False
     if not findOctreeBox(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, 0):
         return False, None, None, None, None
@@ -260,19 +261,29 @@ def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxm
                                                make_float3(tri_vert[ti_idx.z, 0],
                                                            tri_vert[ti_idx.z, 1],
                                                            tri_vert[ti_idx.z, 2]), tn, True))
-                    if curr_intersect and t_idx == init_tri_idx:
-                        tmp_rng = length(ro - tinter)
-                        if 1. < tmp_rng < int_rng:
-                            int_rng = tmp_rng + rng
-                            inv_rng = 1 / int_rng
-                            b = tb + 0.
-                            # This is the phong reflection model to get nrho
-                            nrho = ((tri_material[ti, 1] * max(0, dot(ro-tinter, tn) * inv_rng) * rho +
-                                            tri_material[ti, 2] * max(0, 1 - tri_material[ti, 0] *
-                                                                      (1 - dot(b, ro) * inv_rng)) ** 2 * rho) *
-                                    (inv_rng * inv_rng))
-                            inter = tinter + 0.
-                            did_intersect = True
+                    if curr_intersect:
+                        # tmp_rng = length(ro - tinter)
+                        if 1. < length(ro - tinter) < tmp_rng:
+                            tmp_rng = length(ro - tinter)
+                            if ti == init_tri_idx:
+                                int_rng = tmp_rng + rng
+                                inv_rng = 1. / int_rng  # For normalization of the bounce ray
+                                b = tb + 0.
+                                # Some parts of the Fresnel coefficient calculation
+                                cosa = abs(dot(rd, tn))
+                                sina = tri_material[ti, 0] * math.sqrt(1. - (1. / tri_material[ti, 0] * length(cross(rd, tn)))**2)
+                                Rs = abs((cosa - sina) / (cosa + sina))**2  # Reflectance using Fresnel coefficient
+                                roughness = math.exp(-.5 * (2. * wavenumber * tri_material[ti, 1] * cosa)**2)  # Roughness calculations to get specular/scattering split
+                                spec = math.exp(-(1. - cosa)**2 / .0000007442)  # This should drop the specular component to zero by 2 degrees
+                                L = .3 * ((1 + abs(dot(b, rd))) / 2.) + .7
+                                nrho = rho * inv_rng * inv_rng * cosa * Rs * (roughness * spec + (1. - roughness) * L**2)  # Final reflected power
+                                # This is the phong reflection model to get nrho
+                                '''nrho = ((tri_material[ti, 1] * max(0, dot(ro-tinter, tn) * inv_rng) * rho +
+                                                tri_material[ti, 2] * max(0, 1 - tri_material[ti, 0] *
+                                                                          (1 - dot(b, ro) * inv_rng)) ** 2 * rho) *
+                                        (inv_rng * inv_rng))'''
+                                inter = tinter + 0.
+                                did_intersect = True
             else:
                 box <<= 3
                 jump = True
@@ -289,48 +300,46 @@ def traverseOctreeAndReflection(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxm
 
 
 @cuda.jit()
-def calcBounceInit(trans_xyz, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
-                   tri_box_idx, tri_box_key, tri_vert, tri_idx, tri_norm, tri_material, pts_per_tri, pd_r, pd_i, receive_xyz, pan,
-                   tilt, params):
+def calcBounceInit(trans_xyz, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, tri_box_idx, tri_box_key, tri_vert,
+                   tri_idx, tri_norm, tri_material, tri_rand_coords, pts_per_tri, pd_r, pd_i, receive_xyz, pan, tilt, params):
     t, r = cuda.grid(ndim=2)
     tt_stride, tri_stride = cuda.gridsize(2)
-    for tt in prange(t, receive_xyz.shape[0], tt_stride):
-        # Get the transmitter location for this time
-        t_xyz = make_float3(trans_xyz[tt, 0], trans_xyz[tt, 1], trans_xyz[tt, 2])
-        for ti in prange(r, tri_idx.shape[0], tri_stride):
-            # Calculate out coordinates on triangle (using barycentric coordinates)
-            for lam0 in prange(pts_per_tri[ti]):
-                for lam1 in prange(pts_per_tri[ti]):
-                    l0 = (lam0 + 1) / pts_per_tri[ti] * .5
-                    l1 = (lam1 + 1) / pts_per_tri[ti] * .5
-                    l2 = 1. - l0 - l1
-                    tx = l0 * tri_vert[tri_idx[ti, 0], 0] + l1 * tri_vert[tri_idx[ti, 1], 0] + l2 * tri_vert[tri_idx[ti, 2], 0]
-                    ty = l0 * tri_vert[tri_idx[ti, 0], 1] + l1 * tri_vert[tri_idx[ti, 1], 1] + l2 * tri_vert[
-                        tri_idx[ti, 2], 1]
-                    tz = l0 * tri_vert[tri_idx[ti, 0], 2] + l1 * tri_vert[tri_idx[ti, 1], 2] + l2 * tri_vert[
-                        tri_idx[ti, 2], 2]
+    for ti in prange(r, tri_idx.shape[0], tri_stride):
+        for l in prange(pts_per_tri[ti]):
+            l0 = tri_rand_coords[l, 0]
+            l1 = tri_rand_coords[l, 1]
+            l2 = 1. - l0 - l1
+            tx = l0 * tri_vert[tri_idx[ti, 0], 0] + l1 * tri_vert[tri_idx[ti, 1], 0] + l2 * tri_vert[
+                tri_idx[ti, 2], 0]
+            ty = l0 * tri_vert[tri_idx[ti, 0], 1] + l1 * tri_vert[tri_idx[ti, 1], 1] + l2 * tri_vert[
+                tri_idx[ti, 2], 1]
+            tz = l0 * tri_vert[tri_idx[ti, 0], 2] + l1 * tri_vert[tri_idx[ti, 1], 2] + l2 * tri_vert[
+                tri_idx[ti, 2], 2]
+            for tt in prange(t, receive_xyz.shape[0], tt_stride):
+                # Get the transmitter location for this time
+                t_xyz = make_float3(trans_xyz[tt, 0], trans_xyz[tt, 1], trans_xyz[tt, 2])
 
-                    # Get direction and attenuation values
-                    rd = normalize(make_float3(tx, ty, tz) - t_xyz)
-                    rp = (params[5] * applyOneWayRadiationPattern(pan[tt], tilt[tt], math.atan2(rd.x, rd.y), -math.asin(rd.z),
-                                                                  params[3], params[4]))
+                # Get direction and attenuation values
+                rd = normalize(make_float3(tx, ty, tz) - t_xyz)
+                rp = (params[5] * applyOneWayRadiationPattern(pan[tt], tilt[tt], math.atan2(rd.x, rd.y), -math.asin(rd.z),
+                                                              params[3], params[4]))
+                # rp = params[5]
 
-                    did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(t_xyz,
-                                                                                     rd,
-                                                                                     boxminx, boxminy, boxminz, boxmaxx,
-                                                                                     boxmaxy, boxmaxz, rp,
-                                                                                     tri_box_idx, tri_box_key, tri_idx,
-                                                                                     tri_vert, tri_norm, tri_material, 0, ti)
-                    if did_intersect:
-                        acc_real, acc_imag, but = calcReturnAndBin(inter, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1],
-                                                                                      receive_xyz[tt, 2]), rng, params[1],
-                                                                   params[2], pd_r.shape[1], pan[tt], tilt[tt], params[3],
-                                                                   params[4], params[0], nrho)
-                        if but >= 0:
-                            acc_real = acc_real if abs(acc_real) < np.inf else 0.
-                            acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
-                            cuda.atomic.add(pd_r, (tt, but), acc_real)
-                            cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(t_xyz, rd, boxminx, boxminy,
+                                                                                 boxminz, boxmaxx, boxmaxy, boxmaxz,
+                                                                                 rp, tri_box_idx, tri_box_key,
+                                                                                 tri_idx, tri_vert, tri_norm,
+                                                                                 tri_material, 0, ti, params[0])
+                if did_intersect:
+                    acc_real, acc_imag, but = calcReturnAndBin(make_float3(tx, ty, tz), make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1],
+                                                                                  receive_xyz[tt, 2]), rng, params[1],
+                                                               params[2], pd_r.shape[1], pan[tt], tilt[tt], params[3],
+                                                               params[4], params[0], nrho)
+                    if but >= 0:
+                        acc_real = acc_real if abs(acc_real) < np.inf else 0.
+                        acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
+                        cuda.atomic.add(pd_r, (tt, but), acc_real)
+                        cuda.atomic.add(pd_i, (tt, but), acc_imag)
 
 
 @cuda.jit()

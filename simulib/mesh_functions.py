@@ -248,6 +248,13 @@ def getRangeProfileFromMesh(mesh, point_spread: float, tx_pos: list[np.ndarray],
 
     # Calculate the number of points per triangle for point spread coverage
     npts_per_tri_gpu = cuda.to_device(np.floor(1 + np.sqrt(np.ceil(mesh.tri_areas / point_spread))).astype(np.int32))
+    # npts_per_tri_gpu = cuda.to_device(np.ones(mesh.tri_areas.shape[0]).astype(np.int32))
+
+    # Barycentric random coordinates
+    tri_rand_coords = np.random.rand(10, 2)
+    while np.any(np.sum(tri_rand_coords, axis=1) > 1):
+        tri_rand_coords[np.sum(tri_rand_coords, axis=1) > 1] = np.random.rand(sum(np.sum(tri_rand_coords, axis=1) > 1), 2)
+    tri_rand_coords_gpu = cuda.to_device(tri_rand_coords.astype(_float))
 
     # These are the mesh constants that don't change with intersection points
     tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
@@ -286,7 +293,7 @@ def getRangeProfileFromMesh(mesh, point_spread: float, tx_pos: list[np.ndarray],
                 calcBounceInit[blocks_strided, threads_strided, stream](transmit_xyz_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
                                                                  bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
                                                          tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
-                                                         tri_norm_gpu, tri_material_gpu, npts_per_tri_gpu,
+                                                         tri_norm_gpu, tri_material_gpu, tri_rand_coords_gpu, npts_per_tri_gpu,
                                                                         pd_r_gpu, pd_i_gpu,
                                                          receive_xyz_gpu, az_gpu, el_gpu, params_gpu)
                 # We need to copy to host this way so we don't accidentally sync the streams
