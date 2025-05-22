@@ -140,7 +140,7 @@ mkss = rcs / rcs.max() * .5
 # Load in boxes and meshes for speedup of ray tracing
 print('Loading mesh box structure...', end='')
 ptsam = min(points_to_sample, max_pts_per_run)
-mesh = Mesh(ground, num_box_levels=nbox_levels, use_box_pts=False, material_sigmas=msigmas, material_kd=mkds, material_ks=mkss)
+mesh = Mesh(ground, num_box_levels=nbox_levels, use_box_pts=False, material_emissivity=msigmas, material_sigma=mkds, material_ks=mkss)
 print('Done.')
 
 sample_points = mesh.sample(ptsam, view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))

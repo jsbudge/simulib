@@ -82,13 +82,13 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
 def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
-                            debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
+                            debug: bool=False, streams: list[cuda.stream]=None, use_supersampling: bool=True) -> tuple[list, list, list, list] | list:
     # This is here because the single mesh function is more highly optimized for a single mesh and should therefore
     # be used.
     if len(scene.meshes) == 1:
         return getRangeProfileFromMesh(scene.meshes[0], sampled_points, tx_pos, rx_pos, pan, tilt, 
                                        radar_equation_constant, bw_az, bw_el, nsam, fc, near_range_s, fs, num_bounces,
-                                       debug, streams)
+                                       debug, streams, use_supersampling)
     npulses = tx_pos[0].shape[0]
     if isinstance(sampled_points, int):
         sampled_points = tx_pos[0][0] + azelToVec(pan[0].mean() + np.random.normal(0, bw_az, (sampled_points,)),
@@ -116,7 +116,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
     sxmaxz_gpu = cuda.to_device(scene.tree[:, 1, 2].astype(_float))'''
     # boxes_gpu = cuda.to_device(mesh.octree.astype(_float))
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
-                                          radar_equation_constant]).astype(_float))
+                                          radar_equation_constant, use_supersampling]).astype(_float))
 
     pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
     pd_i = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
@@ -160,16 +160,16 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
                         tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
                         tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
                         tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
-                        tri_box_gpu = cuda.to_device(mesh.sorted_idx.astype(np.int32))
-                        tri_box_key_gpu = cuda.to_device(mesh.idx_key.astype(np.int32))
+                        tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
+                        tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
                         # This is for optimization purposes
-                        bxminx_gpu = cuda.to_device(mesh.octree[:, 0, 0].astype(_float))
-                        bxminy_gpu = cuda.to_device(mesh.octree[:, 0, 1].astype(_float))
-                        bxminz_gpu = cuda.to_device(mesh.octree[:, 0, 2].astype(_float))
-                        bxmaxx_gpu = cuda.to_device(mesh.octree[:, 1, 0].astype(_float))
-                        bxmaxy_gpu = cuda.to_device(mesh.octree[:, 1, 1].astype(_float))
-                        bxmaxz_gpu = cuda.to_device(mesh.octree[:, 1, 2].astype(_float))
+                        bxminx_gpu = cuda.to_device(mesh.bvh[:, 0, 0].astype(_float))
+                        bxminy_gpu = cuda.to_device(mesh.bvh[:, 0, 1].astype(_float))
+                        bxminz_gpu = cuda.to_device(mesh.bvh[:, 0, 2].astype(_float))
+                        bxmaxx_gpu = cuda.to_device(mesh.bvh[:, 1, 0].astype(_float))
+                        bxmaxy_gpu = cuda.to_device(mesh.bvh[:, 1, 1].astype(_float))
+                        bxmaxz_gpu = cuda.to_device(mesh.bvh[:, 1, 2].astype(_float))
 
                         calcClosestIntersection[blocks_strided, threads_strided](ray_origin_gpu, ray_intersection_gpu, ray_dir_gpu,
                                                                                 ray_bounce_gpu, ray_distance_gpu, ray_power_gpu, ray_bounce_power_gpu, bxminx_gpu, bxminy_gpu,
@@ -177,7 +177,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
                                                                                 bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
                                                                                 tri_box_key_gpu, tri_verts_gpu,
                                                                                 tri_idxes_gpu,
-                                                                                tri_norm_gpu, tri_material_gpu)
+                                                                                tri_norm_gpu, tri_material_gpu, params_gpu)
                     if debug:
                         debug_rays.append(ray_intersection_gpu.copy_to_host())
                         debug_raydirs.append(ray_bounce_gpu.copy_to_host())
@@ -187,16 +187,16 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
                         tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
                         tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
                         tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
-                        tri_box_gpu = cuda.to_device(mesh.sorted_idx.astype(np.int32))
-                        tri_box_key_gpu = cuda.to_device(mesh.idx_key.astype(np.int32))
+                        tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
+                        tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
                         # This is for optimization purposes
-                        bxminx_gpu = cuda.to_device(mesh.octree[:, 0, 0].astype(_float))
-                        bxminy_gpu = cuda.to_device(mesh.octree[:, 0, 1].astype(_float))
-                        bxminz_gpu = cuda.to_device(mesh.octree[:, 0, 2].astype(_float))
-                        bxmaxx_gpu = cuda.to_device(mesh.octree[:, 1, 0].astype(_float))
-                        bxmaxy_gpu = cuda.to_device(mesh.octree[:, 1, 1].astype(_float))
-                        bxmaxz_gpu = cuda.to_device(mesh.octree[:, 1, 2].astype(_float))
+                        bxminx_gpu = cuda.to_device(mesh.bvh[:, 0, 0].astype(_float))
+                        bxminy_gpu = cuda.to_device(mesh.bvh[:, 0, 1].astype(_float))
+                        bxminz_gpu = cuda.to_device(mesh.bvh[:, 0, 2].astype(_float))
+                        bxmaxx_gpu = cuda.to_device(mesh.bvh[:, 1, 0].astype(_float))
+                        bxmaxy_gpu = cuda.to_device(mesh.bvh[:, 1, 1].astype(_float))
+                        bxmaxz_gpu = cuda.to_device(mesh.bvh[:, 1, 2].astype(_float))
 
                         ray_poss_gpu = cuda.to_device(np.ones((npulses, npoints)).astype(bool))
                         calcSceneOcclusion[blocks_strided, threads_strided](ray_intersection_gpu, ray_poss_gpu, bxminx_gpu, bxminy_gpu,
@@ -233,7 +233,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
 def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
-                            debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
+                            debug: bool=False, streams: list[cuda.stream]=None, use_supersampling: bool = True) -> tuple[list, list, list, list] | list:
     """
     Generate a range profile, given a Mesh object and some other values
 
@@ -258,20 +258,23 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
     tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
     tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
-    tri_box_gpu = cuda.to_device(mesh.sorted_idx.astype(np.int32))
-    tri_box_key_gpu = cuda.to_device(mesh.idx_key.astype(np.int32))
+    tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
+    tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
     #This is for optimization purposes
-    bxminx_gpu = cuda.to_device(mesh.octree[:, 0, 0].astype(_float))
-    bxminy_gpu = cuda.to_device(mesh.octree[:, 0, 1].astype(_float))
-    bxminz_gpu = cuda.to_device(mesh.octree[:, 0, 2].astype(_float))
-    bxmaxx_gpu = cuda.to_device(mesh.octree[:, 1, 0].astype(_float))
-    bxmaxy_gpu = cuda.to_device(mesh.octree[:, 1, 1].astype(_float))
-    bxmaxz_gpu = cuda.to_device(mesh.octree[:, 1, 2].astype(_float))
+    bxminx_gpu = cuda.to_device(mesh.bvh[:, 0, 0].astype(_float))
+    bxminy_gpu = cuda.to_device(mesh.bvh[:, 0, 1].astype(_float))
+    bxminz_gpu = cuda.to_device(mesh.bvh[:, 0, 2].astype(_float))
+    bxmaxx_gpu = cuda.to_device(mesh.bvh[:, 1, 0].astype(_float))
+    bxmaxy_gpu = cuda.to_device(mesh.bvh[:, 1, 1].astype(_float))
+    bxmaxz_gpu = cuda.to_device(mesh.bvh[:, 1, 2].astype(_float))
     # boxes_gpu = cuda.to_device(mesh.octree.astype(_float))
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
-                                          radar_equation_constant]).astype(_float))
-    conical_sampling_gpu = cuda.to_device(np.array([-c0 / (2 * fc), c0 / (2 * fc), 0]).astype(_float))
+                                          radar_equation_constant, use_supersampling]).astype(_float))
+    conical_sampling_gpu = cuda.to_device(np.array([[np.pi / 2, c0 / (2 * fc)],
+                                                    [np.pi, c0 / (2 * fc)],
+                                                    [-np.pi / 2, c0 / (2 * fc)],
+                                                    [-np.pi, c0 / (2 * fc)]]).astype(_float))
     # conical_sampling_gpu = cuda.to_device(np.array([-1., 1., 0]).astype(_float))
 
     pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
@@ -424,7 +427,10 @@ def detectPointsScene(scene,
         ray_intersection_gpu = cuda.to_device((np.zeros((npulses, npoints, 3)) + np.inf).astype(_float))
 
         # Group az and el for faster traversal of octree
-        n_anchors = min(16, npoints)
+        azes = pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))
+        eles = pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints))
+
+        '''n_anchors = min(16, npoints)
         if npoints < n_anchors**2:
             azes = pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))
             eles = np.sort(pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints)))
@@ -435,7 +441,7 @@ def detectPointsScene(scene,
                                    az_anchors.flatten()], axis=1)
             eles = np.concatenate([pointing_el[:, None] + np.random.uniform(a - bw_el / n_anchors, a + bw_el / n_anchors,
                                                                             (npulses, npoints // n_anchors**2)) for a in
-                                   el_anchors.flatten()], axis=1)
+                                   el_anchors.flatten()], axis=1)'''
         rdirs = azelToVec(azes,eles).T.swapaxes(0, 1)
         ray_dir_gpu = cuda.to_device(np.ascontiguousarray(rdirs.astype(_float)))
 
@@ -443,24 +449,24 @@ def detectPointsScene(scene,
             tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
             tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
             tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
-            tri_box_gpu = cuda.to_device(mesh.sorted_idx.astype(np.int32))
-            tri_box_key_gpu = cuda.to_device(mesh.idx_key.astype(np.int32))
+            leaf_list_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
+            leaf_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
             # This is for optimization purposes
-            bxminx_gpu = cuda.to_device(mesh.octree[:, 0, 0].astype(_float))
-            bxminy_gpu = cuda.to_device(mesh.octree[:, 0, 1].astype(_float))
-            bxminz_gpu = cuda.to_device(mesh.octree[:, 0, 2].astype(_float))
-            bxmaxx_gpu = cuda.to_device(mesh.octree[:, 1, 0].astype(_float))
-            bxmaxy_gpu = cuda.to_device(mesh.octree[:, 1, 1].astype(_float))
-            bxmaxz_gpu = cuda.to_device(mesh.octree[:, 1, 2].astype(_float))
+            bxminx_gpu = cuda.to_device(mesh.bvh[:, 0, 0].astype(_float))
+            bxminy_gpu = cuda.to_device(mesh.bvh[:, 0, 1].astype(_float))
+            bxminz_gpu = cuda.to_device(mesh.bvh[:, 0, 2].astype(_float))
+            bxmaxx_gpu = cuda.to_device(mesh.bvh[:, 1, 0].astype(_float))
+            bxmaxy_gpu = cuda.to_device(mesh.bvh[:, 1, 1].astype(_float))
+            bxmaxz_gpu = cuda.to_device(mesh.bvh[:, 1, 2].astype(_float))
 
             calcClosestIntersectionWithoutBounce[blocks_strided, threads_strided](ray_origin_gpu, ray_intersection_gpu,
                                                                      ray_dir_gpu,
                                                                      ray_power_gpu,
                                                                      bxminx_gpu, bxminy_gpu,
                                                                      bxminz_gpu, bxmaxx_gpu,
-                                                                     bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
-                                                                     tri_box_key_gpu, tri_verts_gpu,
+                                                                     bxmaxy_gpu, bxmaxz_gpu, leaf_list_gpu,
+                                                                     leaf_key_gpu, tri_verts_gpu,
                                                                      tri_idxes_gpu,
                                                                      tri_norm_gpu)
 
@@ -475,7 +481,8 @@ def detectPointsScene(scene,
 
     points = points[:npoints, :]
 
-    return points
+
+    return points[np.argsort(np.linalg.norm(points - scene.center, axis=1))]
 
 
 def getIntersection(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray, tri_idxes: np.ndarray,
@@ -625,6 +632,7 @@ def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray 
 
 
 def genBVH(bounding_box: np.ndarray, num_levels: int = 10, points: np.ndarray = None, min_tri_per_box: int = 64):
+    # Create a Bounding Volume Hierarchy
     bvh = np.zeros((2**num_levels + 1, 2, 3))
     ntris = np.zeros(bvh.shape[0])
     centroids = points.mean(axis=1)
@@ -668,6 +676,7 @@ def genBVH(bounding_box: np.ndarray, num_levels: int = 10, points: np.ndarray = 
                     bvh[node, :, n] = [max(bvh[node, 0, n], np.min(tri_inside_box[:, :, n])), min(bvh[node, 1, n], np.max(tri_inside_box[:, :, n]))]
 
 
+    # Get leaves so the function knows which tris to skip
     leaves = []
     for box in range(bvh.shape[0] // 2 + 1, bvh.shape[0], 1):
         pts_include = np.ones((points.shape[0], 3))
@@ -678,6 +687,7 @@ def genBVH(bounding_box: np.ndarray, num_levels: int = 10, points: np.ndarray = 
 
     ntri_per_leaf = np.array([len(l) for l in leaves])
     leaf_key = np.array([ntri_per_leaf, np.concatenate(([0], np.cumsum(ntri_per_leaf[:-1])))]).T
+    leaf_key = np.concatenate((np.zeros((bvh.shape[0] // 2 + 1, 2)), leaf_key), axis=0)
     leaf_list = np.concatenate(leaves)
 
     return bvh, leaf_key, leaf_list

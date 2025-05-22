@@ -2,13 +2,13 @@ from functools import cached_property, singledispatch
 
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints, genOctree, detectPointsScene
+from .mesh_functions import detectPoints, genOctree, detectPointsScene, genBVH
 
 
 class Mesh(object):
 
-    def __init__(self, a_mesh: o3d.geometry.TriangleMesh, num_box_levels: int=4, material_sigmas: list=None,
-                 material_kd: list=None, material_ks: list = None, use_box_pts: bool = True, octree_perspective: np.ndarray = None):
+    def __init__(self, a_mesh: o3d.geometry.TriangleMesh, num_box_levels: int=4, material_emissivity: list=None,
+                 material_sigma: list=None, use_box_pts: bool = True, octree_perspective: np.ndarray = None):
         # Generate bounding box tree
         mesh_tri_idx = np.asarray(a_mesh.triangles)
         mesh_vertices = np.asarray(a_mesh.vertices)
@@ -16,36 +16,27 @@ class Mesh(object):
         mesh_tri_vertices = mesh_vertices[mesh_tri_idx]
 
         # Material triangle stuff
-        try:
-            if material_sigmas is None:
-                mesh_tri_colors = np.asarray(a_mesh.vertex_colors)[mesh_tri_idx].mean(axis=1)
-                mesh_sigmas = np.linalg.norm(mesh_tri_colors - np.array([.4501, .6340, .3228]), axis=1)
-                mesh_sigmas = mesh_sigmas.max() / mesh_sigmas
-            else:
-                mesh_sigmas = np.array([material_sigmas[i] for i in np.asarray(a_mesh.triangle_material_ids)])
-        except Exception:
+        if material_emissivity is None:
             print('Could not extrapolate sigmas, setting everything to one.')
-            mesh_sigmas = np.ones(len(a_mesh.triangles))
-
-        if material_kd is None:
-            mesh_kd = np.ones(len(a_mesh.triangles))
+            mesh_sigmas = np.ones(len(a_mesh.triangles)) * 1e6
         else:
-            mesh_kd = np.array([material_kd[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+            mesh_sigmas = np.array([material_emissivity[i] for i in np.asarray(a_mesh.triangle_material_ids)])
 
-        if material_ks is None:
-            mesh_ks = np.ones(len(a_mesh.triangles))
+        if material_sigma is None:
+            mesh_kd = np.ones(len(a_mesh.triangles)) * .0017
         else:
-            mesh_ks = np.array([material_ks[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+            mesh_kd = np.array([material_sigma[i] for i in np.asarray(a_mesh.triangle_material_ids)])
 
         tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
-                                       mesh_kd.reshape((-1, 1)), mesh_ks.reshape((-1, 1))], axis=1)
+                                       mesh_kd.reshape((-1, 1))], axis=1)
 
         # Generate octree and associate triangles with boxes
         aabb = a_mesh.get_axis_aligned_bounding_box()
         max_bound = aabb.get_max_bound()
         min_bound = aabb.get_min_bound()
         root_box = np.array([min_bound, max_bound])
-        boxes, mesh_box_idx = genOctree(root_box, num_box_levels, mesh_tri_vertices, octree_perspective, use_box_pts=use_box_pts)
+        # bvh, leaf_key, leaf_list = genBVH(root_box, num_box_levels, mesh_tri_vertices)
+        bvh, mesh_box_idx = genOctree(root_box, num_box_levels, mesh_tri_vertices, octree_perspective, use_box_pts=use_box_pts)
 
         meshx, meshy = np.where(mesh_box_idx)
         alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
@@ -53,7 +44,7 @@ class Mesh(object):
         sorted_tri_idx = sorted_tri_idx[sorted_tri_idx[:, 0] >= sum(8 ** n for n in range(num_box_levels - 1))]
         box_num, start_idxes = np.unique(sorted_tri_idx[:, 0], return_index=True)
         mesh_extent = np.diff(start_idxes, append=[sorted_tri_idx.shape[0]])
-        mesh_idx_key = np.zeros((boxes.shape[0], 2)).astype(int)
+        mesh_idx_key = np.zeros((bvh.shape[0], 2)).astype(int)
         mesh_idx_key[box_num, 0] = start_idxes
         mesh_idx_key[box_num, 1] = mesh_extent
 
@@ -63,12 +54,12 @@ class Mesh(object):
         self.vertices = mesh_vertices
         self.normals = mesh_normals
         self.materials = tri_material
-        self.octree = boxes
-        self.sorted_idx = sorted_tri_idx[:, 1]
-        self.idx_key = mesh_idx_key
+        self.bvh = bvh
+        self.leaf_list = sorted_tri_idx[:, 1]
+        self.leaf_key = mesh_idx_key
         self.center = a_mesh.get_center()
         self.ntri = mesh_tri_idx.shape[0]
-        self.octree_levels = num_box_levels
+        self.bvh_levels = num_box_levels
 
     def sample(self, sample_points: int, view_pos: np.ndarray, bw_az: float = None, bw_el: float = None):
         # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
@@ -81,7 +72,7 @@ class Mesh(object):
             view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
             bw_az = abs(pointing_az[:, None] - view_az).max()
             bw_el = abs(pointing_el[:, None] - view_el).max()
-        return detectPoints(self.octree, self.sorted_idx, self.idx_key, self.tri_idx, self.vertices, self.normals,
+        return detectPoints(self.bvh, self.leaf_list, self.leaf_key, self.tri_idx, self.vertices, self.normals,
                             self.materials, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
 
 
@@ -94,20 +85,20 @@ class Scene(object):
         if meshes is not None:
             self.tree = np.zeros((len(meshes), 2, 3))
             for idx, m in enumerate(meshes):
-                self.tree[idx] = m.octree[0]
+                self.tree[idx] = m.bvh[0]
         
 
     @singledispatch
     def add(self, a):
-        self.tree = np.concatenate((self.tree, np.expand_dims(a.octree[0], 0)), axis=0) if len(
-            self.tree) != 0 else np.expand_dims(a.octree[0], 0)
+        self.tree = np.concatenate((self.tree, np.expand_dims(a.bvh[0], 0)), axis=0) if len(
+            self.tree) != 0 else np.expand_dims(a.bvh[0], 0)
         self.meshes += [a]
 
     @add.register
     def _(self, a: list):
         ntree = np.zeros((len(a), 2, 3))
         for idx, m in enumerate(a):
-            ntree[idx] = m.octree[0]
+            ntree[idx] = m.bvh[0]
         self.tree = np.concatenate((self.tree, ntree), axis=0) if len(self.tree) != 0 else ntree
         self.meshes += a
         
@@ -132,5 +123,9 @@ class Scene(object):
 
     @cached_property
     def bounding_box(self):
-        return np.array([[np.min(np.array([m.octree[0, 0, :] for m in self.meshes]), axis=0)],
-                 [np.max(np.array([m.octree[0, 1, :] for m in self.meshes]), axis=0)]]).squeeze(1)
+        return np.array([[np.min(np.array([m.bvh[0, 0, :] for m in self.meshes]), axis=0)],
+                         [np.max(np.array([m.bvh[0, 1, :] for m in self.meshes]), axis=0)]]).squeeze(1)
+
+    @property
+    def center(self):
+        return np.mean([np.array(s.center) for s in self.meshes], axis=0)

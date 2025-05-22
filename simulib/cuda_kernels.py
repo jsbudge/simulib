@@ -14,8 +14,9 @@ DTR = np.pi / 180
 
 @cuda.jit(device=True)
 def diff(x, y):
-    a = y - x
-    return (a + np.pi) - math.floor((a + np.pi) / (2 * np.pi)) * 2 * np.pi - np.pi
+    return x - y
+    # a = y - x
+    # return (a + np.pi) - math.floor((a + np.pi) / (2 * np.pi)) * 2 * np.pi - np.pi
 
 
 def cpudiff(x, y):

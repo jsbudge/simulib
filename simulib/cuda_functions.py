@@ -312,6 +312,14 @@ def normalize(v):
 def length(v):
     return math.sqrt(dot(v, v))
 
+@cuda.jit(device=True, fastmath=True)
+def rotate(u, v, theta):
+    return make_float3(
+        (math.cos(theta) + u.x * u.x * (1. - math.cos(theta))) * v.x + v.y * (u.x * u.y * (1. - math.cos(theta)) - u.z * math.sin(theta)) + v.z * (u.x * u.z * (1 - math.cos(theta)) + u.y * math.sin(theta)),
+        v.x * (u.y * u.x * (1. - math.cos(theta)) + u.z * math.sin(theta)) + v.y * (math.cos(theta) + u.y * u.y * (1. - math.cos(theta))) + v.z * (u.y * u.z * (1. - math.cos(theta)) - u.x * math.sin(theta)),
+        v.x * (u.z * u.x * (1. - math.cos(theta)) - u.y * math.sin(theta)) + v.y * (u.z * u.y * (1. - math.cos(theta)) + u.x * math.sin(theta)) + v.z * (math.cos(theta) + u.z * u.z * (1. - math.cos(theta)))
+    )
+
 
 def cross(a, b):
     pass
