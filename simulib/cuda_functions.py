@@ -5,7 +5,7 @@ from enum import Enum
 import numpy as np  # Packing of structures in C-compatible format
 from numba import cuda, float32, int32, types, uint8, uint32
 from numba.core.extending import overload
-from numba.cuda import get_current_device
+# from numba.cuda import get_current_device
 from numba.cuda.compiler import compile_cuda as numba_compile_cuda
 from numba.cuda.libdevice import fast_powf, float_as_int, int_as_float
 

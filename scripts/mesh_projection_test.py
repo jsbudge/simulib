@@ -1,5 +1,7 @@
 import torch
 import trimesh
+import os
+# os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 from numba import cuda
 import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
@@ -48,7 +50,7 @@ if __name__ == '__main__':
     num_bounces = 1
     nbox_levels = 5
     nstreams = 1
-    points_to_sample = 2**19
+    points_to_sample = 2**16
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -140,7 +142,7 @@ if __name__ == '__main__':
     building = building.compute_triangle_normals()
     scene.add(Mesh(building, num_box_levels=3))'''
     
-    gpx, gpy, gpz = bg.getGrid(grid_origin, 1500, 1500, nrows=256, ncols=256)
+    '''gpx, gpy, gpz = bg.getGrid(grid_origin, 1500, 1500, nrows=256, ncols=256)
     # Shift position
     gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
     gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, rp.origin)
@@ -160,7 +162,7 @@ if __name__ == '__main__':
     ground.compute_triangle_normals()
     ground.normalize_normals()
     ground.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(ground.triangles)).astype(np.int32))
-    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], num_box_levels=4))
+    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], num_box_levels=4))'''
 
     print('Done.')
 

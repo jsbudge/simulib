@@ -2,7 +2,7 @@ from functools import cached_property, singledispatch
 
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints, genOctree, detectPointsScene, genBVH
+from .mesh_functions import detectPoints, detectPointsScene, genBVH, assocPointsWithOctree
 
 
 class Mesh(object):
@@ -36,7 +36,7 @@ class Mesh(object):
         min_bound = aabb.get_min_bound()
         root_box = np.array([min_bound, max_bound])
         # bvh, leaf_key, leaf_list = genBVH(root_box, num_box_levels, mesh_tri_vertices)
-        bvh, mesh_box_idx = genOctree(root_box, num_box_levels, mesh_tri_vertices, octree_perspective, use_box_pts=use_box_pts)
+        bvh, mesh_box_idx = assocPointsWithOctree(Octree(num_box_levels, root_box), mesh_tri_vertices)
 
         meshx, meshy = np.where(mesh_box_idx)
         alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
@@ -129,3 +129,47 @@ class Scene(object):
     @property
     def center(self):
         return np.mean([np.array(s.center) for s in self.meshes], axis=0)
+
+
+class Octree(object):
+
+    def __init__(self, depth, bounding_box):
+        self.depth = depth
+        self.octree = np.zeros((sum(8 ** n for n in range(depth)), 2, 3))
+        self.octree[0, ...] = bounding_box
+        self.mask = np.zeros(sum(8 ** n for n in range(depth - 1))).astype(np.uint8)
+        self.pos = np.zeros((self.octree.shape[0], 3)).astype(np.uint32)
+        self.extent = np.diff(bounding_box, axis=0)[0]
+        self.center = np.mean(bounding_box, axis=0)
+        self.lower = bounding_box[0]
+
+        half_extent = self.extent / 2
+        self.pos[0] = [0, 0, 0]
+        for bidx in range(8):
+            low_ext = np.array([(bidx >> 2) & 1, (bidx >> 1 & 1), (bidx >> 0 & 1)])
+            self.octree[1 + bidx] = self.octree[0, 0] + half_extent * np.array([low_ext, low_ext + 1])
+            self.pos[1 + bidx] = low_ext
+        print('Building octree level ', end='')
+        for level in range(1, depth):
+            print(f'{level}...', end='')
+            level_idx = sum(8 ** l for l in range(level))
+            next_level_idx = sum(8 ** l for l in range(level + 1))
+            if level < depth - 1:
+                half_extent = self.extent / (2 * 2 ** level)
+                for idx in range(level_idx, next_level_idx):
+                    for bidx in range(8):
+                        low_ext = np.array([(bidx >> 2) & 1, (bidx >> 1 & 1), (bidx >> 0 & 1)])
+                        self.octree[next_level_idx + (idx - level_idx) * 8 + bidx] = self.octree[
+                                                                                    idx, 0] + half_extent * np.array(
+                            [low_ext, low_ext + 1])
+                        self.pos[next_level_idx + (idx - level_idx) * 8 + bidx] = self.pos[idx] * 2 + low_ext
+
+    def __sizeof__(self):
+        return self.octree.shape
+
+    @property
+    def shape(self):
+        return self.octree.shape
+
+    def __getitem__(self, item):
+        return self.octree[item]
