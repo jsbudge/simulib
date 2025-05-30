@@ -48,9 +48,9 @@ if __name__ == '__main__':
     fdelay = 10.
     upsample = 8
     num_bounces = 1
-    nbox_levels = 5
+    max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**16
+    points_to_sample = 2**17
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -93,7 +93,7 @@ if __name__ == '__main__':
     mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(Mesh(mesh, num_box_levels=nbox_levels, material_sigma=[.017 for n in mesh.triangle_material_ids]))
+    scene.add(Mesh(mesh, max_tris_per_split=max_tris_per_split, material_sigma=[.017 for n in mesh.triangle_material_ids]))
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -328,7 +328,7 @@ if __name__ == '__main__':
     fig = getSceneFig(scene)
 
     for mesh in scene.meshes:
-        for b in mesh.bvh[sum(8 ** n for n in range(mesh.bvh_levels - 1)):]:
+        for b in mesh.bvh[sum(2 ** n for n in range(mesh.bvh_levels - 1)):]:
             if np.sum(b) != 0:
                 fig.add_trace(drawOctreeBox(b))
     fig.show()

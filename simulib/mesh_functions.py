@@ -4,7 +4,7 @@ from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
     assignBoxPoints, calcClosestIntersection, calcReturnPower, \
     calcClosestIntersectionWithoutBounce, calcSceneOcclusion
-from .simulation_functions import azelToVec
+from .simulation_functions import azelToVec, factors
 import numpy as np
 import open3d as o3d
 from .cuda_kernels import optimizeStridedThreadBlocks2d
@@ -262,10 +262,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
     #This is for optimization purposes
-    oct_mask_gpu = cuda.to_device(mesh.bvh.mask)
-    oct_pos_gpu = cuda.to_device(mesh.bvh.pos.astype(_float))
-    oct_extent_gpu = cuda.to_device(mesh.bvh.extent.astype(_float))
-    oct_lower_gpu = cuda.to_device(mesh.bvh.lower.astype(_float))
+    kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
                                           radar_equation_constant, use_supersampling]).astype(_float))
     conical_sampling_gpu = cuda.to_device(np.array([[np.pi / 2, c0 / (2 * fc)],
@@ -296,7 +293,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
                                                            params_gpu, ray_dir_gpu, ray_origin_gpu, ray_power_gpu)
                 # Since we know the first ray can see the receiver, this is a special call to speed things up
                 calcBounceInit[blocks_strided, threads_strided, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
-                                                         ray_power_gpu, oct_mask_gpu, oct_pos_gpu, oct_extent_gpu, oct_lower_gpu, tri_box_gpu,
+                                                         ray_power_gpu, kd_tree_gpu, tri_box_gpu,
                                                          tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
                                                          tri_norm_gpu, tri_material_gpu, pd_r_gpu, pd_i_gpu,
                                                          receive_xyz_gpu,
@@ -327,10 +324,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     del tri_idxes_gpu
     del tri_verts_gpu
     del tri_box_gpu
-    del oct_mask_gpu
-    del oct_pos_gpu
-    del oct_extent_gpu
-    del oct_lower_gpu
+    del kd_tree_gpu
     del tri_norm_gpu
     del params_gpu
     del sample_points_gpu
@@ -420,11 +414,7 @@ def detectPointsScene(scene,
         ray_power_gpu = cuda.to_device(np.zeros((npulses, npoints)))
         ray_intersection_gpu = cuda.to_device((np.zeros((npulses, npoints, 3)) + np.inf).astype(_float))
 
-        # Group az and el for faster traversal of octree
-        azes = pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))
-        eles = pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints))
-
-        '''n_anchors = min(16, npoints)
+        n_anchors = min(32, npoints)
         if npoints < n_anchors**2:
             azes = pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))
             eles = np.sort(pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints)))
@@ -435,7 +425,7 @@ def detectPointsScene(scene,
                                    az_anchors.flatten()], axis=1)
             eles = np.concatenate([pointing_el[:, None] + np.random.uniform(a - bw_el / n_anchors, a + bw_el / n_anchors,
                                                                             (npulses, npoints // n_anchors**2)) for a in
-                                   el_anchors.flatten()], axis=1)'''
+                                   el_anchors.flatten()], axis=1)
         rdirs = azelToVec(azes,eles).T.swapaxes(0, 1)
         ray_dir_gpu = cuda.to_device(np.ascontiguousarray(rdirs.astype(_float)))
 
@@ -447,15 +437,11 @@ def detectPointsScene(scene,
             leaf_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
             # This is for optimization purposes
-            oct_mask_gpu = cuda.to_device(mesh.bvh.mask)
-            oct_pos_gpu = cuda.to_device(mesh.bvh.pos.astype(_float))
-            oct_extent_gpu = cuda.to_device(mesh.bvh.extent.astype(_float))
-            oct_lower_gpu = cuda.to_device(mesh.bvh.lower.astype(_float))
+            kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
 
             calcClosestIntersectionWithoutBounce[blocks_strided, threads_strided](ray_origin_gpu, ray_intersection_gpu,
                                                                      ray_dir_gpu,
-                                                                     ray_power_gpu,
-                                                                     oct_mask_gpu, oct_pos_gpu, oct_extent_gpu, oct_lower_gpu, leaf_list_gpu,
+                                                                     ray_power_gpu, kd_tree_gpu, leaf_list_gpu,
                                                                      leaf_key_gpu, tri_verts_gpu,
                                                                      tri_idxes_gpu,
                                                                      tri_norm_gpu)
@@ -470,9 +456,7 @@ def detectPointsScene(scene,
         )
 
     points = points[:npoints, :]
-
-
-    return points[np.argsort(np.linalg.norm(points - scene.center, axis=1))]
+    return points# [np.argsort(np.linalg.norm(points - scene.center, axis=1))]
 
 
 def getIntersection(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray, tri_idxes: np.ndarray,
@@ -562,8 +546,44 @@ def assocPointsWithOctree(octree: object, points: np.array):
         box_idxes = ptidx_gpu.copy_to_host()
         full_boxes = np.any(box_idxes, axis=0)
         octree.mask[prev_level_idx:level_idx] = np.packbits(full_boxes)
+        octree.is_occupied[level_idx:next_level_idx] = full_boxes
         tri_box_idxes[:, level_idx:next_level_idx] = box_idxes
     return octree, tri_box_idxes
+
+
+def assocPointsWithKDTree(tree_bounds: np.array, points: np.array):
+    tri_box_idxes = np.zeros((points.shape[0], tree_bounds.shape[0]))
+
+
+    # GPU device optimization for memory access
+    ptx0_gpu = cuda.to_device(points[:, 0, 0].astype(_float))
+    ptx1_gpu = cuda.to_device(points[:, 1, 0].astype(_float))
+    ptx2_gpu = cuda.to_device(points[:, 2, 0].astype(_float))
+    pty0_gpu = cuda.to_device(points[:, 0, 1].astype(_float))
+    pty1_gpu = cuda.to_device(points[:, 1, 1].astype(_float))
+    pty2_gpu = cuda.to_device(points[:, 2, 1].astype(_float))
+    ptz0_gpu = cuda.to_device(points[:, 0, 2].astype(_float))
+    ptz1_gpu = cuda.to_device(points[:, 1, 2].astype(_float))
+    ptz2_gpu = cuda.to_device(points[:, 2, 2].astype(_float))
+    for level in range(int(np.log2(tree_bounds.shape[0] + 1))):
+        # prev_level_idx = sum(2 ** l for l in range(level - 1))
+        level_idx = sum(2 ** l for l in range(level))
+        next_level_idx = sum(2 ** l for l in range(level + 1))
+        threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((points.shape[0], next_level_idx - level_idx))
+        centered_octree = tree_bounds[level_idx:next_level_idx].mean(axis=1)
+        extent_octree = (np.diff(tree_bounds[level_idx:next_level_idx], axis=1) * .5)[:, 0]
+        centered_octree_gpu = cuda.to_device(centered_octree.astype(_float))
+        extent_octree_gpu = cuda.to_device(extent_octree.astype(_float))
+        ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], centered_octree_gpu.shape[0])).astype(bool))
+        assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
+                                                         ptz0_gpu, ptz1_gpu, ptz2_gpu, centered_octree_gpu,
+                                                         extent_octree_gpu, ptidx_gpu)
+        box_idxes = ptidx_gpu.copy_to_host()
+        # full_boxes = np.any(box_idxes, axis=0)
+        # octree.mask[prev_level_idx:level_idx] = np.packbits(full_boxes)
+        # octree.is_occupied[level_idx:next_level_idx] = full_boxes
+        tri_box_idxes[:, level_idx:next_level_idx] = box_idxes
+    return tri_box_idxes
 
 
 
@@ -655,66 +675,36 @@ def assocPointsWithOctree(octree: object, points: np.array):
     return octree, tri_box_idxes'''
 
 
-def genBVH(bounding_box: np.ndarray, num_levels: int = 10, points: np.ndarray = None, min_tri_per_box: int = 64):
-    # Create a Bounding Volume Hierarchy
-    bvh = np.zeros((2**num_levels + 1, 2, 3))
-    ntris = np.zeros(bvh.shape[0])
-    centroids = points.mean(axis=1)
-    # Root node
-    bvh[0] = bounding_box
-    for idx in range(bvh.shape[0] // 2):
-        left_node = idx * 2 + 1
-        right_node = idx * 2 + 2
-        # Find the major separating axis
-        ma = np.argmax(abs(bvh[idx, 0] - bvh[idx, 1]))
+def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_box: int = 64):
+    verts = points.mean(axis=1)
+    depth = int(np.ceil(np.log2(verts.shape[0] / min_tri_per_box)))
+    vidx = np.zeros((verts.shape[0])).astype(int)
+    tree = np.zeros((2 ** depth - 1, 3))
+    tree_bounds = np.zeros((2 ** depth - 1, 2, 3))
+    tree[0] = [np.median(verts[:, 0]), bounding_box[:, 1].mean(), bounding_box[:, 2].mean()]
+    tree_bounds[0] = bounding_box
 
-        # Get split to even number of triangles per split
-        pts_include = np.ones((points.shape[0]))
-        for n in range(3):
-            pts_include = np.logical_and(pts_include, np.logical_and(bvh[idx, 0, n] <= centroids[:, n],
-                                                                     centroids[:, n] <= bvh[idx, 1, n]))
-        if sum(pts_include) == 0:
-            continue
-
-        center = centroids[pts_include].mean(axis=0)
-        '''elif min_tri_per_box * 2 - 15 <= sum(pts_include) <= min_tri_per_box * 2 + 15:
-            center = np.median(centroids[pts_include], axis=0)
-        else:
-            center = centroids[pts_include].mean(axis=0)'''
-        bvh[left_node] = bvh[idx]
-        bvh[left_node, :, ma] = [bvh[idx, 0, ma], center[ma]]
-        bvh[right_node] = bvh[idx]
-        bvh[right_node, :, ma] = [center[ma], bvh[idx, 1, ma]]
-
-        # Shrink each node to fit points
-        for node in [left_node, right_node]:
-            pts_include = np.ones((points.shape[0]))
-            for n in range(3):
-                pts_include = np.logical_and(pts_include, np.logical_and(bvh[node, 0, n] <= centroids[:, n], centroids[:, n] <= bvh[node, 1, n]))
-            tri_inside_box = points[pts_include]
-            ntris[node] = tri_inside_box.shape[0]
-            if tri_inside_box.shape[0] == 0:
-                bvh[node] = np.zeros((2, 3))
-            else:
-                for n in range(3):
-                    bvh[node, :, n] = [max(bvh[node, 0, n], np.min(tri_inside_box[:, :, n])), min(bvh[node, 1, n], np.max(tri_inside_box[:, :, n]))]
-
-
-    # Get leaves so the function knows which tris to skip
-    leaves = []
-    for box in range(bvh.shape[0] // 2 + 1, bvh.shape[0], 1):
-        pts_include = np.ones((points.shape[0], 3))
-        for n in range(3):
-            pts_include = np.logical_and(pts_include, np.logical_and(bvh[box, 0, n] <= points[:, :, n],
-                                                                     points[:, :, n] <= bvh[box, 1, n]))
-        leaves.append(np.where(np.any(pts_include, axis=1))[0])
-
-    ntri_per_leaf = np.array([len(l) for l in leaves])
-    leaf_key = np.array([ntri_per_leaf, np.concatenate(([0], np.cumsum(ntri_per_leaf[:-1])))]).T
-    leaf_key = np.concatenate((np.zeros((bvh.shape[0] // 2 + 1, 2)), leaf_key), axis=0)
-    leaf_list = np.concatenate(leaves)
-
-    return bvh, leaf_key, leaf_list
+    # Split based on depth mod 3
+    for d in range(1, depth):
+        axis = (d - 1) % 3
+        for idx in range(sum(2 ** np.arange(d)), sum(2 ** np.arange(d + 1)), 2):
+            parent_idx = idx >> 1
+            v_act = verts[vidx == parent_idx]
+            lefties = tree[parent_idx, axis] < v_act[:, axis]
+            righties = tree[parent_idx, axis] >= v_act[:, axis]
+            if np.sum(lefties) != 0:
+                left = np.median(v_act[lefties], axis=0)
+                vidx[np.logical_and(tree[parent_idx, axis] < verts[:, axis], vidx == parent_idx)] = idx
+                tree[idx] = left
+            if np.sum(righties) != 0:
+                right = np.median(v_act[righties], axis=0)
+                vidx[np.logical_and(tree[parent_idx, axis] >= verts[:, axis], vidx == parent_idx)] = idx + 1
+                tree[idx + 1] = right
+            tree_bounds[idx] = tree_bounds[parent_idx]
+            tree_bounds[idx, 0, axis] = tree[parent_idx, axis]
+            tree_bounds[idx + 1] = tree_bounds[parent_idx]
+            tree_bounds[idx + 1, 1, axis] = tree[parent_idx, axis]
+    return tree, tree_bounds
 
 
 def getMeshFig(mesh, triangle_colors=None, title='Title Goes Here', zrange=100):
@@ -792,3 +782,43 @@ def drawOctreeBox(box):
         )
     vertices = np.array(vertices)
     return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
+
+
+def msplit(a: np.uint32):
+    x = a & 0x1fffff # we only look at the first 21 bits
+    x = (x | x << 32) & 0x1f00000000ffff # shift left 32 bits, OR with self, and 00011111000000000000000000000000000000001111111111111111
+    x = (x | x << 16) & 0x1f0000ff0000ff # shift left 32 bits, OR with self, and 00011111000000000000000011111111000000000000000011111111
+    x = (x | x << 8) & 0x100f00f00f00f00f # shift left 32 bits, OR with self, and 0001000000001111000000001111000000001111000000001111000000000000
+    x = (x | x << 4) & 0x10c30c30c30c30c3 # shift left 32 bits, OR with self, and 0001000011000011000011000011000011000011000011000011000100000000
+    x = (x | x << 2) & 0x1249249249249249
+    return x
+
+
+def morton_encode(x: np.uint32, y: np.uint32, z: np.uint32):
+    answer = 0
+    answer |= msplit(x) | msplit(y) << 1 | msplit(z) << 2
+    return answer
+
+
+def c1b2(x: np.uint32):
+    x &= 0x09249249                # x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
+    x = (x ^ (x >>  2)) & 0x030c30c3 # x = ---- --98 ---- 76-- --54 ---- 32-- --10
+    x = (x ^ (x >>  4)) & 0x0300f00f # x = ---- --98 ---- ---- 7654 ---- ---- 3210
+    x = (x ^ (x >>  8)) & 0xff0000ff # x = ---- --98 ---- ---- ---- ---- 7654 3210
+    x = (x ^ (x >> 16)) & 0x000003ff # x = ---- ---- ---- ---- ---- --98 7654 3210
+    return x
+
+def morton_decode(code: np.uint32):
+    return c1b2(code >> 0), c1b2(code >> 1), c1b2(code >> 2)
+
+
+def DecodeMorton3X(code: np.uint32):
+    return c1b2(code >> 0)
+
+
+def DecodeMorton3Y(code: np.uint32):
+    return c1b2(code >> 1)
+
+
+def DecodeMorton3Z(code: np.uint32):
+    return c1b2(code >> 2)
