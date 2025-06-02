@@ -676,8 +676,8 @@ def assocPointsWithKDTree(tree_bounds: np.array, points: np.array):
 
 
 def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_box: int = 64):
-    verts = points.mean(axis=1)
-    depth = int(np.ceil(np.log2(verts.shape[0] / min_tri_per_box)))
+    verts = points.reshape((-1, 3))  # points.mean(axis=1)
+    depth = int(np.ceil(np.log2(verts.shape[0] / (3 * min_tri_per_box))))
     vidx = np.zeros((verts.shape[0])).astype(int)
     tree = np.zeros((2 ** depth - 1, 3))
     tree_bounds = np.zeros((2 ** depth - 1, 2, 3))
