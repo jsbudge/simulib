@@ -9,6 +9,7 @@ import numpy as np
 import open3d as o3d
 from .cuda_kernels import optimizeStridedThreadBlocks2d
 import plotly.graph_objects as go
+from tqdm import tqdm
 
 c0 = 299792458.0
 _float = np.float32
@@ -305,8 +306,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
                 if num_bounces > 1:
                     for _ in range(1, num_bounces):
                         calcBounceLoop[blocks_strided, threads_strided, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
-                                                                         ray_power_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
-                                                                 bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
+                                                                         ray_power_gpu, kd_tree_gpu, tri_box_gpu,
                                                                          tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
                                                                          tri_norm_gpu, tri_material_gpu, pd_r_gpu, pd_i_gpu,
                                                                          receive_xyz_gpu, az_gpu, el_gpu, params_gpu)
@@ -551,160 +551,101 @@ def assocPointsWithOctree(octree: object, points: np.array):
     return octree, tri_box_idxes
 
 
-def assocPointsWithKDTree(tree_bounds: np.array, points: np.array):
-    tri_box_idxes = np.zeros((points.shape[0], tree_bounds.shape[0]))
+def surfaceAreaHeuristic(points: np.ndarray, bounding_box: np.ndarray, ax: int):
+    # medes = np.median(points.reshape((-1, 3)), axis=0)
+    ax_poss_splits = np.linspace(bounding_box[0, ax], bounding_box[1, ax], int((bounding_box[1, ax] - bounding_box[0, ax]) / .5) + 2)[1:-1]
+    tri_area = .5 * np.linalg.norm(np.cross(points[:, 1, :] - points[:, 0, :], points[:, 2, :] - points[:, 0, :]),
+                                   axis=1)
+    centroids = np.mean(points, axis=1)
+    tri_bounds = np.stack((points.min(axis=1), points.max(axis=1)), axis=1)
+    sp = np.median(points.reshape((-1, 3)), axis=0)[ax]
+
+    lefties = sp < centroids[:, ax]
+    righties = sp >= centroids[:, ax]
+    if sum(lefties) == 0:
+        left_split = np.zeros(3) + 1e-9
+    else:
+        left_split = tri_bounds[lefties].max(axis=(0, 1)) - tri_bounds[lefties].min(axis=(0, 1))
+    if sum(righties) == 0:
+        right_split = np.zeros(3) + 1e-9
+    else:
+        right_split = tri_bounds[righties].max(axis=(0, 1)) - tri_bounds[righties].min(axis=(0, 1))
+    best_score = (sum(tri_area[lefties]) / (sum([a * b for a, b in itertools.combinations(left_split, 2)])) +
+             sum(tri_area[righties]) / (sum([a * b for a, b in itertools.combinations(right_split, 2)])))
+    best_bounds = [np.stack((tri_bounds[lefties].min(axis=(0, 1)), tri_bounds[lefties].max(axis=(0, 1))), axis=0) if sum(lefties) > 0 else np.zeros((2, 3)),
+                           np.stack((tri_bounds[righties].min(axis=(0, 1)), tri_bounds[righties].max(axis=(0, 1))), axis=0) if sum(righties) > 0 else np.zeros((2, 3))]
+    best_split = sp
+    split_scores = np.zeros_like(ax_poss_splits)
+    for idx, sp in enumerate(ax_poss_splits):
+        lefties = sp < centroids[:, ax]
+        righties = sp >= centroids[:, ax]
+        if sum(lefties) == 0:
+            left_split = np.zeros(3) + 1e-9
+        else:
+            left_split = tri_bounds[lefties].max(axis=(0, 1)) - tri_bounds[lefties].min(axis=(0, 1))
+        if sum(righties) == 0:
+            right_split = np.zeros(3) + 1e-9
+        else:
+            right_split = tri_bounds[righties].max(axis=(0, 1)) - tri_bounds[righties].min(axis=(0, 1))
+        score = (sum(tri_area[lefties]) / (sum([a * b for a, b in itertools.combinations(left_split, 2)])) +
+                 sum(tri_area[righties]) / (sum([a * b for a, b in itertools.combinations(right_split, 2)])))
+        if score > best_score:
+            best_score = score + 0.
+            best_bounds = [np.stack((tri_bounds[lefties].min(axis=(0, 1)), tri_bounds[lefties].max(axis=(0, 1))), axis=0) if sum(lefties) > 0 else np.zeros((2, 3)),
+                           np.stack((tri_bounds[righties].min(axis=(0, 1)), tri_bounds[righties].max(axis=(0, 1))), axis=0) if sum(righties) > 0 else np.zeros((2, 3))]
+            best_split = sp
+        split_scores[idx] = score
+
+    return *best_bounds, best_split
 
 
-    # GPU device optimization for memory access
-    ptx0_gpu = cuda.to_device(points[:, 0, 0].astype(_float))
-    ptx1_gpu = cuda.to_device(points[:, 1, 0].astype(_float))
-    ptx2_gpu = cuda.to_device(points[:, 2, 0].astype(_float))
-    pty0_gpu = cuda.to_device(points[:, 0, 1].astype(_float))
-    pty1_gpu = cuda.to_device(points[:, 1, 1].astype(_float))
-    pty2_gpu = cuda.to_device(points[:, 2, 1].astype(_float))
-    ptz0_gpu = cuda.to_device(points[:, 0, 2].astype(_float))
-    ptz1_gpu = cuda.to_device(points[:, 1, 2].astype(_float))
-    ptz2_gpu = cuda.to_device(points[:, 2, 2].astype(_float))
-    for level in range(int(np.log2(tree_bounds.shape[0] + 1))):
-        # prev_level_idx = sum(2 ** l for l in range(level - 1))
-        level_idx = sum(2 ** l for l in range(level))
-        next_level_idx = sum(2 ** l for l in range(level + 1))
-        threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((points.shape[0], next_level_idx - level_idx))
-        centered_octree = tree_bounds[level_idx:next_level_idx].mean(axis=1)
-        extent_octree = (np.diff(tree_bounds[level_idx:next_level_idx], axis=1) * .5)[:, 0]
-        centered_octree_gpu = cuda.to_device(centered_octree.astype(_float))
-        extent_octree_gpu = cuda.to_device(extent_octree.astype(_float))
-        ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], centered_octree_gpu.shape[0])).astype(bool))
-        assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
-                                                         ptz0_gpu, ptz1_gpu, ptz2_gpu, centered_octree_gpu,
-                                                         extent_octree_gpu, ptidx_gpu)
-        box_idxes = ptidx_gpu.copy_to_host()
-        # full_boxes = np.any(box_idxes, axis=0)
-        # octree.mask[prev_level_idx:level_idx] = np.packbits(full_boxes)
-        # octree.is_occupied[level_idx:next_level_idx] = full_boxes
-        tri_box_idxes[:, level_idx:next_level_idx] = box_idxes
-    return tri_box_idxes
-
-
-
-'''def genOctree(bounding_box: np.ndarray, num_levels: int = 3, points: np.ndarray = None,
-              perspective: np.ndarray = None, use_box_pts: bool = True):
-    octree = np.zeros((sum(8 ** n for n in range(num_levels)), 2, 3))
-    octree[0, ...] = bounding_box
-    tri_box_idxes = np.zeros((points.shape[0], octree.shape[0]))
-
-    # GPU device optimization for memory access
-    ptx0_gpu = cuda.to_device(points[:, 0, 0].astype(_float))
-    ptx1_gpu = cuda.to_device(points[:, 1, 0].astype(_float))
-    ptx2_gpu = cuda.to_device(points[:, 2, 0].astype(_float))
-    pty0_gpu = cuda.to_device(points[:, 0, 1].astype(_float))
-    pty1_gpu = cuda.to_device(points[:, 1, 1].astype(_float))
-    pty2_gpu = cuda.to_device(points[:, 2, 1].astype(_float))
-    ptz0_gpu = cuda.to_device(points[:, 0, 2].astype(_float))
-    ptz1_gpu = cuda.to_device(points[:, 1, 2].astype(_float))
-    ptz2_gpu = cuda.to_device(points[:, 2, 2].astype(_float))
-    max_ex = points.max(axis=1)
-    min_ex = points.min(axis=1)
-    print('Building octree level ', end='')
-    for level in range(num_levels):
-        print(f'{level}...', end='')
-        level_idx = sum(8 ** l for l in range(level))
-        next_level_idx = sum(8 ** l for l in range(level + 1))
-        threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((points.shape[0], next_level_idx - level_idx))
-
-        if use_box_pts:
-            centered_octree_gpu = cuda.to_device(octree[level_idx:next_level_idx].mean(axis=1).astype(_float))
-            extent_octree_gpu = cuda.to_device((np.diff(octree[level_idx:next_level_idx], axis=1) * .5)[:, 0].astype(_float))
-            ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], centered_octree_gpu.shape[0])).astype(bool))
-            assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
-                                                      ptz0_gpu, ptz1_gpu, ptz2_gpu, centered_octree_gpu, extent_octree_gpu, ptidx_gpu)
-
-            box_idxes = ptidx_gpu.copy_to_host()
-            full_boxes = np.any(box_idxes, axis=0)
-            used_boxes = np.argsort(box_idxes.sum(axis=0))
-            use_box_idx = 0
-
-            for idx in range(box_idxes.shape[1]):
-                if full_boxes[idx]:
-                    octree[level_idx + idx] = np.array([np.array([min_ex[box_idxes[:, idx]].min(axis=0),
-                                                                  octree[level_idx + idx, 0]]).max(axis=0),
-                                                        np.array([max_ex[box_idxes[:, idx]].max(axis=0),
-                                                                  octree[level_idx + idx, 1]]).min(axis=0)])
-                else:
-                    split_box = octree[level_idx + used_boxes[use_box_idx]] + 0
-                    split_sz = np.argsort(split_box[1] - split_box[0])
-                    octree[level_idx + idx, 0] = split_box[0]
-                    octree[level_idx + used_boxes[use_box_idx], 1] = split_box[1]
-                    if split_sz[0] == 0:
-                        octree[level_idx + idx, 1] = np.array(
-                            [(split_box[1, 0] + split_box[0, 0]) / 2, split_box[1, 1], split_box[1, 2]])
-                        octree[level_idx + used_boxes[use_box_idx], 0] = np.array(
-                            [(split_box[1, 0] + split_box[0, 0]) / 2, split_box[0, 1], split_box[0, 2]])
-                    elif split_sz[0] == 1:
-                        octree[level_idx + idx, 1] = np.array(
-                            [split_box[1, 0], (split_box[1, 1] + split_box[0, 1]) / 2, split_box[1, 2]])
-                        octree[level_idx + used_boxes[use_box_idx], 0] = np.array(
-                            [split_box[1, 0], (split_box[1, 1] + split_box[0, 1]) / 2, split_box[0, 2]])
-                    else:
-                        octree[level_idx + idx, 1] = np.array(
-                            [split_box[1, 0], split_box[1, 1], (split_box[1, 2] + split_box[0, 2]) / 2])
-                        octree[level_idx + used_boxes[use_box_idx], 0] = np.array(
-                            [split_box[0, 0], split_box[1, 1], (split_box[1, 2] + split_box[0, 2]) / 2])
-                    use_box_idx += 1
-                    # octree[level_idx + idx] = 0.
-        centered_octree_gpu = cuda.to_device(octree[level_idx:next_level_idx].mean(axis=1).astype(_float))
-        extent_octree_gpu = cuda.to_device((np.diff(octree[level_idx:next_level_idx], axis=1) * .5)[:, 0].astype(_float))
-        ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], centered_octree_gpu.shape[0])).astype(bool))
-        assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
-                                                      ptz0_gpu, ptz1_gpu, ptz2_gpu, centered_octree_gpu, extent_octree_gpu, ptidx_gpu)
-        box_idxes = ptidx_gpu.copy_to_host()
-        full_boxes = np.any(box_idxes, axis=0)
-        for idx in range(box_idxes.shape[1]):
-            if not full_boxes[idx]:
-                octree[level_idx + idx] = 0.
-        tri_box_idxes[:, level_idx:next_level_idx] = box_idxes
-        if level < num_levels - 1:
-            with mp.Pool(processes=mp.cpu_count() - 1) as pool:
-                npo = [np.array([octree[l, 0], octree[l].mean(axis=0), octree[l, 1]]) for l in range(level_idx, next_level_idx)]
-                results = [pool.apply(splitNextLevel, args=(npo[p], perspective)) for p in
-                           range(8 ** level)]
-
-            for idx, r in enumerate(results):
-                octree[next_level_idx + idx * 8:next_level_idx + (idx + 1) * 8] = r
-
-    return octree, tri_box_idxes'''
 
 
 def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_box: int = 64):
-    verts = points.reshape((-1, 3))  # points.mean(axis=1)
-    depth = int(np.ceil(np.log2(verts.shape[0] / (3 * min_tri_per_box))))
+    verts = points.mean(axis=1)
+    tri_bounds = np.stack((points.min(axis=1), points.max(axis=1)), axis=1)
+    depth = int(np.ceil(np.log2(verts.shape[0] / min_tri_per_box)))
     vidx = np.zeros((verts.shape[0])).astype(int)
     tree = np.zeros((2 ** depth - 1, 3))
     tree_bounds = np.zeros((2 ** depth - 1, 2, 3))
     tree[0] = [np.median(verts[:, 0]), bounding_box[:, 1].mean(), bounding_box[:, 2].mean()]
     tree_bounds[0] = bounding_box
+    tri_box_idxes = np.zeros((points.shape[0], tree_bounds.shape[0]))
+
+    ptx0_gpu = cuda.to_device(points[:, 0, 0].astype(_float))
+    ptx1_gpu = cuda.to_device(points[:, 1, 0].astype(_float))
+    ptx2_gpu = cuda.to_device(points[:, 2, 0].astype(_float))
+    pty0_gpu = cuda.to_device(points[:, 0, 1].astype(_float))
+    pty1_gpu = cuda.to_device(points[:, 1, 1].astype(_float))
+    pty2_gpu = cuda.to_device(points[:, 2, 1].astype(_float))
+    ptz0_gpu = cuda.to_device(points[:, 0, 2].astype(_float))
+    ptz1_gpu = cuda.to_device(points[:, 1, 2].astype(_float))
+    ptz2_gpu = cuda.to_device(points[:, 2, 2].astype(_float))
 
     # Split based on depth mod 3
-    for d in range(1, depth):
-        axis = (d - 1) % 3
-        for idx in range(sum(2 ** np.arange(d)), sum(2 ** np.arange(d + 1)), 2):
-            parent_idx = idx >> 1
-            v_act = verts[vidx == parent_idx]
-            lefties = tree[parent_idx, axis] < v_act[:, axis]
-            righties = tree[parent_idx, axis] >= v_act[:, axis]
-            if np.sum(lefties) != 0:
-                left = np.median(v_act[lefties], axis=0)
-                vidx[np.logical_and(tree[parent_idx, axis] < verts[:, axis], vidx == parent_idx)] = idx
-                tree[idx] = left
-            if np.sum(righties) != 0:
-                right = np.median(v_act[righties], axis=0)
-                vidx[np.logical_and(tree[parent_idx, axis] >= verts[:, axis], vidx == parent_idx)] = idx + 1
-                tree[idx + 1] = right
-            tree_bounds[idx] = tree_bounds[parent_idx]
-            tree_bounds[idx, 0, axis] = tree[parent_idx, axis]
-            tree_bounds[idx + 1] = tree_bounds[parent_idx]
-            tree_bounds[idx + 1, 1, axis] = tree[parent_idx, axis]
-    return tree, tree_bounds
+    for d in range(0, depth - 1):
+        axis = d % 3
+        level = sum(2 ** np.arange(d))
+        next_level = sum(2 ** np.arange(d + 1))
+
+        for idx in tqdm(range(level, next_level, 2)):
+            act_pts = vidx == idx
+            tree_bounds[idx * 2 + 1], tree_bounds[idx * 2 + 2], sp_pt = surfaceAreaHeuristic(points[act_pts], tree_bounds[idx], axis)
+            vidx[np.logical_and(sp_pt < verts[:, axis], vidx == idx)] = idx * 2 + 1
+            vidx[np.logical_and(sp_pt >= verts[:, axis], vidx == idx)] = idx * 2 + 2
+
+        threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((points.shape[0], next_level - level))
+        kd_box_center = tree_bounds[level:next_level].mean(axis=1)
+        kd_box_extent = (np.diff(tree_bounds[level:next_level], axis=1) * .5)[:, 0]
+        kd_center_gpu = cuda.to_device(kd_box_center.astype(_float))
+        kd_extent_gpu = cuda.to_device(kd_box_extent.astype(_float))
+        ptidx_gpu = cuda.to_device(np.zeros((points.shape[0], kd_center_gpu.shape[0])).astype(bool))
+        assignBoxPoints[blocks_strided, threads_strided](ptx0_gpu, ptx1_gpu, ptx2_gpu, pty0_gpu, pty1_gpu, pty2_gpu,
+                                                         ptz0_gpu, ptz1_gpu, ptz2_gpu, kd_center_gpu,
+                                                         kd_extent_gpu, ptidx_gpu)
+        box_idxes = ptidx_gpu.copy_to_host()
+        tri_box_idxes[:, level:next_level] = box_idxes
+    return tree, tree_bounds, tri_box_idxes
 
 
 def getMeshFig(mesh, triangle_colors=None, title='Title Goes Here', zrange=100):

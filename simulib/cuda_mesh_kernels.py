@@ -89,8 +89,7 @@ def morton_decode(code):
 
 
 @cuda.jit(device=True, fast_math=True)
-def findBoxIntersection(ro, rd, bounds, dim):
-    ray = 1 / rd
+def findBoxIntersection(ro, ray, bounds):
     boxmin = make_float3(bounds[0, 0], bounds[0, 1], bounds[0, 2])
     boxmax = make_float3(bounds[1, 0], bounds[1, 1], bounds[1, 2])
     if ray.x >= 0:
@@ -105,10 +104,6 @@ def findBoxIntersection(ro, rd, bounds, dim):
     else:
         tminy = (boxmax.y - ro.y) * ray.y
         tmaxy = (boxmin.y - ro.y) * ray.y
-    if dim == 0:
-        tmid = (tmin + tmax) * .5
-    elif dim == 1:
-        tmid = (tminy + tmaxy) * .5
     tmin = max(tminy, tmin)
     tmax = min(tmaxy, tmax)
 
@@ -120,9 +115,7 @@ def findBoxIntersection(ro, rd, bounds, dim):
         tmaxy = (boxmin.z - ro.z) * ray.z
     tmin = max(tminy, tmin)
     tmax = min(tmaxy, tmax)
-    if dim == 2:
-        tmid = (tminy + tmaxy) * .5
-    return tmin, tmid, tmax
+    return tmin, tmax
 
 
 
@@ -161,7 +154,7 @@ def testIntersection(ro, rd, bounds):
 
 
 @cuda.jit(device=True, fast_math=True)
-def traverseOctreeForOcclusion(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, leaf_list, leaf_key, tri_idx, tri_vert, tri_norm):
+def traverseOctreeForOcclusion(ro, rd, kd_tree, leaf_list, leaf_key, tri_idx, tri_vert, tri_norm):
     """
     Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
     params:
@@ -174,15 +167,16 @@ def traverseOctreeForOcclusion(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxma
     tri_vert: (N, 3) = vertices for triangles in euclidean space
     tri_norm: (N, 3) = surface normal of triangle
     """
-    if not findOctreeBox(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, 0):
+    if not testIntersection(ro, rd, kd_tree[0]):
         return False
-    box = 1
-    jump = False
-    while 0 < box < boxminx.shape[0]:
-        if findOctreeBox(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, box):
-            if box >= boxminx.shape[0] >> 3:
-                tri_min = leaf_key[box, 0]
-                for t_idx in prange(tri_min, tri_min + leaf_key[box, 1]):
+    idx = 2
+    skip = False
+
+    while 0 < idx < kd_tree.shape[0]:
+        if testIntersection(ro, rd, kd_tree[idx]):
+            if math.log2(idx + 1) >= math.log2(kd_tree.shape[0] + 1) - 1:
+                tri_min = leaf_key[idx, 0]
+                for t_idx in prange(tri_min, tri_min + leaf_key[idx, 1]):
                     ti = leaf_list[t_idx]
                     tn = make_float3(tri_norm[ti, 0], tri_norm[ti, 1], tri_norm[ti, 2])
                     curr_intersect, _, _ = (
@@ -198,17 +192,16 @@ def traverseOctreeForOcclusion(ro, rd, boxminx, boxminy, boxminz, boxmaxx, boxma
                     if curr_intersect:
                         return True
             else:
-                box <<= 3
-                jump = True
-        elif box == 8:
-            break
-        box += 1
-        if (box - 1) >> 3 != (box - 2) >> 3 and not jump:
-            if box == 9:
+                # Move down into the box
+                idx = idx * 2 + 2
+                skip = True
+        if not skip:
+            while idx % 2 == 1 and idx != 1:
+                idx = (idx >> 1)
+            if idx == 1:
                 break
-            box >>= 8
-            jump = False
-
+            idx -= 1
+        skip = False
     return False
 
 
@@ -279,7 +272,7 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
     return did_intersect, inter, int_rng
 
 
-'''@cuda.jit(device=True, fast_math=True)
+@cuda.jit(device=True, fast_math=True)
 def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, tri_material,
                                 rng, wavenumber):
     """
@@ -359,93 +352,11 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                 break
             idx -= 1
         skip = False
-    return did_intersect, nrho, inter, int_rng, b'''
-
-
-@cuda.jit(device=True, fast_math=True)
-def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, tri_material,
-                                rng, wavenumber):
-    """
-    Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
-    params:
-    ro: float3 = ray origin point
-    rd: float3 = normalized ray direction vector
-    bounding_box: (N, 2, 3) = array of axis aligned bounding boxes
-    rho: float = ray power in watts
-    final_level: int = start index of the final level of the octree for the bounding_box array
-    leaf_list: (N) = sorted array of triangle indexes based on octree boxes
-    leaf_key: (N, 2) = key to look into leaf_list and find the triangles inside of a box
-    tri_idx: (N, 3) = indexes of vertices that correspond to an individual triangle
-    tri_vert: (N, 3) = vertices for triangles in euclidean space
-    tri_norm: (N, 3) = surface normal of triangle
-    tri_material: (N, 3) = material scattering values of triangle - (RCS, ks, kd)
-    occlusion_only: bool = set to True to return when the ray intersects something without checking any other triangles
-    """
-
-    int_rng = np.inf
-    did_intersect = False
-    inter = None
-    nrho = 0
-    b = None
-
-    stack = cuda.local.array(shape=(10,), dtype=np.int32)
-    stack_idx = 0
-    stack[stack_idx] = 0
-
-    while stack_idx >= 0:
-        box_idx = stack[stack_idx]
-        # idx, tmp_tmin, tmp_tmax = stack[-1]
-        if testIntersection(ro, rd, kd_tree[box_idx]):
-            if math.log2(box_idx + 1) >= math.log2(kd_tree.shape[0] + 1) - 1:
-                tri_min = leaf_key[box_idx, 0]
-                for t_idx in prange(tri_min, tri_min + leaf_key[box_idx, 1]):
-                    ti = leaf_list[t_idx]
-                    ti_idx = make_uint3(tri_idx[ti, 0], tri_idx[ti, 1], tri_idx[ti, 2])
-                    tn = make_float3(tri_norm[ti, 0], tri_norm[ti, 1], tri_norm[ti, 2])
-                    curr_intersect, tb, tinter = (
-                        calcSingleIntersection(rd, ro, make_float3(tri_vert[ti_idx.x, 0],
-                                                                   tri_vert[ti_idx.x, 1],
-                                                                   tri_vert[ti_idx.x, 2]),
-                                               make_float3(tri_vert[ti_idx.y, 0],
-                                                           tri_vert[ti_idx.y, 1],
-                                                           tri_vert[ti_idx.y, 2]),
-                                               make_float3(tri_vert[ti_idx.z, 0],
-                                                           tri_vert[ti_idx.z, 1],
-                                                           tri_vert[ti_idx.z, 2]),
-                                               tn, True))
-                    if curr_intersect:
-                        tmp_rng = length(ro - tinter)
-                        if 1. < tmp_rng < int_rng:
-                            int_rng = tmp_rng + rng
-                            inv_rng = 1. / int_rng
-                            b = tb + 0.
-                            # Some parts of the Fresnel coefficient calculation
-                            cosa = abs(dot(rd, tn))
-                            sina = tri_material[ti, 0] * math.sqrt(
-                                1. - (1. / tri_material[ti, 0] * length(cross(rd, tn))) ** 2)
-                            Rs = abs((cosa - sina) / (
-                                    cosa + sina)) ** 2  # Reflectance using Fresnel coefficient
-                            roughness = math.exp(-.5 * (2. * wavenumber * tri_material[
-                                ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
-                            spec = math.exp(-(1. - cosa) ** 2 / .0000007442)  # This should drop the specular component to zero by 2 degrees
-                            L = .7 * ((1 + abs(dot(b, rd))) / 2.) + .3
-                            nrho = rho * inv_rng * inv_rng * cosa * Rs * (
-                                    roughness * spec + (
-                                    1. - roughness) * L ** 2)  # Final reflected power
-                            inter = tinter + 0.
-                            did_intersect = True
-            else:
-                stack[stack_idx] = box_idx * 2 + 1
-                stack_idx += 1
-                stack[stack_idx] = box_idx * 2 + 2
-                stack_idx += 1
-        stack_idx -= 1
-
     return did_intersect, nrho, inter, int_rng, b
 
 
 @cuda.jit()
-def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
+def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                    leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
                    tilt, params):
     t, r = cuda.grid(ndim=2)
@@ -457,13 +368,13 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, boxminx, boxmin
             rng = ray_distance[tt, ray_idx]
             did_intersect, nrho, inter, int_rng, b = traverseOctreeAndReflection(
                 make_float3(ray_origin[tt, ray_idx, 0], ray_origin[tt, ray_idx, 1], ray_origin[tt, ray_idx, 2]),
-                make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
+                make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), kd_tree,
                 ray_power[tt, ray_idx], leaf_list, leaf_key, tri_idx, tri_vert,
                                                                                    tri_norm, tri_material, rng, params[0])
             if did_intersect:
                 rng += int_rng
                 # Check for occlusion against the receiver
-                if not traverseOctreeForOcclusion(inter, normalize(rec_xyz - inter), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, leaf_list, leaf_key,
+                if not traverseOctreeForOcclusion(inter, normalize(rec_xyz - inter), kd_tree, leaf_list, leaf_key,
                                                                            tri_idx, tri_vert, tri_norm):
                     acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                                pan[tt], tilt[tt], params[3], params[4], params[0], nrho)

@@ -47,10 +47,10 @@ if __name__ == '__main__':
     plp = 0.
     fdelay = 10.
     upsample = 8
-    num_bounces = 1
+    num_bounces = 2
     max_tris_per_split = 16
     nstreams = 1
-    points_to_sample = 2**16
+    points_to_sample = 2**12
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -61,7 +61,7 @@ if __name__ == '__main__':
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     do_randompts = False
-    use_supersampling = True
+    use_supersampling = False
     nbpj_pts = (1024, 1024)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'

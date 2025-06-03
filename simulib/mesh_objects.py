@@ -3,7 +3,7 @@ from functools import cached_property, singledispatch
 import open3d as o3d
 import numpy as np
 from .mesh_functions import detectPoints, detectPointsScene, assocPointsWithOctree, morton_encode, \
-    assocPointsWithKDTree, genKDTree
+    genKDTree
 
 
 class Mesh(object):
@@ -36,10 +36,8 @@ class Mesh(object):
         max_bound = aabb.get_max_bound()
         min_bound = aabb.get_min_bound()
         root_box = np.array([min_bound, max_bound])
-        bvh, tree_bounds = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split)
+        bvh, tree_bounds, mesh_box_idx = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split)
         num_box_levels = int(np.log2(bvh.shape[0]) + 1)
-        # bvh, leaf_key, leaf_list = genBVH(root_box, num_box_levels, mesh_tri_vertices)
-        mesh_box_idx = assocPointsWithKDTree(tree_bounds, mesh_tri_vertices)
 
         meshx, meshy = np.where(mesh_box_idx)
         alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
@@ -58,6 +56,7 @@ class Mesh(object):
         self.normals = mesh_normals
         self.materials = tri_material
         self.bvh = tree_bounds
+        self.kd_splits = bvh
         self.bounding_box = root_box
         self.leaf_list = sorted_tri_idx[:, 1]
         self.leaf_key = mesh_idx_key
@@ -133,39 +132,3 @@ class Scene(object):
     @property
     def center(self):
         return np.mean([np.array(s.center) for s in self.meshes], axis=0)
-
-
-class Octree(object):
-
-    def __init__(self, depth, bounding_box):
-        self.depth = depth
-        self.octree = np.zeros((sum(8 ** n for n in range(depth)), 2, 3))
-        self.octree[0, ...] = bounding_box
-        self.mask = np.zeros(sum(8 ** n for n in range(depth - 1))).astype(np.uint8)
-        self.is_occupied = np.zeros(sum(8 ** n for n in range(depth))).astype(bool)
-        self.pos = np.zeros((self.octree.shape[0], 3)).astype(np.uint32)  # Mostly for debugging
-        self.morton = np.zeros((self.octree.shape[0],)).astype(np.uint64)
-        self.extent = np.diff(bounding_box, axis=0)[0]
-        self.center = np.mean(bounding_box, axis=0)
-        self.lower = bounding_box[0]
-        for l in range(depth):
-            enc_size = 2**l
-            half_extent = self.extent / (2**l)
-            level_idx = sum(8 ** i for i in range(l))
-            for x in range(enc_size):
-                for y in range(enc_size):
-                    for z in range(enc_size):
-                        low_ext = np.array([x, y, z])
-                        menc = morton_encode(x, y, z)
-                        self.octree[level_idx + menc] = self.octree[0, 0] + half_extent * np.array([low_ext, low_ext + 1])
-                        self.pos[level_idx + menc] = low_ext
-
-    def __sizeof__(self):
-        return self.octree.shape
-
-    @property
-    def shape(self):
-        return self.octree.shape
-
-    def __getitem__(self, item):
-        return self.octree[item]
