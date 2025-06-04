@@ -1,9 +1,7 @@
 from functools import cached_property, singledispatch
-
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints, detectPointsScene, assocPointsWithOctree, morton_encode, \
-    genKDTree
+from .mesh_functions import detectPoints, detectPointsScene, genKDTree
 
 
 class Mesh(object):
@@ -36,8 +34,8 @@ class Mesh(object):
         max_bound = aabb.get_max_bound()
         min_bound = aabb.get_min_bound()
         root_box = np.array([min_bound, max_bound])
-        bvh, tree_bounds, mesh_box_idx = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split)
-        num_box_levels = int(np.log2(bvh.shape[0]) + 1)
+        tree_bounds, mesh_box_idx = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split)
+        num_box_levels = int(np.log2(tree_bounds.shape[0]) + 1)
 
         meshx, meshy = np.where(mesh_box_idx)
         alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
@@ -45,7 +43,7 @@ class Mesh(object):
         sorted_tri_idx = sorted_tri_idx[sorted_tri_idx[:, 0] >= sum(2 ** n for n in range(num_box_levels - 1))]
         box_num, start_idxes = np.unique(sorted_tri_idx[:, 0], return_index=True)
         mesh_extent = np.diff(start_idxes, append=[sorted_tri_idx.shape[0]])
-        mesh_idx_key = np.zeros((bvh.shape[0], 3)).astype(int)
+        mesh_idx_key = np.zeros((tree_bounds.shape[0], 3)).astype(int)
         mesh_idx_key[box_num, 0] = start_idxes
         mesh_idx_key[box_num, 1] = mesh_extent
 
@@ -56,7 +54,6 @@ class Mesh(object):
         self.normals = mesh_normals
         self.materials = tri_material
         self.bvh = tree_bounds
-        self.kd_splits = bvh
         self.bounding_box = root_box
         self.leaf_list = sorted_tri_idx[:, 1]
         self.leaf_key = mesh_idx_key

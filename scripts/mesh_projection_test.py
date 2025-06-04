@@ -47,10 +47,10 @@ if __name__ == '__main__':
     plp = 0.
     fdelay = 10.
     upsample = 8
-    num_bounces = 2
-    max_tris_per_split = 16
+    num_bounces = 1
+    max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**12
+    points_to_sample = 2**17
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -325,13 +325,14 @@ if __name__ == '__main__':
         )'''
     fig.show()
 
-    fig = getSceneFig(scene)
+    for d in range(scene.meshes[0].bvh_levels - 1, scene.meshes[0].bvh_levels):
+        fig = getSceneFig(scene, title=f'Depth {d}')
 
-    for mesh in scene.meshes:
-        for b in mesh.bvh[sum(2 ** n for n in range(mesh.bvh_levels - 1)):]:
-            if np.sum(b) != 0:
-                fig.add_trace(drawOctreeBox(b))
-    fig.show()
+        for mesh in scene.meshes:
+            for b in mesh.bvh[sum(2 ** n for n in range(d)):sum(2 ** n for n in range(d+1))]:
+                if np.sum(b) != 0:
+                    fig.add_trace(drawOctreeBox(b))
+        fig.show()
 
     fig = px.scatter_3d(x=sample_points[0][:256, 0], y=sample_points[0][:256, 1], z=sample_points[0][:256, 2])
     for n in range(256, 8192, 256):
