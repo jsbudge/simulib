@@ -402,6 +402,15 @@ def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray
 
 
 def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, pointing_az, pointing_el):
+    '''l0 = np.array([0, 0, 1.])
+    l1 = np.array([0, 1, 0.])
+    for mesh in scene.meshes:
+        points = mesh.vertices[mesh.tri_idx]
+        rvals = np.linalg.norm(flight_pos[None, :] - (
+                    r1[None, :] * l0[:, None] + r2[None, :] * l1[:, None] + r3[None, :] * (1 - l0 - l1)[:, None]),
+                               axis=1)
+        rbins = np.digitize(rvals, ranges)'''
+
     npulses = a_obs_pt.shape[0]
 
     ray_origin_gpu = cuda.to_device(np.repeat(np.expand_dims(a_obs_pt, 1), npoints, axis=1).astype(_float))
@@ -467,7 +476,12 @@ def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds
     best_axis = 0
     if centroids.shape[0] > 0:
         medes = np.median(centroids, axis=0)
-        s_a = 2 * sum([a * b for a, b in itertools.combinations(np.diff(bounding_box, axis=0)[0], 2)])
+        s_a = 2 * sum(
+            a * b
+            for a, b in itertools.combinations(
+                np.diff(bounding_box, axis=0)[0], 2
+            )
+        )
         for ax in range(3):
             # 13 chosen based on empirical data from a ray-tracing book
             ax_poss_splits = np.linspace(bounding_box[0, ax], bounding_box[1, ax], 13)[1:-1]
@@ -481,8 +495,22 @@ def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds
                 else:
                     left_split = tri_bounds[lefties].max(axis=(0, 1)) - tri_bounds[lefties].min(axis=(0, 1))
                     right_split = tri_bounds[righties].max(axis=(0, 1)) - tri_bounds[righties].min(axis=(0, 1))
-                    left_prob = (2 * sum([a * b for a, b in itertools.combinations(left_split, 2)])) / s_a
-                    right_prob = (2 * sum([a * b for a, b in itertools.combinations(right_split, 2)])) / s_a
+                    left_prob = (
+                        2
+                        * sum(
+                            a * b
+                            for a, b in itertools.combinations(left_split, 2)
+                        )
+                        / s_a
+                    )
+                    right_prob = (
+                        2
+                        * sum(
+                            a * b
+                            for a, b in itertools.combinations(right_split, 2)
+                        )
+                        / s_a
+                    )
                     score = sum(tri_area[lefties]) * left_prob + sum(tri_area[righties]) * right_prob
                     if score < best_score:
                         best_score = score + 0.
