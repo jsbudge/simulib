@@ -47,6 +47,9 @@ class Mesh(object):
         mesh_idx_key[box_num, 0] = start_idxes
         mesh_idx_key[box_num, 1] = mesh_extent
 
+        self.tri_area = .5 * np.linalg.norm(np.cross(mesh_tri_vertices[:, 1, :] - mesh_tri_vertices[:, 0, :], mesh_tri_vertices[:, 2, :] - mesh_tri_vertices[:, 0, :]),
+                                       axis=1)
+
 
         # Set them all as properties of the object
         self.tri_idx = mesh_tri_idx

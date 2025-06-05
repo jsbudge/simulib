@@ -7,12 +7,6 @@ from .cuda_kernels import applyOneWayRadiationPattern
 
 c0 = 299792458.0
 
-class float3:
-    def __init__(self, x, y, z):
-        self.x = x
-        self.y = y
-        self.z = z
-
 
 @cuda.jit(device=True, fast_math=True)
 def getRangeAndAngles(v, s):
@@ -55,11 +49,6 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
 
 @cuda.jit(device=True, fast_math=True)
-def calcConicalIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
-    pass
-
-
-@cuda.jit(device=True, fast_math=True)
 def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
     r, r_rng, r_az, r_el = getRangeAndAngles(inter, re)
@@ -72,20 +61,6 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
         return acc_val.real, acc_val.imag, rng_bin
 
     return 0, 0, -1
-
-
-@cuda.jit(device=True, fast_math=True)
-def c1b2(x):
-    x &= 0x09249249                # x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
-    x = (x ^ (x >>  2)) & 0x030c30c3 # x = ---- --98 ---- 76-- --54 ---- 32-- --10
-    x = (x ^ (x >>  4)) & 0x0300f00f # x = ---- --98 ---- ---- 7654 ---- ---- 3210
-    x = (x ^ (x >>  8)) & 0xff0000ff # x = ---- --98 ---- ---- ---- ---- 7654 3210
-    x = (x ^ (x >> 16)) & 0x000003ff # x = ---- ---- ---- ---- ---- --98 7654 3210
-    return x
-
-@cuda.jit(device=True, fast_math=True)
-def morton_decode(code):
-    return make_float3(c1b2(code >> 0), c1b2(code >> 1), c1b2(code >> 2))
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -353,6 +328,98 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
             idx -= 1
         skip = False
     return did_intersect, nrho, inter, int_rng, b
+
+
+@cuda.jit(device=True, fast_math=True)
+def calcTriangleSurfaceArea(ro, p0, p1, p2, R):
+    # This is to calc l1
+    l1 = lambdaFromRange(ro, p0, p2, R)
+
+    # This is to calc l0
+    l0 = lambdaFromRange(ro, p1, p2, R)
+
+    if l0 == 0.:
+        l2 = lambdaFromRange(ro, p1, p0, R)
+        return .5 * length(cross(p1 - (p0 * l2 + p1 * (1 - l2)), p2 - (p1 * l1 + p2 * (1 - l1))))
+    elif l1 == 0.:
+        l2 = lambdaFromRange(ro, p1, p0, R)
+        return .5 * length(cross(p1 - (p0 * l2 + p1 * (1 - l2)), p2 - (p0 * l0 + p2 * (1 - l0))))
+    return .5 * length(cross(p2 - (p1 * l1 + p2 * (1 - l1)), p2 - (p0 * l0 + p2 * (1 - l0))))
+
+
+@cuda.jit(device=True, fast_math=True)
+def lambdaFromRange(ro, r2, r3, R):
+    e1 = r3 - r2
+    a = e1.x ** 2 + e1.y ** 2 + e1.z ** 2
+    b = 2 * (ro.x * e1.x - e1.x * r3.x + ro.y * e1.y - e1.y * r3.y + ro.z * e1.z - e1.z * r3.z)
+    c = ro.x ** 2 + ro.y ** 2 + ro.z ** 2 + r3.x ** 2 + r3.y ** 2 + r3.z ** 2 - 2 * (
+                ro.x * r3.x + ro.y * r3.y + ro.z * r3.z) - R ** 2
+
+    l1_tilde = (-b - math.sqrt(b ** 2 - 4 * a * c)) / (2 * a)
+    if abs(l1_tilde) > 5.:
+        l1_tilde = (-b + math.sqrt(b ** 2 - 4 * a * c)) / (2 * a)
+    return min(max(0., l1_tilde), 1.)
+
+@cuda.jit()
+def calcTriangleRangeMinMax(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, params):
+    t, r = cuda.grid(ndim=2)
+    tt_stride, tri_stride = cuda.gridsize(2)
+    for tri_idx in prange(r, tri_idxes.shape[0], tri_stride):
+        p0 = make_float3(tri_verts[tri_idxes[tri_idx, 0], 0], tri_verts[tri_idxes[tri_idx, 0], 1],
+                         tri_verts[tri_idxes[tri_idx, 0], 2])
+        p1 = make_float3(tri_verts[tri_idxes[tri_idx, 1], 0], tri_verts[tri_idxes[tri_idx, 1], 1],
+                         tri_verts[tri_idxes[tri_idx, 1], 2])
+        p2 = make_float3(tri_verts[tri_idxes[tri_idx, 2], 0], tri_verts[tri_idxes[tri_idx, 2], 1],
+                         tri_verts[tri_idxes[tri_idx, 2], 2])
+        for tt in prange(t, transmit_xyz.shape[0], tt_stride):
+            tx = make_float3(transmit_xyz[tt, 0], transmit_xyz[tt, 1], transmit_xyz[tt, 2])
+            rmin = min(length(tx - p2), length(tx - p0), length(tx - p1))
+            rmax = max(length(tx - p2), length(tx - p0), length(tx - p1))
+            triangle_ranges[tt, tri_idx, 0] = int(((2 * rmin) / c0 - 2 * params[1]) * params[2])
+            triangle_ranges[tt, tri_idx, 1] = int(((2 * rmax) / c0 - 2 * params[1]) * params[2]) - int(((2 * rmin) / c0 - 2 * params[1]) * params[2])
+
+
+@cuda.jit()
+def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, triangle_bin_surface_area, params):
+    t, r = cuda.grid(ndim=2)
+    tt_stride, tri_stride = cuda.gridsize(2)
+    for tri_idx in prange(r, tri_idxes.shape[0], tri_stride):
+        p0 = make_float3(tri_verts[tri_idxes[tri_idx, 0], 0], tri_verts[tri_idxes[tri_idx, 0], 1],
+                         tri_verts[tri_idxes[tri_idx, 0], 2])
+        p1 = make_float3(tri_verts[tri_idxes[tri_idx, 1], 0], tri_verts[tri_idxes[tri_idx, 1], 1],
+                         tri_verts[tri_idxes[tri_idx, 1], 2])
+        p2 = make_float3(tri_verts[tri_idxes[tri_idx, 2], 0], tri_verts[tri_idxes[tri_idx, 2], 1],
+                         tri_verts[tri_idxes[tri_idx, 2], 2])
+        full_tri = .5 * length(cross(p2 - p1, p2 - p0))
+        for tt in prange(t, transmit_xyz.shape[0], tt_stride):
+            tx = make_float3(transmit_xyz[tt, 0], transmit_xyz[tt, 1], transmit_xyz[tt, 2])
+            # sub_surface_area = 0.
+            for b in prange(triangle_ranges[tt, tri_idx, 1]):
+                R = ((triangle_ranges[tt, tri_idx, 0] + b + 1) / params[2] + 2 * params[1]) * c0 * .5
+                triangle_bin_surface_area[tt, tri_idx, b] = -(calcTriangleSurfaceArea(tx, p1, p0, p2, R) - full_tri)
+                # sub_surface_area = calcTriangleSurfaceArea(p0, p1, p2, l0, l1)
+            for b in prange(triangle_ranges[tt, tri_idx, 1] - 1):
+                triangle_bin_surface_area[tt, tri_idx, b] = triangle_bin_surface_area[tt, tri_idx, b] - triangle_bin_surface_area[tt, tri_idx, b + 1]
+            if triangle_bin_surface_area[tt, tri_idx, 0] < 0:
+                triangle_bin_surface_area[tt, tri_idx, triangle_ranges[tt, tri_idx, 1] - 1] -= full_tri
+                for b in prange(triangle_ranges[tt, tri_idx, 1]):
+                    triangle_bin_surface_area[tt, tri_idx, b] = abs(triangle_bin_surface_area[tt, tri_idx, b])
+
+
+@cuda.jit()
+def calcTriangleSampleVariance(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, triangle_bin_surface_area, params):
+    t, r = cuda.grid(ndim=2)
+    tt_stride, tri_stride = cuda.gridsize(2)
+    for tri_idx in prange(r, tri_idxes.shape[0], tri_stride):
+        pass
+
+
+@cuda.jit()
+def calcTrianglePointReturn(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, triangle_bin_surface_area, params):
+    t, r = cuda.grid(ndim=2)
+    tt_stride, tri_stride = cuda.gridsize(2)
+    for tri_idx in prange(r, tri_idxes.shape[0], tri_stride):
+        pass
 
 
 @cuda.jit()
