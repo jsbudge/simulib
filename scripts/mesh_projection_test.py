@@ -47,12 +47,9 @@ if __name__ == '__main__':
     plp = 0.
     fdelay = 10.
     upsample = 8
-    num_bounces = 2
+    num_bounces = 1
     max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**20
-    num_mesh_triangles = 1000000
-    max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
     fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
     # fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
@@ -61,7 +58,6 @@ if __name__ == '__main__':
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     do_randompts = False
-    use_supersampling = True
     nbpj_pts = (1024, 1024)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
@@ -90,10 +86,16 @@ if __name__ == '__main__':
     scene = Scene()
     # mesh_ids = []
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(Mesh(mesh, max_tris_per_split=max_tris_per_split, material_sigma=[.017 for n in mesh.triangle_material_ids]))
+    scene.add(
+        Mesh(
+            mesh,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[0.017 for _ in mesh.triangle_material_ids],
+        )
+    )'''
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -115,7 +117,7 @@ if __name__ == '__main__':
 
 
     '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
-                               points=num_mesh_triangles)  # Has just over 500000 points in the file
+                               points=3e9)  # Has just over 500000 points in the file
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     mesh_extent = car.get_max_bound() - car.get_min_bound()
@@ -128,9 +130,8 @@ if __name__ == '__main__':
     m_sigma[0] = m_sigma[15] = .017  # seats
     m_sigma[6] = m_sigma[13] = m_sigma[17] = .0017  # body
     m_sigma[12] = m_sigma[4] = .017  # windshield
-    scene.add(Mesh(car, num_box_levels=4, material_emissivity=m_emissivity, material_sigma=m_sigma,
-                   use_box_pts=True))'''
-    
+    scene.add(Mesh(car, max_tris_per_split=max_tris_per_split, material_emissivity=m_emissivity, material_sigma=m_sigma))'''
+
     '''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     stretch = np.eye(4)
@@ -141,13 +142,13 @@ if __name__ == '__main__':
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     building = building.compute_triangle_normals()
     scene.add(Mesh(building, num_box_levels=3))'''
-    
-    '''gpx, gpy, gpz = bg.getGrid(grid_origin, 1500, 1500, nrows=256, ncols=256)
+
+    gpx, gpy, gpz = bg.getGrid(grid_origin, 100, 100, nrows=128, ncols=128)
     # Shift position
     gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
     gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, rp.origin)
-    gpz = gpz * 0 -17.
-    gnd_points = np.array([gpx, gpy, gpz]).T[::100]
+    # gpz = gpz * 0 -17.
+    gnd_points = np.array([gpx, gpy, gpz]).T
     # gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
     # gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
     #                                        gnd_range < grid_ranges.max() + grid_ranges.std() * 3)]
@@ -155,14 +156,21 @@ if __name__ == '__main__':
     ground = o3d.geometry.TriangleMesh()
     ground.vertices = o3d.utility.Vector3dVector(gnd_points)
     ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
-    ground = ground.simplify_vertex_clustering(5.)
+    # ground = ground.simplify_vertex_clustering(1.5)
     ground.remove_duplicated_vertices()
     ground.remove_unreferenced_vertices()
+    vertices = np.asarray(ground.vertices)
+    areas = np.array([np.linalg.norm(vertices[triangle], axis=1) for triangle in np.asarray(ground.triangles)])
+    # print(f"Areas: {areas}")  # Debugging line
+    # print(f"Max area: {max_area}")  # Debugging line
+    mask = (np.max(areas, axis=1) - np.min(areas, axis=1)) > 3.
+    # print(f"Mask: {mask}")  # Debugging line
+    ground.remove_triangles_by_mask(mask)
     ground.compute_vertex_normals()
     ground.compute_triangle_normals()
     ground.normalize_normals()
     ground.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(ground.triangles)).astype(np.int32))
-    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], num_box_levels=4))'''
+    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], max_tris_per_split=64))
 
     print('Done.')
 
@@ -181,23 +189,6 @@ if __name__ == '__main__':
 
 
     # Load in boxes and meshes for speedup of ray tracing
-    print('Loading mesh box structure...', end='')
-    ptsam = min(points_to_sample, max_pts_per_run)
-    print('Done.')
-
-    # If we need to split the point raster, do so
-    if points_to_sample > max_pts_per_run:
-        splits = np.concatenate((np.arange(0, points_to_sample, max_pts_per_run), [points_to_sample]))
-    else:
-        splits = np.array([0, points_to_sample])
-
-    if do_randompts:
-        sample_points = ptsam
-    else:
-        # sample_points = [grid_pts]
-        sample_points = [scene.sample(int(splits[s + 1] - splits[s]),
-                                      view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
-                         for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
 
@@ -219,14 +210,13 @@ if __name__ == '__main__':
 
     # Single pulse for debugging
     print('Generating single pulse...')
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points[0],
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene,
                                                                                  [rp.txpos(data_t).astype(_float)], [rp.txpos(data_t).astype(_float)],
                                                                                  [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
                                                                                  rp.az_half_bw, rp.el_half_bw,
                                                                                  nsam, fc, near_range_s, fs,
                                                                                  num_bounces=num_bounces,
-                                                                                 debug=True, streams=streams,
-                                                                                  use_supersampling=use_supersampling)
+                                                                                 debug=True, streams=streams)
     single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                                  is_freq=True, time_len=nsam)
     single_mf_pulse = upsamplePulse(
@@ -246,10 +236,9 @@ if __name__ == '__main__':
         rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
         tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        trp = [getRangeProfileFromScene(scene, sam, txposes, rxposes, pans, tilts,
+        trp = getRangeProfileFromScene(scene, txposes, rxposes, pans, tilts,
                                       radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
-                                      num_bounces=num_bounces, streams=streams, use_supersampling=use_supersampling) for sam in sample_points]
-        trp = [sum(i) for i in zip(*trp)]
+                                      num_bounces=num_bounces, streams=streams)
         mf_pulses = [np.ascontiguousarray(upsamplePulse(
             addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True,
             time_len=nsam).T, dtype=np.complex128) for range_profile in trp]

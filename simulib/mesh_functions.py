@@ -3,7 +3,9 @@ import multiprocessing as mp
 from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
     assignBoxPoints, calcClosestIntersection, calcReturnPower, \
-    calcClosestIntersectionWithoutBounce, calcSceneOcclusion, calcTriangleRangeMinMax, calcTriangleBinSurfaceArea
+    calcClosestIntersectionWithoutBounce, calcSceneOcclusion, calcTriangleRangeMinMax, calcTriangleBinSurfaceArea, \
+    calcTriangleSampleVariance, calcTriangleReturns
+from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 from .simulation_functions import azelToVec, factors
 import numpy as np
 import open3d as o3d
@@ -80,16 +82,16 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
     return mesh
 
 
-def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
+def getRangeProfileFromScene(scene, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
-                            debug: bool=False, streams: list[cuda.stream]=None, use_supersampling: bool=True) -> tuple[list, list, list, list] | list:
+                            debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
     # This is here because the single mesh function is more highly optimized for a single mesh and should therefore
     # be used.
     if len(scene.meshes) == 1:
-        return getRangeProfileFromMesh(scene.meshes[0], sampled_points, tx_pos, rx_pos, pan, tilt, 
+        return getRangeProfileFromMesh(scene.meshes[0], tx_pos, rx_pos, pan, tilt,
                                        radar_equation_constant, bw_az, bw_el, nsam, fc, near_range_s, fs, num_bounces,
-                                       debug, streams, use_supersampling)
+                                       debug, streams)
     npulses = tx_pos[0].shape[0]
     if isinstance(sampled_points, int):
         sampled_points = tx_pos[0][0] + azelToVec(pan[0].mean() + np.random.normal(0, bw_az, (sampled_points,)),
@@ -117,7 +119,7 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
     sxmaxz_gpu = cuda.to_device(scene.tree[:, 1, 2].astype(_float))'''
     # boxes_gpu = cuda.to_device(mesh.octree.astype(_float))
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
-                                          radar_equation_constant, use_supersampling]).astype(_float))
+                                          radar_equation_constant]).astype(_float))
 
     pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
     pd_i = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
@@ -231,10 +233,10 @@ def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: li
 
 
 
-def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
+def getRangeProfileFromMesh(mesh, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
-                            debug: bool=False, streams: list[cuda.stream]=None, use_supersampling: bool = True) -> tuple[list, list, list, list] | list:
+                            debug: bool=False, streams: list[cuda.stream]=None) -> tuple[list, list, list, list] | list:
     """
     Generate a range profile, given a Mesh object and some other values
 
@@ -249,6 +251,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     # threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
     threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, ntris))
 
+
     # These are the mesh constants that don't change with intersection points
     tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
     tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
@@ -260,18 +263,25 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     #This is for optimization purposes
     kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
-                                          radar_equation_constant, use_supersampling]).astype(_float))
+                                          radar_equation_constant]).astype(_float))
+
+    target_variance = 1e-4
+
+    # Random number generation
+    rng_states = create_xoroshiro128p_states([tri_idxes_gpu.shape[0]], seed=1)
 
     pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
     pd_i = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
 
     # Use defer_cleanup to make sure things run asynchronously
-    with cuda.defer_cleanup():
+    with (cuda.defer_cleanup()):
         for stream, tx, rx, az, el, pdr_tmp, pdi_tmp in zip(streams, tx_pos, rx_pos, pan, tilt, pd_r, pd_i):
             with cuda.pinned(tx, rx, az, el, pdr_tmp, pdi_tmp):
                 receive_xyz_gpu = cuda.to_device(rx, stream=stream)
                 transmit_xyz_gpu = cuda.to_device(tx, stream=stream)
-                triangle_ranges_gpu = cuda.device_array((npulses, ntris, 2), dtype=np.int16, stream=stream)
+                tri_ranges = np.zeros((ntris, 2)).astype(np.int32)
+                tri_ranges[:, 0] = 32768
+                triangle_ranges_gpu = cuda.to_device(tri_ranges, stream=stream)
                 az_gpu = cuda.to_device(az, stream=stream)
                 el_gpu = cuda.to_device(el, stream=stream)
                 pd_r_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
@@ -283,30 +293,34 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
 
                 triangle_ranges = triangle_ranges_gpu.copy_to_host(stream=stream)
                 max_extent = int(triangle_ranges[..., 1].max())
-                triangle_bin_surface_area_gpu = cuda.device_array((npulses, ntris, max_extent), dtype=_float, stream=stream)
-                calcTriangleBinSurfaceArea[blocks_strided, threads_strided, stream](transmit_xyz_gpu, tri_verts_gpu,
+                threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d((ntris, max_extent))
+                triangle_bin_surface_area_gpu = cuda.device_array((ntris, max_extent), dtype=_float, stream=stream)
+                triangle_sample_variance_gpu = cuda.device_array((ntris, max_extent), dtype=_float,
+                                                                  stream=stream)
+                calcTriangleSampleVariance[blocks_strided_sa, threads_strided_sa, stream](transmit_xyz_gpu, tri_verts_gpu,
                                                                                     tri_idxes_gpu, triangle_ranges_gpu,
-                                                                                    triangle_bin_surface_area_gpu, params_gpu)
+                                                                                    triangle_bin_surface_area_gpu,
+                                                                                    triangle_sample_variance_gpu,
+                                                                                    az_gpu, el_gpu, params_gpu, target_variance)
+                '''tri_var = triangle_sample_variance_gpu.copy_to_host(stream=stream)
                 tri_sa = triangle_bin_surface_area_gpu.copy_to_host(stream=stream)
-                check = tri_sa.max()
-                # Calculate out the attenuation from the beampattern
-                calcOriginDirAtt[blocks_strided, threads_strided, stream](transmit_xyz_gpu, sample_points_gpu, az_gpu, el_gpu,
-                                                           params_gpu, ray_dir_gpu, ray_origin_gpu, ray_power_gpu)
-                # Since we know the first ray can see the receiver, this is a special call to speed things up
-                calcBounceInit[blocks_strided, threads_strided, stream](ray_origin_gpu, ray_dir_gpu, ray_distance_gpu,
-                                                         ray_power_gpu, kd_tree_gpu, tri_box_gpu,
-                                                         tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
-                                                         tri_norm_gpu, tri_material_gpu, pd_r_gpu, pd_i_gpu,
-                                                         receive_xyz_gpu,
-                                                         az_gpu, el_gpu, params_gpu, conical_sampling_gpu)
-                if debug:
+                check = tri_sa.max()'''
+
+                threads_strided3, blocks_strided3 = optimizeStridedThreadBlocks2d((npulses, ntris, max_extent))
+                calcTriangleReturns[blocks_strided3, threads_strided3, stream](transmit_xyz_gpu, tri_verts_gpu,
+                                                                             tri_idxes_gpu, tri_norm_gpu,
+                                                                             tri_material_gpu, kd_tree_gpu, tri_box_gpu,
+                                                         tri_box_key_gpu, pd_r_gpu, pd_i_gpu, receive_xyz_gpu, az_gpu,
+                                                                             el_gpu, triangle_ranges_gpu, triangle_sample_variance_gpu, rng_states, params_gpu)
+
+                '''if debug:
                     debug_rays.append(ray_origin_gpu.copy_to_host(stream=stream))
                     debug_raydirs.append(ray_dir_gpu.copy_to_host(stream=stream))
-                    debug_raypower.append(ray_power_gpu.copy_to_host(stream=stream))
+                    debug_raypower.append(ray_power_gpu.copy_to_host(stream=stream))'''
                 # We need to copy to host this way so we don't accidentally sync the streams
                 pd_r_gpu.copy_to_host(pdr_tmp, stream=stream)
                 pd_i_gpu.copy_to_host(pdi_tmp, stream=stream)
-                del ray_power_gpu, ray_origin_gpu, ray_dir_gpu, ray_distance_gpu, az_gpu, el_gpu, receive_xyz_gpu, pd_r_gpu, pd_i_gpu, transmit_xyz_gpu
+                del triangle_ranges_gpu, triangle_bin_surface_area_gpu, triangle_sample_variance_gpu, az_gpu, el_gpu, receive_xyz_gpu, pd_r_gpu, pd_i_gpu, transmit_xyz_gpu
     # cuda.synchronize()
     del tri_material_gpu
     del tri_box_key_gpu
@@ -316,7 +330,8 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     del kd_tree_gpu
     del tri_norm_gpu
     del params_gpu
-    del sample_points_gpu
+    del rng_states
+    # del sample_points_gpu
 
     # Combine chunks in comprehension
     final_rp = [pr + 1j * pi for pr, pi in zip(pd_r, pd_i)]
@@ -554,20 +569,22 @@ def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_b
         box_idxes = ptidx_gpu.copy_to_host()
         tri_box_idxes = np.concatenate((tri_box_idxes, box_idxes), axis=1)
 
-        if np.median(box_idxes.sum(axis=0)) > min_tri_per_box or depth < max_depth:
-            depth += 1
-            ntree_bounds = np.zeros((2**depth, 2, 3))
-            for idx in range(level, next_level):
-                act_pts = vidx == idx
-                ntree_bounds[(idx - level) * 2], ntree_bounds[(idx - level) * 2 + 1], sp_pt, sp_axis = (
-                    surfaceAreaHeuristic(tri_area[act_pts], centroids[act_pts], tri_bounds[act_pts], tree_bounds[idx]))
-                lefties = np.logical_and(sp_pt < verts[:, sp_axis], vidx == idx)
-                righties = np.logical_and(sp_pt >= verts[:, sp_axis], vidx == idx)
-                vidx[lefties] = idx * 2 + 1
-                vidx[righties] = idx * 2 + 2
-            tree_bounds = np.concatenate((tree_bounds, ntree_bounds), axis=0)
-        else:
+        if (
+            np.median(box_idxes.sum(axis=0)) <= min_tri_per_box
+            or depth >= max_depth
+        ):
             break
+        depth += 1
+        ntree_bounds = np.zeros((2**depth, 2, 3))
+        for idx in range(level, next_level):
+            act_pts = vidx == idx
+            ntree_bounds[(idx - level) * 2], ntree_bounds[(idx - level) * 2 + 1], sp_pt, sp_axis = (
+                surfaceAreaHeuristic(tri_area[act_pts], centroids[act_pts], tri_bounds[act_pts], tree_bounds[idx]))
+            lefties = np.logical_and(sp_pt < verts[:, sp_axis], vidx == idx)
+            righties = np.logical_and(sp_pt >= verts[:, sp_axis], vidx == idx)
+            vidx[lefties] = idx * 2 + 1
+            vidx[righties] = idx * 2 + 2
+        tree_bounds = np.concatenate((tree_bounds, ntree_bounds), axis=0)
     return tree_bounds, tri_box_idxes[:, 1:]
 
 
