@@ -6,12 +6,7 @@ import numpy as np
 from .cuda_kernels import applyOneWayRadiationPattern
 
 c0 = 299792458.0
-
-class float3:
-    def __init__(self, x, y, z):
-        self.x = x
-        self.y = y
-        self.z = z
+MAX_REGISTERS = 128
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -295,8 +290,9 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
     int_rng = np.inf
     did_intersect = False
     inter = None
+    inter_tri = 0
     if not testIntersection(ro, rd, kd_tree[0]):
-        return False, None, None, None, None
+        return False, None, None, None, None, None
     idx = 2
     skip = False
 
@@ -341,6 +337,7 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                                     1. - roughness) * L ** 2)  # Final reflected power
                             inter = tinter + 0.
                             did_intersect = True
+                            inter_tri = int(ti)
             else:
                 # Move down into the box
                 idx = idx * 2 + 2
@@ -352,7 +349,7 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                 break
             idx -= 1
         skip = False
-    return did_intersect, nrho, inter, int_rng, b
+    return did_intersect, nrho, inter, int_rng, b, inter_tri
 
 
 @cuda.jit()
@@ -397,7 +394,7 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
 
 
 @cuda.jit()
-def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
+def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, ray_inter_tri, kd_tree,
                    leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
                    tilt, params, conical_sampling):
     t, r = cuda.grid(ndim=2)
@@ -406,7 +403,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
         rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
             rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
-            did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd,
+            did_intersect, nrho, inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd,
                                                                              kd_tree, ray_power[tt, ray_idx],
                                                                              leaf_list, leaf_key, tri_idx,
                                                                              tri_vert, tri_norm, tri_material, 0, params[0])
@@ -426,6 +423,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                     ray_dir[tt, ray_idx, 2] = b.z
                     ray_power[tt, ray_idx] = nrho
                     ray_distance[tt, ray_idx] = rng
+                    ray_inter_tri[tt, ray_idx] = inter_tri
                 # Apply supersampling if wanted
                 if params[6]:
                     for n in prange(conical_sampling.shape[0]):
@@ -434,7 +432,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                         else:
                             sc = normalize(make_float3(-2 * rd.y * rd.z, 2 * rd.x * rd.z, 0.))
                         rd = normalize(inter + rotate(rd, sc, conical_sampling[n, 0]) * conical_sampling[n, 1] - rec_xyz)
-                        did_intersect, nrho, cone_inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd, kd_tree,
+                        did_intersect, nrho, cone_inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd, kd_tree,
                                                                                          ray_power[tt, ray_idx],
                                                                                          leaf_list, leaf_key, tri_idx,
                                                                                          tri_vert, tri_norm,
@@ -513,6 +511,7 @@ def calcSceneOcclusion(ray_origin, ray_poss, boxminx, boxminy, boxminz, boxmaxx,
             if traverseOctreeForOcclusion(inter, normalize(make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]) - inter), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, leaf_list, leaf_key,
                                                                        tri_idx, tri_vert, tri_norm):
                 ray_poss[tt, ray_idx] = False
+
 
 
 @cuda.jit()

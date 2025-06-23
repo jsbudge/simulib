@@ -47,10 +47,10 @@ if __name__ == '__main__':
     plp = 0.
     fdelay = 10.
     upsample = 8
-    num_bounces = 2
+    num_bounces = 1
     max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**20
+    points_to_sample = 2**17
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -196,7 +196,10 @@ if __name__ == '__main__':
     else:
         # sample_points = [grid_pts]
         sample_points = [scene.sample(int(splits[s + 1] - splits[s]),
-                                      view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]))
+                                      view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), az=rp.pan(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]),
+                                      el=rp.tilt(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), fc=fc,
+                                                        fs=fs, near_range_s=near_range_s,
+                                                        radar_equation_constant=radar_coeff)
                          for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
