@@ -9,6 +9,7 @@ import numpy as np
 from .cuda_kernels import applyOneWayRadiationPattern
 
 c0 = 299792458.0
+MAX_REGISTERS = 128
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -497,7 +498,7 @@ def sampleBinArea(pcycle, p0, p1, p2, rand, idx):
             return (1 - r1) * t0 + r1 * (1 - r2) * t1 + r1 * r2 * t2
     return None
 
-@cuda.jit(max_registers=64)
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcTriangleRangeMinMax(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, params):
     t, r = cuda.grid(ndim=2)
     tt_stride, tri_stride = cuda.gridsize(2)
@@ -520,15 +521,12 @@ def calcTriangleRangeMinMax(transmit_xyz, tri_verts, tri_idxes, triangle_ranges,
                 triangle_ranges[tri_idx, 0] = 0
 
 
-@cuda.jit(max_registers=64)
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcTriangleReturns(transmit_xyz, tri_verts, tri_idxes, tri_norm, tri_material, kd_tree, leaf_list,
-                        leaf_key, pd_r, pd_i, receive_xyz, pan, tilt, triangle_ranges,
-                        triangle_var_samples, rands, params):
-    t, r, bi = cuda.grid(ndim=3)
-    tt_stride, tri_stride, bin_stride = cuda.gridsize(3)
+                        leaf_key, pd_r, pd_i, receive_xyz, pan, tilt, target_samples, rands, params):
+    t, r = cuda.grid(ndim=2)
+    tt_stride, tri_stride = cuda.gridsize(2)
     for tri_idx in prange(r, tri_idxes.shape[0], tri_stride):
-        if triangle_ranges[tri_idx, 0] == 0:
-            continue
         p0 = make_float3(tri_verts[tri_idxes[tri_idx, 0], 0], tri_verts[tri_idxes[tri_idx, 0], 1],
                          tri_verts[tri_idxes[tri_idx, 0], 2])
         p1 = make_float3(tri_verts[tri_idxes[tri_idx, 1], 0], tri_verts[tri_idxes[tri_idx, 1], 1],
@@ -538,34 +536,40 @@ def calcTriangleReturns(transmit_xyz, tri_verts, tri_idxes, tri_norm, tri_materi
         for tt in prange(t, transmit_xyz.shape[0], tt_stride):
             tx = make_float3(transmit_xyz[tt, 0], transmit_xyz[tt, 1], transmit_xyz[tt, 2])
             rx = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
-            for b in prange(bi, triangle_var_samples.shape[1], bin_stride):
-                if b < triangle_ranges[tri_idx, 1]:
-                    R = ((triangle_ranges[tri_idx, 0] + b) / params[2] + 2 * params[1]) * c0 * .5
-                    sa, pcycle = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
-                    sa = sa / (triangle_var_samples[tri_idx, b] + 1)
-                    for _ in range(int(triangle_var_samples[tri_idx, b]) + 1):
-                        inter = sampleBinArea(pcycle, p0, p1, p2, rands, tri_idx)
-                        rng = length(tx - inter)
-                        rd = (inter - tx) / rng
-                        nrho = (params[5] * applyOneWayRadiationPattern(pan[tt], tilt[tt], math.atan2(rd.x, rd.y),
-                                                                        -math.asin(rd.z), params[3], params[4]))
+            r_min = min(length(tx - p0), length(tx - p1), length(tx - p2))
+            r_max = max(length(tx - p0), length(tx - p1), length(tx - p2))
+            r_min = int(((2 * r_min) / c0 - 2 * params[1]) * params[2])
+            R = (r_min / params[2] + 2 * params[1]) * c0 * .5
+            # print(r_min, r_max, R)
+            while True:
+                sa, pcycle = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
+                sa = sa / target_samples
+                for _ in range(target_samples):
+                    inter = sampleBinArea(pcycle, p0, p1, p2, rands, tri_idx)
+                    rng = length(tx - inter)
+                    rd = (inter - tx) / rng
+                    nrho = (params[5] * applyOneWayRadiationPattern(pan[tt], tilt[tt], math.atan2(rd.x, rd.y),
+                                                                    -math.asin(rd.z), params[3], params[4]))
 
-                        did_intersect, nrho, inter, int_rng, b = traverseOctreeAndReflection(tx, rd, kd_tree, nrho,
-                                                                                             leaf_list, leaf_key, tri_idxes,
-                                                                                             tri_verts, tri_norm, tri_material,
-                                                                                             rng, params[0])
-                        if did_intersect:
-                            acc_real, acc_imag, but = calcReturnAndBin(inter, rx, rng, params[1], params[2], pd_r.shape[1],
-                                                                       pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
-                            if but >= 0:
-                                acc_real = acc_real * sa if abs(acc_real) < np.inf else 0.
-                                acc_imag = acc_imag * sa if abs(acc_imag) < np.inf else 0.
-                                cuda.atomic.add(pd_r, (tt, but), acc_real)
-                                cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                    did_intersect, nrho, inter, int_rng, b = traverseOctreeAndReflection(tx, rd, kd_tree, nrho,
+                                                                                         leaf_list, leaf_key, tri_idxes,
+                                                                                         tri_verts, tri_norm, tri_material,
+                                                                                         rng, params[0])
+                    if did_intersect:
+                        acc_real, acc_imag, but = calcReturnAndBin(inter, rx, rng, params[1], params[2], pd_r.shape[1],
+                                                                   pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
+                        if but >= 0:
+                            acc_real = acc_real * sa if abs(acc_real) < np.inf else 0.
+                            acc_imag = acc_imag * sa if abs(acc_imag) < np.inf else 0.
+                            cuda.atomic.add(pd_r, (tt, but), acc_real)
+                            cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                R += (1 / params[2]) * c0 * .5
+                if R > r_max:
+                    break
 
 
 
-@cuda.jit()
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, triangle_bin_surface_area, params):
     tri, rbin = cuda.grid(ndim=2)
     tri_stride, bin_stride = cuda.gridsize(2)
@@ -582,7 +586,8 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
         for b in prange(rbin, triangle_bin_surface_area.shape[1], bin_stride):
             if b < triangle_ranges[tri_idx, 1]:
                 R = ((triangle_ranges[tri_idx, 0] + b) / params[2] + 2 * params[1]) * c0 * .5
-                triangle_bin_surface_area[tri_idx, b], pcycle = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
+                sa, pcycle = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
+                triangle_bin_surface_area[tri_idx, b] = sa
 
 
 
@@ -590,7 +595,7 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
 def barycentricToRange(p0, p1, p2, l0, l1, l2, tx):
     return length(tx - (p0 * l0 + p1 * l1 + p2 * l2))
 
-@cuda.jit(max_registers=64)
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcTriangleSampleVariance(transmit_xyz, tri_verts, tri_idxes, triangle_ranges, triangle_bin_surface_area,
                                triangle_sample_variance, pan, tilt, params, target_variance):
     tri, rbin = cuda.grid(ndim=2)
