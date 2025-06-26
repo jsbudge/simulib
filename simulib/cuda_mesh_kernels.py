@@ -224,9 +224,10 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
     did_intersect = False
     inter = None
     if not testIntersection(ro, rd, kd_tree[0]):
-        return False, None, None
+        return False, None, None, None
     idx = 2
     skip = False
+    inter_tri = -1
 
     while 0 < idx < kd_tree.shape[0]:
         # idx, tmp_tmin, tmp_tmax = stack[-1]
@@ -253,6 +254,7 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
                             int_rng = tmp_rng + rng
                             inter = tinter + 0.
                             did_intersect = True
+                            inter_tri = ti
             else:
                 # Move down into the box
                 idx = idx * 2 + 2
@@ -264,7 +266,7 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
                 break
             idx -= 1
         skip = False
-    return did_intersect, inter, int_rng
+    return did_intersect, inter, int_rng, inter_tri
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -557,7 +559,7 @@ def calcIntersectionPoints(ray_origin, ray_dir, ray_power, boxminx, boxminy, box
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            did_intersect, inter, rng = (
+            did_intersect, inter, rng, _ = (
                 traverseOctreeAndIntersection(make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]),
                                               make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]),
                                               boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
@@ -604,7 +606,7 @@ def calcClosestIntersectionWithoutBounce(ray_origin, ray_intersect, ray_dir, ray
     for tt in prange(t, ray_dir.shape[0], tt_stride):
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
             rec_xyz = make_float3(ray_origin[tt, ray_idx, 0], ray_origin[tt, ray_idx, 1], ray_origin[tt, ray_idx, 2])
-            did_intersect, inter, _ = (
+            did_intersect, inter, _, _ = (
                 traverseOctreeAndIntersection(rec_xyz,
                                               make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), kd_tree,
                                               leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, 0))

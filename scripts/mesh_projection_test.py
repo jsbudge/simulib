@@ -50,7 +50,7 @@ if __name__ == '__main__':
     num_bounces = 1
     max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**17
+    points_to_sample = 2**20
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -93,7 +93,13 @@ if __name__ == '__main__':
     mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(Mesh(mesh, max_tris_per_split=max_tris_per_split, material_sigma=[.017 for n in mesh.triangle_material_ids]))
+    scene.add(
+        Mesh(
+            mesh,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[0.017 for _ in mesh.triangle_material_ids],
+        )
+    )
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -130,7 +136,7 @@ if __name__ == '__main__':
     m_sigma[12] = m_sigma[4] = .017  # windshield
     scene.add(Mesh(car, num_box_levels=4, material_emissivity=m_emissivity, material_sigma=m_sigma,
                    use_box_pts=True))'''
-    
+
     '''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     stretch = np.eye(4)
@@ -141,7 +147,7 @@ if __name__ == '__main__':
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     building = building.compute_triangle_normals()
     scene.add(Mesh(building, num_box_levels=3))'''
-    
+
     '''gpx, gpy, gpz = bg.getGrid(grid_origin, 1500, 1500, nrows=256, ncols=256)
     # Shift position
     gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)

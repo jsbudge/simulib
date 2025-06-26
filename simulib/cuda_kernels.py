@@ -525,16 +525,26 @@ def optimizeThreadBlocks2d(threads_per_block, threads):
 
 def optimizeStridedThreadBlocks2d(threads):
     gpuDevice = cuda.get_current_device()
-    maxThreads = int(gpuDevice.MAX_THREADS_PER_BLOCK**(1 / len(threads)) - 4)
+    maxThreads = int(gpuDevice.MAX_THREADS_PER_BLOCK**(1 / len(threads)))
+    # scaling = (th / np.sum(threads) for th in threads)
     threads_per_block = (maxThreads for _ in threads)
+    # Get the number of overhanging threads for each possible number of threads per block
     poss_configs = [np.array([th % n for n in range(2, tpb)]) for th, tpb in zip(threads, threads_per_block)]
+    # Get the configuration of threads per block that maximizes the overhang - this way we get more work per thread
     new_tpb = tuple(
-        (max(1, np.max(np.where(pc == pc.max())[0]) + 2) if np.all(pc > 0) else np.max(np.where(pc == 0)[0]) + 2) if th > 1 else 1
+        (max(1, np.max(np.where(pc == pc.max())[0]) + 2) if np.all(pc > 0) else np.max(np.where(pc == 0)[0]) + 2)
+        if th > 1 else 1
         for th, pc in zip(threads, poss_configs)
     )
 
-    n_proc_per_thread = (gpuDevice.MULTIPROCESSOR_COUNT if threads[0] > threads[1] else 1,
-                         gpuDevice.MULTIPROCESSOR_COUNT if threads[1] >= threads[0] else 1)
+    # n_proc_per_thread = (gpuDevice.MULTIPROCESSOR_COUNT if threads[0] > threads[1] else 1,
+    #                      gpuDevice.MULTIPROCESSOR_COUNT if threads[1] >= threads[0] else 1)
 
-    new_bpg = tuple(np.argsort([th / (tpb * n_proc * n) % 1 for n in range(1, int(th / (tpb * n_proc)))])[-1] * n_proc if th > (tpb * n_proc * 2) else int(th // tpb) for th, tpb, n_proc in zip(threads, new_tpb, n_proc_per_thread))
+    # Determine which dimension gets the most multiprocessors
+    n_proc_per_thread = (gpuDevice.MULTIPROCESSOR_COUNT if t == np.max(threads) else 1 for t in threads)
+
+    # Calc out blocks per grid for strided thread management
+    new_bpg = tuple(max(1, np.argsort([th / (tpb * n_proc * n) % 1 for n in range(1, int(th / (tpb * n_proc)))])[-1] * n_proc)
+                    if th > (tpb * n_proc * 2) else max(1, int(th // tpb))
+                    for th, tpb, n_proc in zip(threads, new_tpb, n_proc_per_thread))
     return new_tpb, new_bpg
