@@ -4,7 +4,7 @@ from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
     assignBoxPoints, calcClosestIntersection, calcReturnPower, \
     calcClosestIntersectionWithoutBounce, calcSceneOcclusion, calcTriangleRangeMinMax, calcTriangleBinSurfaceArea, \
-    calcTriangleSampleVariance, calcTriangleReturns
+    calcTriangleSampleVariance, calcTriangleReturnsFromVariance
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 from .simulation_functions import azelToVec, factors
 import numpy as np
@@ -265,13 +265,10 @@ def getRangeProfileFromMesh(mesh, tx_pos: list[np.ndarray], rx_pos: list[np.ndar
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
                                           radar_equation_constant]).astype(_float))
 
-    target_variance = 1e-2
-
-    # Random number generation
-    rng_states = create_xoroshiro128p_states([tri_idxes_gpu.shape[0]], seed=1)
-
     pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
     pd_i = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
+
+    rng_states = create_xoroshiro128p_states([tri_idxes_gpu.shape[0]], seed=np.random.randint(1, 10000))
 
     # Use defer_cleanup to make sure things run asynchronously
     with (cuda.defer_cleanup()):
@@ -279,54 +276,48 @@ def getRangeProfileFromMesh(mesh, tx_pos: list[np.ndarray], rx_pos: list[np.ndar
             with cuda.pinned(tx, rx, az, el, pdr_tmp, pdi_tmp):
                 receive_xyz_gpu = cuda.to_device(rx, stream=stream)
                 transmit_xyz_gpu = cuda.to_device(tx, stream=stream)
-                '''tri_ranges = np.zeros((ntris, 2)).astype(np.int32)
-                tri_ranges[:, 0] = 32768
-                triangle_ranges_gpu = cuda.to_device(tri_ranges, stream=stream)'''
                 az_gpu = cuda.to_device(az, stream=stream)
                 el_gpu = cuda.to_device(el, stream=stream)
                 pd_r_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
                 pd_i_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
 
+                tri_ranges = np.zeros((ntris, 2)).astype(np.int32)
+                tri_ranges[:, 0] = 32768
+                triangle_ranges_gpu = cuda.to_device(tri_ranges)
+                threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, ntris))
+
                 # Calculate range bin min/max per pulse per triangle
-                '''calcTriangleRangeMinMax[blocks_strided, threads_strided, stream](transmit_xyz_gpu, tri_verts_gpu,
-                                                                                 tri_idxes_gpu, triangle_ranges_gpu, params_gpu)'''
+                calcTriangleRangeMinMax[blocks_strided, threads_strided](transmit_xyz_gpu, tri_verts_gpu,
+                                                                         tri_idxes_gpu, triangle_ranges_gpu, params_gpu)
 
-                # triangle_ranges = triangle_ranges_gpu.copy_to_host(stream=stream)
-                # max_extent = int(triangle_ranges[..., 1].max())
-                # threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d((ntris, max_extent))
-                '''triangle_bin_surface_area_gpu = cuda.device_array((ntris, max_extent), dtype=_float, stream=stream)
-                triangle_sample_variance_gpu = cuda.device_array((ntris, max_extent), dtype=_float,
-                                                                  stream=stream)
-                calcTriangleBinSurfaceArea[blocks_strided_sa, threads_strided_sa, stream](transmit_xyz_gpu,
-                                                                                          tri_verts_gpu,
-                                                                                          tri_idxes_gpu,
-                                                                                          triangle_ranges_gpu,
-                                                                                          triangle_bin_surface_area_gpu, 
-                                                                                          params_gpu)
-                calcTriangleSampleVariance[blocks_strided_sa, threads_strided_sa, stream](transmit_xyz_gpu, tri_verts_gpu,
-                                                                                    tri_idxes_gpu, triangle_ranges_gpu,
-                                                                                    triangle_bin_surface_area_gpu,
-                                                                                    triangle_sample_variance_gpu,
-                                                                                    az_gpu, el_gpu, params_gpu, target_variance)'''
-                '''tri_var = triangle_sample_variance_gpu.copy_to_host(stream=stream)
-                tri_sa = triangle_bin_surface_area_gpu.copy_to_host(stream=stream)
-                check = tri_sa.max()'''
+                triangle_ranges = triangle_ranges_gpu.copy_to_host()
+                max_extent = int(triangle_ranges[..., 1].max())
+                threads_strided3, blocks_strided3 = optimizeStridedThreadBlocks2d((npulses, ntris, max_extent))
+                # triangle_bin_surface_area_gpu = cuda.device_array((ntris, max_extent), dtype=_float)
+                triangle_sample_variance_gpu = cuda.device_array((ntris, max_extent), dtype=_float)
 
-                # threads_strided3, blocks_strided3 = optimizeStridedThreadBlocks2d((npulses, ntris, max_extent))
-                calcTriangleReturns[blocks_strided, threads_strided, stream](transmit_xyz_gpu, tri_verts_gpu,
-                                                                             tri_idxes_gpu, tri_norm_gpu,
-                                                                             tri_material_gpu, kd_tree_gpu, tri_box_gpu,
-                                                         tri_box_key_gpu, pd_r_gpu, pd_i_gpu, receive_xyz_gpu, az_gpu,
-                                                                             el_gpu, 1, rng_states, params_gpu)
+                calcTriangleReturnsFromVariance[blocks_strided3, threads_strided3](transmit_xyz_gpu, az_gpu, el_gpu,
+                                                                                       tri_verts_gpu,
+                                                                                       tri_idxes_gpu, tri_norm_gpu,
+                                                                                       tri_material_gpu,
+                                                                                       kd_tree_gpu, tri_box_key_gpu,
+                                                                                       tri_box_gpu,
+                                                                                       triangle_ranges_gpu,
+                                                                                       pd_r_gpu,
+                                                                                       pd_i_gpu,
+                                                                                       triangle_sample_variance_gpu,
+                                                                                       rng_states,
+                                                                                       params_gpu)
 
                 '''if debug:
                     debug_rays.append(ray_origin_gpu.copy_to_host(stream=stream))
                     debug_raydirs.append(ray_dir_gpu.copy_to_host(stream=stream))
                     debug_raypower.append(ray_power_gpu.copy_to_host(stream=stream))'''
                 # We need to copy to host this way so we don't accidentally sync the streams
+                test = triangle_sample_variance_gpu.copy_to_host()
                 pd_r_gpu.copy_to_host(pdr_tmp, stream=stream)
                 pd_i_gpu.copy_to_host(pdi_tmp, stream=stream)
-                del az_gpu, el_gpu, receive_xyz_gpu, pd_r_gpu, pd_i_gpu, transmit_xyz_gpu
+                del az_gpu, el_gpu, receive_xyz_gpu, pd_r_gpu, pd_i_gpu, transmit_xyz_gpu, triangle_sample_variance_gpu, triangle_ranges_gpu
     # cuda.synchronize()
     del tri_material_gpu
     del tri_box_key_gpu

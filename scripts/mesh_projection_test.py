@@ -43,7 +43,7 @@ if __name__ == '__main__':
     rec_gain = 100  # dB
     ant_transmit_power = 100  # watts
     noise_power_db = -120
-    npulses = 64
+    npulses = 32
     plp = 0.
     fdelay = 10.
     upsample = 8
@@ -86,7 +86,7 @@ if __name__ == '__main__':
     scene = Scene()
     # mesh_ids = []
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
@@ -95,7 +95,7 @@ if __name__ == '__main__':
             max_tris_per_split=max_tris_per_split,
             material_sigma=[0.017 for _ in mesh.triangle_material_ids],
         )
-    )'''
+    )
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -143,7 +143,7 @@ if __name__ == '__main__':
     building = building.compute_triangle_normals()
     scene.add(Mesh(building, num_box_levels=3))'''
 
-    gpx, gpy, gpz = bg.getGrid(grid_origin, 100, 100, nrows=128, ncols=128)
+    '''gpx, gpy, gpz = bg.getGrid(grid_origin, 100, 100, nrows=128, ncols=128)
     # Shift position
     gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
     gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, rp.origin)
@@ -170,7 +170,7 @@ if __name__ == '__main__':
     ground.compute_triangle_normals()
     ground.normalize_normals()
     ground.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(ground.triangles)).astype(np.int32))
-    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], max_tris_per_split=64))
+    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], max_tris_per_split=64))'''
 
     print('Done.')
 
