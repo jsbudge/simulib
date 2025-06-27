@@ -1,6 +1,6 @@
 import cmath
 import math
-from .cuda_functions import make_float3, cross, dot, length, normalize, make_uint3, rotate
+from .cuda_functions import make_float3, cross, dot, length, normalize, make_uint3, rotate, azelToVec
 from numba import cuda, prange
 import numpy as np
 from .cuda_kernels import applyOneWayRadiationPattern, getRangeAndAngles
@@ -335,36 +335,63 @@ def calcTriangleReturnsFromVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxe
 
 
 @cuda.jit(max_registers=MAX_REGISTERS)
-def calcTriangleSamples(transmit_xyz, tri_verts, tri_idxes, tri_norm, kd_tree, leaf_key, leaf_list, triangle_ranges,
-                        target_samples, ray_points, rands, params):
-    tri, rbin = cuda.grid(ndim=2)
-    tri_stride, bin_stride = cuda.gridsize(2)
+def calcViewVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxes, tri_norm, tri_material, kd_tree, leaf_key, leaf_list,
+                    pixel_bins, rands, params):
+    a, e = cuda.grid(ndim=2)
+    a_stride, e_stride = cuda.gridsize(2)
     tx = make_float3(transmit_xyz[0], transmit_xyz[1], transmit_xyz[2])
-    for tri_idx in prange(tri, tri_idxes.shape[0], tri_stride):
-        if triangle_ranges[tri_idx, 0] == 0:
-            continue
-        p0 = make_float3(tri_verts[tri_idxes[tri_idx, 0], 0], tri_verts[tri_idxes[tri_idx, 0], 1],
-                         tri_verts[tri_idxes[tri_idx, 0], 2])
-        p1 = make_float3(tri_verts[tri_idxes[tri_idx, 1], 0], tri_verts[tri_idxes[tri_idx, 1], 1],
-                         tri_verts[tri_idxes[tri_idx, 1], 2])
-        p2 = make_float3(tri_verts[tri_idxes[tri_idx, 2], 0], tri_verts[tri_idxes[tri_idx, 2], 1],
-                         tri_verts[tri_idxes[tri_idx, 2], 2])
-        for b in prange(rbin, target_samples.shape[1], bin_stride):
-                if target_samples[tri_idx, b, 0] > 0:
-                    R = ((triangle_ranges[tri_idx, 0] + b) / params[2] + 2 * params[1]) * c0 * .5
-                    sa, pcycle = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
-                    for n in prange(target_samples[tri_idx, b, 0]):
-                        sample_pt = sampleBinArea(pcycle, p0, p1, p2, rands, tri_idx)
-                        ray_dir = sample_pt - tx
-                        ray_dir = ray_dir / length(ray_dir)
-                        did_intersect, inter, _, inter_tri = traverseOctreeAndIntersection(tx, ray_dir, kd_tree, leaf_list,
-                                                                                leaf_key, tri_idxes, tri_verts, tri_norm,
-                                                                                0)
-                        if did_intersect and length(sample_pt - inter) < .1:
-                            ray_points[target_samples[tri_idx, b, 1] + n, 0] = sample_pt.x
-                            ray_points[target_samples[tri_idx, b, 1] + n, 1] = sample_pt.y
-                            ray_points[target_samples[tri_idx, b, 1] + n, 2] = sample_pt.z
-                            ray_points[target_samples[tri_idx, b, 1] + n, 3] = inter_tri
+    for az_idx in prange(a, pixel_bins.shape[0], a_stride):
+        for el_idx in prange(e, pixel_bins.shape[1], e_stride):
+            mu = 0j
+            m2 = 0j
+            for n in range(10):
+                az = (az_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[3] / pixel_bins.shape[0] + pan - params[3]
+                el = (el_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[4] / pixel_bins.shape[1] + tilt - params[4]
+                ray_dir = azelToVec(az, el)
+                did_intersect, nrho, inter, _, _, _ = traverseOctreeAndReflection(tx, ray_dir, kd_tree, params[5],
+                                                                                          leaf_list,
+                                                                                          leaf_key, tri_idxes, tri_verts,
+                                                                                          tri_norm,
+                                                                                          tri_material, 0, params[0])
+                # print(az, el)
+                if did_intersect:
+                    r, r_rng, r_az, r_el = getRangeAndAngles(inter, tx)
+                    acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, params[3], params[4]) /
+                               (r_rng * r_rng) * nrho * cmath.exp(-1j * params[5] * (2 * r_rng)))
+                    delta = acc_val - mu
+                    mu += delta / (n + 1)
+                    m2 += delta * (acc_val - mu)
+                    # print('intersect')
+                else:
+                    # print('non-intersect')
+                    delta = -mu
+                    mu += delta / (n + 1)
+                    m2 += delta * -mu
+            pixel_bins[az_idx, el_idx] = math.sqrt(m2.real ** 2 + m2.imag ** 2) / (n - 1.)
+
+
+@cuda.jit(max_registers=MAX_REGISTERS)
+def calcViewSamples(transmit_xyz, pan, tilt, tri_verts, tri_idxes, tri_norm, kd_tree, leaf_key, leaf_list,
+                    target_samples, ray_points, rands, params):
+    a, e = cuda.grid(ndim=2)
+    a_stride, e_stride = cuda.gridsize(2)
+    tx = make_float3(transmit_xyz[0], transmit_xyz[1], transmit_xyz[2])
+    for az_idx in prange(a, target_samples.shape[0], a_stride):
+        for el_idx in prange(e, target_samples.shape[1], e_stride):
+            if target_samples[az_idx, el_idx, 0] > 0:
+                for n in prange(target_samples[az_idx, el_idx, 0]):
+                    az = (az_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[3] / target_samples.shape[
+                        0] + pan - params[3]
+                    el = (el_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[4] / target_samples.shape[
+                        1] + tilt - params[4]
+                    rd = azelToVec(az, el)
+                    did_intersect, inter, rng, _ = traverseOctreeAndIntersection(tx, rd, kd_tree, leaf_list, leaf_key,
+                                                                                 tri_idxes, tri_verts, tri_norm, 0)
+                    if did_intersect:
+                        ray_points[target_samples[az_idx, el_idx, 1] + n, 0] = inter.x
+                        ray_points[target_samples[az_idx, el_idx, 1] + n, 1] = inter.y
+                        ray_points[target_samples[az_idx, el_idx, 1] + n, 2] = inter.z
+
 
 
 @cuda.jit(max_registers=MAX_REGISTERS)

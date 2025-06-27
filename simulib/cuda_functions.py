@@ -321,6 +321,11 @@ def rotate(u, v, theta):
     )
 
 
+@cuda.jit(device=True, fastmath=True)
+def azelToVec(az, el):
+    return make_float3(math.sin(az) * math.cos(el), math.cos(az) * math.cos(el), -math.sin(el))
+
+
 def cross(a, b):
     pass
 

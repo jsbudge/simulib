@@ -5,7 +5,7 @@ from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt,
     assignBoxPoints, calcClosestIntersection, calcReturnPower, \
     calcClosestIntersectionWithoutBounce, calcSceneOcclusion
 from .cuda_triangle_kernels import calcTriangleRangeMinMax, calcTriangleBinSurfaceArea, calcTriangleSampleVariance, \
-    calcFullTriangleSamples, calcTriangleReturnsFromVariance
+    calcFullTriangleSamples, calcTriangleReturnsFromVariance, calcViewSamples, calcViewVariance
 from .simulation_functions import azelToVec, factors
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 import numpy as np
@@ -412,7 +412,6 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, az, el, bw_az, 
     total_points = npoints + 0
 
     for mesh in scene.meshes:
-        ntris = mesh.tri_idx.shape[0]
         tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
         tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
         tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
@@ -426,76 +425,39 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, az, el, bw_az, 
                                               radar_equation_constant]).astype(_float))
 
         # receive_xyz_gpu = cuda.to_device(a_obs_pt, stream=stream)
-        points = np.zeros((1, 4))
-        seed = 0
-        data_prob = np.zeros(mesh.tri_idx.shape[0])
+        points = np.zeros((1, 3))
         for t in range(a_obs_pt.shape[0]):
             transmit_xyz_gpu = cuda.to_device(a_obs_pt[t])
-            tri_ranges = np.zeros((ntris, 2)).astype(np.int32)
-            tri_ranges[:, 0] = 32768
-            triangle_ranges_gpu = cuda.to_device(tri_ranges)
-            # az_gpu = cuda.to_device(az)
-            # el_gpu = cuda.to_device(el)
-            # pd_r_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
-            # pd_i_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
-            threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, ntris))
+            center_pt_vec = mesh.center - a_obs_pt[t]
+            az = np.arctan2(center_pt_vec[0], center_pt_vec[1])
+            el = -np.arcsin(center_pt_vec[2] / np.linalg.norm(center_pt_vec))
+            pixel_bins_gpu = cuda.device_array((512, 512), dtype=_float)
+            rng_states = create_xoroshiro128p_states([pixel_bins_gpu.shape[0]], seed=np.random.randint(1, 10000))
 
-            # Calculate range bin min/max per pulse per triangle
-            # np.linalg.norm(mesh.vertices[mesh.tri_idx] - a_obs_pt[t], axis=2)
-            calcTriangleRangeMinMax[blocks_strided, threads_strided](transmit_xyz_gpu, tri_verts_gpu,
-                                                                             tri_idxes_gpu, triangle_ranges_gpu, params_gpu)
+            threads_strided, blocks_strided = optimizeStridedThreadBlocks2d(pixel_bins_gpu.shape)
 
-            triangle_ranges = triangle_ranges_gpu.copy_to_host()
-            max_extent = int(triangle_ranges[..., 1].max())
-            threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d((ntris, max_extent))
-            triangle_bin_surface_area_gpu = cuda.device_array((ntris, max_extent), dtype=_float)
-            triangle_sample_variance_gpu = cuda.device_array((ntris, max_extent), dtype=_float)
-            triangle_return_r_gpu = cuda.to_device(np.zeros(20688).astype(_float))
-            triangle_return_i_gpu = cuda.to_device(np.zeros(20688).astype(_float))
-            rng_states = create_xoroshiro128p_states([tri_idxes_gpu.shape[0]], seed=np.random.randint(1, 10000))
-            calcTriangleReturnsFromVariance[blocks_strided_sa, threads_strided_sa](transmit_xyz_gpu, az[t], el[t],
-                                                                              tri_verts_gpu,
-                                                                              tri_idxes_gpu, tri_norm_gpu,
-                                                                              tri_material_gpu,
-                                                                              kd_tree_gpu, leaf_key_gpu, leaf_list_gpu,
-                                                                              triangle_ranges_gpu,
-                                                                              triangle_return_r_gpu, triangle_return_i_gpu,
-                                                                              triangle_sample_variance_gpu, rng_states,
-                                                                              params_gpu)
-            calcTriangleSampleVariance[blocks_strided_sa, threads_strided_sa](transmit_xyz_gpu, az[t], el[t], tri_verts_gpu,
-                                                                                tri_idxes_gpu, tri_norm_gpu, tri_material_gpu,
-                                                                              kd_tree_gpu, leaf_key_gpu, leaf_list_gpu, triangle_ranges_gpu,
-                                                                                triangle_bin_surface_area_gpu,
-                                                                                triangle_sample_variance_gpu, rng_states, params_gpu)
-            tri_var = triangle_sample_variance_gpu.copy_to_host()
-            # tri_sa = triangle_bin_surface_area_gpu.copy_to_host()
-            # Get number of points for each triangle, partitioned by desired number of points
-            # test = tri_var.ravel() / np.sum(tri_var)
-            data_prob += np.sum(tri_var, axis=1) / np.sum(tri_var)
-        data_prob = data_prob**(1/6)
-        data_prob = data_prob / np.sum(data_prob)
-        cap = np.ceil(data_prob * npoints)
+            calcViewVariance[blocks_strided, threads_strided](transmit_xyz_gpu, az, el, tri_verts_gpu, tri_idxes_gpu,
+                                                             tri_norm_gpu, tri_material_gpu, kd_tree_gpu, leaf_key_gpu, leaf_list_gpu,
+                                                             pixel_bins_gpu, rng_states, params_gpu)
 
-        points = np.zeros((1, 4))
-        while npoints > 0:
-            seed += 1
-            fntest = np.zeros((*data_prob.shape, 2))
-            fntest[..., 0] = np.concatenate((np.histogram(np.random.choice(len(data_prob), npoints, p=data_prob), np.arange(len(data_prob)))[0], [0]))
+            pixel_bins = pixel_bins_gpu.copy_to_host()
+
+            test = (pixel_bins / np.sum(pixel_bins)).ravel()
+            fntest = np.zeros((*test.shape, 2))
+            fntest[..., 0] = np.concatenate(
+                (np.histogram(np.random.choice(len(test), npoints, p=test), np.arange(len(test)))[0],
+                 [0]))
             fntest[..., 1] = np.cumsum(fntest[..., 0]) * (fntest[..., 0] > 0)
+            fntest = fntest.reshape((*pixel_bins.shape, 2))
             target_samples_gpu = cuda.to_device(fntest.astype(np.int32))
-            ray_points_gpu = cuda.device_array((npoints, 4), dtype=_float)
-            # Random number generation
-            rng_states = create_xoroshiro128p_states([tri_idxes_gpu.shape[0]], seed=np.random.randint(1, 10000))
+            ray_points_gpu = cuda.device_array((npoints, 3), dtype=_float)
 
-            # Get randomly sampled points along each range bin for each triangle to use in ray tracing
-            calcFullTriangleSamples[blocks_strided_sa, threads_strided_sa](tri_verts_gpu, tri_idxes_gpu, triangle_ranges_gpu, target_samples_gpu, ray_points_gpu, rng_states)
-
+            calcViewSamples[blocks_strided, threads_strided](transmit_xyz_gpu, az, el, tri_verts_gpu, tri_idxes_gpu,
+                                                              tri_norm_gpu, kd_tree_gpu, leaf_key_gpu,
+                                                              leaf_list_gpu,
+                                                              target_samples_gpu, ray_points_gpu, rng_states, params_gpu)
             npts = ray_points_gpu.copy_to_host()
             npts = npts[np.sum(npts, axis=1) != 0]
-            check = cap - np.histogram(npts[:, 3], bins=np.arange(fntest.shape[0] + 1))[0]
-            data_prob[check <= 0] = 0
-            data_prob = data_prob / np.sum(data_prob)
-            npoints -= npts.shape[0]
 
             points = np.concatenate((points, npts))
     return points[1:total_points + 1]
