@@ -552,7 +552,7 @@ def calcTriangleReturnsFromVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxe
                     n = 0
                     error_est = np.inf
 
-                    while n < 100 and (error_est > 1e-5 or n < 3):
+                    while n < 10 and (error_est > 1e-5 or n < 3):
                         sample_pt, sample_tri_idx = sampleBinArea(pcycle, p0, p1, p2, rands, tri_idx)
                         ray_dir = sample_pt - tx
                         ray_dir = ray_dir / length(ray_dir)
@@ -576,7 +576,7 @@ def calcTriangleReturnsFromVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxe
                             pcycle[sample_tri_idx - 1, 3] = pcycle[sample_tri_idx, 3]
                             pcycle[sample_tri_idx, 3] = 0
                         n += 1
-                        error_est = sa * math.sqrt(math.sqrt(m2.real**2 + m2.imag**2) / (n - 1.)) / math.sqrt(n)
+                        error_est = sa * math.sqrt(m2.imag**2 / (n - 1.)) / math.sqrt(n)
 
                     # print(b, mu.real, mu.imag)
                     triangle_sample_variance[tri_idx, b] = error_est

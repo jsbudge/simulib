@@ -49,7 +49,7 @@ if __name__ == '__main__':
     upsample = 8
     num_bounces = 1
     max_tris_per_split = 64
-    nstreams = 1
+    nstreams = 2
     # grid_origin = (40.139343, -111.663541, 1360.10812)
     fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
     # fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
