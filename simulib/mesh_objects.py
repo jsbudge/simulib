@@ -105,7 +105,7 @@ class Scene(object):
     def __str__(self):
         return f'Scene with {len(self.meshes)} meshes.'
     
-    def sample(self, sample_points: int, view_pos: np.ndarray, az: np.ndarray = None, el: np.ndarray = None, fc: float = None, fs: float = None,
+    def sample(self, sample_points: int, view_pos: np.ndarray, fc: float = None, fs: float = None,
                near_range_s: float = None, radar_equation_constant: float = None, bw_az: float = None,
                bw_el: float = None):
         if bw_az is None:
@@ -121,7 +121,7 @@ class Scene(object):
             view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
             bw_az = max(bw_az, abs(pointing_az[:, None] - view_az).max())
             bw_el = max(bw_el, abs(pointing_el[:, None] - view_el).max())
-        return detectPointsScene(self, sample_points, view_pos, az, el, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)
+        return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)
 
     @cached_property
     def bounding_box(self):

@@ -354,9 +354,9 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
     return did_intersect, nrho, inter, int_rng, b, inter_tri
 
 
-@cuda.jit()
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
-                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
+                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, counts, receive_xyz, pan,
                    tilt, params):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
@@ -365,11 +365,10 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
             # Load in all the parameters that don't change
             rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
             rng = ray_distance[tt, ray_idx]
-            did_intersect, nrho, inter, int_rng, b = traverseOctreeAndReflection(
+            did_intersect, nrho, inter, int_rng, b, _ = traverseOctreeAndReflection(
                 make_float3(ray_origin[tt, ray_idx, 0], ray_origin[tt, ray_idx, 1], ray_origin[tt, ray_idx, 2]),
                 make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), kd_tree,
-                ray_power[tt, ray_idx], leaf_list, leaf_key, tri_idx, tri_vert,
-                                                                                   tri_norm, tri_material, rng, params[0])
+                ray_power[tt, ray_idx], leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, tri_material, rng, params[0])
             if did_intersect:
                 rng += int_rng
                 # Check for occlusion against the receiver
@@ -382,6 +381,7 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                         acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                         cuda.atomic.add(pd_r, (tt, but), acc_real)
                         cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                        cuda.atomic.add(counts, (tt, but), 1)
 
                 ray_origin[tt, ray_idx, 0] = inter.x
                 ray_origin[tt, ray_idx, 1] = inter.y
@@ -395,9 +395,9 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                 ray_power[tt, ray_idx] = 0.
 
 
-@cuda.jit()
-def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, ray_inter_tri, kd_tree,
-                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan,
+@cuda.jit(max_registers=MAX_REGISTERS)
+def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
+                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, counts, receive_xyz, pan,
                    tilt, params, conical_sampling):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
@@ -425,7 +425,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, ray_inter_tri, 
                     ray_dir[tt, ray_idx, 2] = b.z
                     ray_power[tt, ray_idx] = nrho
                     ray_distance[tt, ray_idx] = rng
-                    ray_inter_tri[tt, ray_idx] = inter_tri
+                    cuda.atomic.add(counts, (tt, but), 1)
                 # Apply supersampling if wanted
                 if params[6]:
                     for n in prange(conical_sampling.shape[0]):
@@ -449,6 +449,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, ray_inter_tri, 
                                 acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                                 cuda.atomic.add(pd_r, (tt, but), acc_real)
                                 cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                                cuda.atomic.add(counts, (tt, but), 1)
             else:
                 ray_power[tt, ray_idx] = 0.
 

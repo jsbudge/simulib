@@ -224,10 +224,37 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
                 triangle_bin_surface_area[tri_idx, b] = sa
 
 
+@cuda.jit(max_registers=MAX_REGISTERS)
+def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, tri_idxes, sa_bins, params):
+    tri, pulse = cuda.grid(ndim=2)
+    tri_stride, pulse_stride = cuda.gridsize(2)
+
+    for tri_idx in prange(tri, tri_idxes.shape[0], tri_stride):
+        p0 = make_float3(tri_verts[tri_idxes[tri_idx, 0], 0], tri_verts[tri_idxes[tri_idx, 0], 1],
+                         tri_verts[tri_idxes[tri_idx, 0], 2])
+        p1 = make_float3(tri_verts[tri_idxes[tri_idx, 1], 0], tri_verts[tri_idxes[tri_idx, 1], 1],
+                         tri_verts[tri_idxes[tri_idx, 1], 2])
+        p2 = make_float3(tri_verts[tri_idxes[tri_idx, 2], 0], tri_verts[tri_idxes[tri_idx, 2], 1],
+                         tri_verts[tri_idxes[tri_idx, 2], 2])
+        for t in prange(pulse, transmit_xyz.shape[0], pulse_stride):
+            tx = make_float3(transmit_xyz[t, 0], transmit_xyz[t, 1], transmit_xyz[t, 2])
+            rmin = min(length(tx - p2), length(tx - p0), length(tx - p1))
+            rmax = max(length(tx - p2), length(tx - p0), length(tx - p1))
+            if rmin > params[1] * c0:
+                first_bin = int(math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2]))
+                nbins = int(math.ceil(((2 * rmax) / c0 - 2 * params[1]) * params[2]) -
+                                                  math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2]))
+            for b in prange(first_bin, first_bin + nbins, 1):
+                R = (b / params[2] + 2 * params[1]) * c0 * .5
+                sa, _ = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
+                cuda.atomic.add(sa_bins, (t, b), sa)
+
+
 
 @cuda.jit(max_registers=MAX_REGISTERS)
-def calcTriangleSampleVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxes, tri_norm, tri_material, kd_tree, leaf_key, leaf_list, triangle_ranges, triangle_bin_surface_area,
-                               triangle_sample_variance, rands, params):
+def calcTriangleSampleVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxes, tri_norm, tri_material, kd_tree, leaf_key,
+                               leaf_list, triangle_ranges, triangle_bin_surface_area, triangle_sample_variance, rands,
+                               params):
     tri, rbin = cuda.grid(ndim=2)
     tri_stride, bin_stride = cuda.gridsize(2)
     tx = make_float3(transmit_xyz[0], transmit_xyz[1], transmit_xyz[2])

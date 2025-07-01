@@ -48,7 +48,7 @@ if __name__ == '__main__':
     fdelay = 10.
     upsample = 8
     num_bounces = 1
-    max_tris_per_split = 64
+    max_tris_per_split = 200
     nstreams = 1
     points_to_sample = 2**16
     num_mesh_triangles = 1000000
@@ -90,7 +90,7 @@ if __name__ == '__main__':
     scene = Scene()
     # mesh_ids = []
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
@@ -99,7 +99,7 @@ if __name__ == '__main__':
             max_tris_per_split=max_tris_per_split,
             material_sigma=[0.017 for _ in mesh.triangle_material_ids],
         )
-    )
+    )'''
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -113,11 +113,12 @@ if __name__ == '__main__':
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(Mesh(mesh, num_box_levels=nbox_levels))'''
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=30000000)
+    mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=300000)
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(Mesh(mesh, num_box_levels=nbox_levels))
-    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
+    scene.add(Mesh(mesh, max_tris_per_split=max_tris_per_split,
+            material_sigma=[0.017 for _ in mesh.triangle_material_ids]))
+    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)
 
 
     '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
@@ -202,10 +203,8 @@ if __name__ == '__main__':
     else:
         # sample_points = [grid_pts]
         sample_points = [scene.sample(int(splits[s + 1] - splits[s]),
-                                      view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), az=rp.pan(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]),
-                                      el=rp.tilt(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), fc=fc,
-                                                        fs=fs, near_range_s=near_range_s,
-                                                        radar_equation_constant=radar_coeff)
+                                    view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), fc=fc,
+                                    fs=fs, near_range_s=near_range_s,  radar_equation_constant=radar_coeff)
                          for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
@@ -300,13 +299,13 @@ if __name__ == '__main__':
     scaled_rp = (ray_powers[0] - sc_min) * sc
 
 
-    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals, title='Full Mesh', zrange=flight_path[:, 2].mean() + 10)
+    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title='Full Mesh', zrange=flight_path[:, 2].mean() + 10)
     fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
     fig.show()
 
     bounce_colors = ['blue', 'red', 'green', 'yellow']
     for bounce in range(len(ray_origins)):
-        fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals, title=f'Bounce {bounce}')
+        fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title=f'Bounce {bounce}')
         for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
             valids = nrp[0] > 0.
             sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
@@ -316,7 +315,7 @@ if __name__ == '__main__':
 
         fig.show()
 
-    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals, title='Ray trace')
+    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title='Ray trace')
     init_pos = np.repeat(rp.txpos(data_t[0]).reshape((1, -1)), ro.shape[1], 0)
     valids = np.sum([nrp[0] > 0.0 for nrp in ray_powers], axis=0) == len(ray_powers)
     ln = np.stack([init_pos[valids]] + [ro[0, valids] for ro in ray_origins]).swapaxes(0, 1)[::1000, :, :]
