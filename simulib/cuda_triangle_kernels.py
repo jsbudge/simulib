@@ -224,7 +224,7 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
                 triangle_bin_surface_area[tri_idx, b] = sa
 
 
-@cuda.jit(max_registers=MAX_REGISTERS)
+@cuda.jit(max_registers=64)
 def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, tri_idxes, sa_bins, params):
     tri, pulse = cuda.grid(ndim=2)
     tri_stride, pulse_stride = cuda.gridsize(2)
@@ -363,38 +363,48 @@ def calcTriangleReturnsFromVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxe
 
 @cuda.jit(max_registers=MAX_REGISTERS)
 def calcViewVariance(transmit_xyz, pan, tilt, tri_verts, tri_idxes, tri_norm, tri_material, kd_tree, leaf_key, leaf_list,
-                    pixel_bins, rands, params):
+                     pixel_mu_r, pixel_mu_i, pixel_m2_r, pixel_m2_i, pixel_count, rands, params):
     a, e = cuda.grid(ndim=2)
     a_stride, e_stride = cuda.gridsize(2)
     tx = make_float3(transmit_xyz[0], transmit_xyz[1], transmit_xyz[2])
-    for az_idx in prange(a, pixel_bins.shape[0], a_stride):
-        for el_idx in prange(e, pixel_bins.shape[1], e_stride):
-            mu = 0j
-            m2 = 0j
-            for n in range(10):
-                az = (az_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[3] / pixel_bins.shape[0] + pan - params[3]
-                el = (el_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[4] / pixel_bins.shape[1] + tilt - params[4]
-                ray_dir = azelToVec(az, el)
-                did_intersect, nrho, inter, _, _, _ = traverseOctreeAndReflection(tx, ray_dir, kd_tree, params[5],
-                                                                                          leaf_list,
-                                                                                          leaf_key, tri_idxes, tri_verts,
-                                                                                          tri_norm,
-                                                                                          tri_material, 0, params[0])
-                # print(az, el)
-                if did_intersect:
-                    r, r_rng, r_az, r_el = getRangeAndAngles(inter, tx)
-                    acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, params[3], params[4]) /
-                               (r_rng * r_rng) * nrho * cmath.exp(-1j * params[5] * (2 * r_rng)))
-                    delta = acc_val - mu
-                    mu += delta / (n + 1)
-                    m2 += delta * (acc_val - mu)
-                    # print('intersect')
-                else:
-                    # print('non-intersect')
-                    delta = -mu
-                    mu += delta / (n + 1)
-                    m2 += delta * -mu
-            pixel_bins[az_idx, el_idx] = math.sqrt(m2.real ** 2 + m2.imag ** 2) / (n - 1.)
+    for az_idx in prange(a, pixel_count.shape[0], a_stride):
+        if az_idx < pixel_count.shape[0]:
+            for el_idx in prange(e, pixel_count.shape[1], e_stride):
+                if el_idx < pixel_count.shape[1]:
+                    mu = 0j
+                    m2 = 0j
+                    for n in range(100):
+                        az = (az_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[3] / pixel_count.shape[0] + pan - params[3]
+                        el = (el_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[4] / pixel_count.shape[1] + tilt - params[4]
+                        # az = np.float32(az_idx)
+                        # el = np.float32(el_idx)
+                        # ray_dir = azelToVec(az, el)
+                        ray_dir = make_float3(math.sin(az) * math.cos(el), math.cos(az) * math.cos(el), -math.sin(el))
+                        did_intersect, nrho, inter, _, _, _ = traverseOctreeAndReflection(tx, ray_dir, kd_tree, params[5],
+                                                                                                  leaf_list,
+                                                                                                  leaf_key, tri_idxes, tri_verts,
+                                                                                                  tri_norm,
+                                                                                                  tri_material, 0., params[0])
+                        # print(az, el)
+                        if did_intersect:
+                            r, r_rng, r_az, r_el = getRangeAndAngles(inter, tx)
+                            acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, params[3], params[4]) /
+                                       (r_rng * r_rng) * nrho * cmath.exp(-1j * params[5] * (2. * r_rng)))
+                            # acc_val = 1j
+                            # print(acc_val.real, acc_val.imag)
+                            delta = acc_val - mu
+                            mu += delta / (n + 1)
+                            m2 += delta * (acc_val - mu)
+                        else:
+                            # print('non-intersect')
+                            delta = -mu
+                            mu += delta / (n + 1)
+                            m2 += delta * -mu
+                    pixel_count[az_idx, el_idx] += n + 1
+                    pixel_mu_i[az_idx, el_idx] += mu.imag
+                    pixel_mu_r[az_idx, el_idx] += mu.real
+                    pixel_m2_i[az_idx, el_idx] += m2.imag
+                    pixel_m2_r[az_idx, el_idx] += m2.real
 
 
 @cuda.jit(max_registers=MAX_REGISTERS)

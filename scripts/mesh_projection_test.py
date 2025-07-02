@@ -43,14 +43,14 @@ if __name__ == '__main__':
     rec_gain = 100  # dB
     ant_transmit_power = 100  # watts
     noise_power_db = -120
-    npulses = 64
+    npulses = 32
     plp = 0.
     fdelay = 10.
     upsample = 8
     num_bounces = 1
-    max_tris_per_split = 200
+    max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**16
+    points_to_sample = 2**22
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -81,7 +81,7 @@ if __name__ == '__main__':
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
+    gx, gy, gz = bg.getGrid(grid_origin, 200, 200, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
     grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -113,12 +113,95 @@ if __name__ == '__main__':
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(Mesh(mesh, num_box_levels=nbox_levels))'''
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=300000)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=300000)
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(Mesh(mesh, max_tris_per_split=max_tris_per_split,
             material_sigma=[0.017 for _ in mesh.triangle_material_ids]))
-    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)
+    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
+
+    fnme = '/home/jeff/Documents/WM_UtahDesert_Test_01_Mesh_Output.obj'
+    obj_fnme = '/home/jeff/Documents/target_meshes/farmhouse_obj.obj'
+    plane_fnme = '/home/jeff/Documents/target_meshes/piper_pa18.obj'
+    ground = readCombineMeshFile(fnme, points=150000, scale=100)
+    ground = ground.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    ground = ground.simplify_vertex_clustering(1.)
+    ground.remove_duplicated_vertices()
+    ground.remove_unreferenced_vertices()
+    ground.compute_vertex_normals()
+    ground.compute_triangle_normals()
+    ground.normalize_normals()
+    ground.triangle_material_ids = o3d.utility.IntVector(
+        [0 for _ in range(len(ground.triangles))])
+    scene.add(
+        Mesh(
+            ground,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[0.17],
+            material_emissivity=[2.]
+        )
+    )
+
+    farmhouse = readCombineMeshFile(obj_fnme, points=3000000, scale=1 / 3.2818)
+    farmhouse = farmhouse.rotate(farmhouse.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+    farmhouse = farmhouse.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    farmhouse = farmhouse.translate(np.array([0, 0, -2.5]), relative=True)
+    farmhouse.triangle_material_ids = o3d.utility.IntVector(
+        [0 for _ in range(len(farmhouse.triangles))])
+    scene.add(
+        Mesh(
+            farmhouse,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[.05],
+            material_emissivity=[1e6]
+        )
+    )
+    plane = readCombineMeshFile(plane_fnme, points=50000, scale=1)
+    plane = plane.rotate(plane.get_rotation_matrix_from_xyz(np.array([1.35, 0, 0])))
+    plane = plane.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    plane = plane.translate(np.array([-50, 50, -2.7]), relative=True)
+    plane.triangle_material_ids = o3d.utility.IntVector(
+        [0 for _ in range(len(plane.triangles))])
+    scene.add(
+        Mesh(
+            plane,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[0.01],
+            material_emissivity=[1e6]
+        )
+    )
+
+    plane0 = readCombineMeshFile(plane_fnme, points=50000, scale=1)
+    plane0 = plane0.rotate(plane0.get_rotation_matrix_from_xyz(np.array([1.35, 0, 0])))
+    plane0 = plane0.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    plane0 = plane0.translate(np.array([-50, 50, -2.7]), relative=True)
+    plane0.triangle_material_ids = o3d.utility.IntVector(
+        [0 for _ in range(len(plane0.triangles))])
+    plane0 = plane0.translate(np.array([-75, -100, -2.7]), relative=True)
+    scene.add(
+        Mesh(
+            plane0,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[0.01],
+            material_emissivity=[1e6]
+        )
+    )
+
+    '''mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(
+        np.concatenate((np.asarray(ground.vertices), np.asarray(farmhouse.vertices), np.asarray(plane.vertices))))
+    mesh.triangles = o3d.utility.Vector3iVector(np.concatenate((np.asarray(ground.triangles),
+                                                                np.asarray(farmhouse.triangles) + len(ground.vertices),
+                                                                np.asarray(plane.triangles) + len(
+                                                                    ground.vertices) + len(farmhouse.vertices))))
+    mesh.triangle_material_ids = o3d.utility.IntVector(
+        [n for n in np.concatenate((np.zeros(len(ground.triangles)).astype(int),
+                                    np.ones(len(farmhouse.triangles)).astype(int),
+                                    np.ones(len(plane.triangles)).astype(int) * 2))])
+    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    mesh.compute_vertex_normals()
+    mesh.compute_triangle_normals()
+    mesh.normalize_normals()'''
 
 
     '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
@@ -310,7 +393,7 @@ if __name__ == '__main__':
             valids = nrp[0] > 0.
             sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
             fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0] * sc,
-                              v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=40,
+                              v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=10,
                                   colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
 
         fig.show()
@@ -333,14 +416,14 @@ if __name__ == '__main__':
         )'''
     fig.show()
 
-    for d in range(scene.meshes[0].bvh_levels - 1, scene.meshes[0].bvh_levels):
-        fig = getSceneFig(scene, title=f'Depth {d}')
+    fig = getSceneFig(scene, title=f'Depth')
 
-        for mesh in scene.meshes:
-            for b in mesh.bvh[sum(2 ** n for n in range(d)):sum(2 ** n for n in range(d+1))]:
-                if np.sum(b) != 0:
-                    fig.add_trace(drawOctreeBox(b))
-        fig.show()
+    for mesh in scene.meshes:
+        d = mesh.bvh_levels - 1
+        for b in mesh.bvh[sum(2 ** n for n in range(d)):sum(2 ** n for n in range(d+1))]:
+            if np.sum(b) != 0:
+                fig.add_trace(drawOctreeBox(b))
+    fig.show()
 
     fig = px.scatter_3d(x=sample_points[0][:256, 0], y=sample_points[0][:256, 1], z=sample_points[0][:256, 2])
     for n in range(256, 8192, 256):
