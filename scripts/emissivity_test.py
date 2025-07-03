@@ -44,26 +44,29 @@ if __name__ == '__main__':
     ant_transmit_power = 100  # watts
     noise_power_db = -120
     upsample = 8
+    exp_range = 1500
+    n_samples = 2**15
 
-    nposes = 36
+    nposes = 64
     azes = np.linspace(np.pi, 2 * np.pi, nposes)
     eles = np.ones(nposes) * .41
-    poses = np.ascontiguousarray(azelToVec(azes, eles).T * 1000, dtype=_float)
+    poses = np.ascontiguousarray(azelToVec(azes, eles).T * exp_range, dtype=_float)
     pans = azes.astype(_float)
     tilts = eles.astype(_float)
-    near_range_s = (1000 - 50) / c0
-    nsam = 2048
+    near_range_s = (exp_range - 50) / c0
+    nsam = 4096
     nr = 1024
-    fft_len = 4096
+    fft_len = 8192
 
     # Get a triangle
-    gx, gy = np.meshgrid(np.linspace(0, 10, 10), np.linspace(0, 10, 10))
+    ground = o3d.geometry.TriangleMesh().create_sphere(radius=10, resolution=40)
+    '''gx, gy = np.meshgrid(np.linspace(0, 10, 10), np.linspace(0, 10, 10))
     gz = (gx + gy)**2
     gnd_points = np.stack([gx.ravel(), gy.ravel(), gz.ravel()]).T
     tri_ = Delaunay(gnd_points[:, :2])
     ground = o3d.geometry.TriangleMesh()
     ground.vertices = o3d.utility.Vector3dVector(gnd_points)
-    ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
+    ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)'''
     ground.remove_duplicated_vertices()
     ground.remove_unreferenced_vertices()
     ground.compute_vertex_normals()
@@ -90,7 +93,7 @@ if __name__ == '__main__':
     scene = Scene()
     scene.add(Mesh(ground, max_tris_per_split=8, material_emissivity=[1e6], material_sigma=[.01]))
 
-    sample_points = [scene.sample(128,
+    sample_points = [scene.sample(n_samples,
                                   view_pos=poses[::30], fc=fc,
                                   fs=fs, near_range_s=near_range_s, radar_equation_constant=radar_coeff)]
 
@@ -117,7 +120,7 @@ if __name__ == '__main__':
                                                                                       np.pi / 4, np.pi / 4,
                                                                                       nsam, fc, near_range_s, fs,
                                                                                       num_bounces=1,
-                                                                                      debug=True, streams=streams)
+                                                                                      debug=True, streams=streams, use_supersampling=True)
         single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                                      is_freq=True, time_len=nsam)
         single_mf_pulse = upsamplePulse(

@@ -2,7 +2,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
 from typing import Type
-from .simulation_functions import llh2enu, findPowerOf2
+from .simulation_functions import llh2enu
 from functools import singledispatch
 
 c0 = 299792458.0
@@ -46,6 +46,32 @@ class Platform(object):
                  gps_txpos: np.ndarray = None,
                  *args,
                  **kwargs):
+        """
+        Initializes a Platform object with position, velocity, attitude, and gimbal corrections.
+
+        This constructor sets up splines for position, velocity, and attitude, and applies gimbal and antenna corrections if provided.
+
+        Args:
+            e: np.ndarray. East coordinates.
+            n: np.ndarray. North coordinates.
+            u: np.ndarray. Up coordinates.
+            r: np.ndarray. Roll angle.
+            p: np.ndarray. Pitch angle.
+            y: np.ndarray. Yaw angle.
+            t: np.ndarray. Time array for each of the [e, n, u] and [r, p, y] arrays. Should be the same length as them.
+            gimbal: np.ndarray. Gimbal data.
+            gimbal_offset: np.ndarray. Gimbal offset.
+            gimbal_rotations: np.ndarray. Gimbal rotations.
+            tx_offset: np.ndarray. Transmitter offset.
+            rx_offset: np.ndarray. Receiver offset.
+            gps_t: np.ndarray. GPS time. Used for SlimSDR collects.
+            gps_az: np.ndarray. GPS azimuth. Used for SlimSDR collects.
+            gps_rxpos: np.ndarray. GPS receiver position. Used for SlimSDR collects.
+            gps_txpos: np.ndarray. GPS transmitter position. Used for SlimSDR collects.
+            *args: Additional positional arguments.
+            **kwargs: Additional keyword arguments.
+        """
+
         self._gpst = t
         self._txant = tx_offset
         self._rxant = rx_offset
@@ -174,7 +200,9 @@ class Platform(object):
 
 
 """
-    A class representing a Radar Platform that inherits from Platform.
+    RadarPlatform
+    A class representing a Radar Platform that inherits from Platform. This is used for creating a platform
+    object that does not use a SlimSDR collect as a base.
 
     Args:
         e: np.ndarray. East coordinate.
@@ -269,10 +297,10 @@ class RadarPlatform(Platform):
         Initializes a Radar Platform object with provided parameters.
 
         Args:
-            e: np.ndarray. East coordinate.
-            n: np.ndarray. North coordinate.
-            u: np.ndarray. Up coordinate.
-            r: np.ndarray. Right coordinate.
+            e: np.ndarray. East coordinates.
+            n: np.ndarray. North coordinates.
+            u: np.ndarray. Up coordinates.
+            r: np.ndarray. Roll angle.
             p: np.ndarray. Pitch angle.
             y: np.ndarray. Yaw angle.
             t: np.ndarray. Time.
@@ -394,7 +422,7 @@ class RadarPlatform(Platform):
         ranges_sampled = self.calcRangeBins(fdelay, 1, plp)
         near_range_s = ranges[0] / c0
         granges = ranges * np.cos(self.dep_ang)
-        fft_len = findPowerOf2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True))
+        fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True)))))
         up_fft_len = fft_len * upsample
         return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
 
@@ -404,159 +432,6 @@ SDRPlatform
 More specialized version of RadarPlatform that gets all of the values it needs from a SAR file or instance of
 SDRParse.
 """
-
-
-class APSDebugPlatform(RadarPlatform):
-    _sdr: object
-
-    def __init__(self,
-                 sdr: SDRBase,
-                 origin: np.ndarray = None,
-                 tx_offset: np.ndarray = None,
-                 rx_offset: np.ndarray = None,
-                 gimbal_offset: np.ndarray = None,
-                 fs: float = 2e9,
-                 channel: int = 0,
-                 gps_data: dict = None,
-                 gimbal_data: dict = None):
-        """
-        Init function.
-        :param sdr: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
-            or the SDRParse object of an already parsed file.
-        :param origin: 3-tuple. Point used as the origin for ENU reference frame, in (lat, lon, alt).
-        :param tx_offset: 3-tuple. Offset of Tx antenna from body frame in meters.
-        :param rx_offset: 3-tuple. Offset of Rx antenna from body frame in meters.
-        :param fs: float. Sampling frequency in Hz.
-        :param channel: int. Channel of data for this object to represent in the SAR file.
-        :param gps_data: This is from postCorrectionGPSData. Loaded in via aps_io in data_converter.
-        :param gimbal_data: Gimbal data from aps_io in data_converter.
-        """
-        t = sdr.gps_data.index.values
-        fs = fs if fs is not None else sdr[channel].fs
-        origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
-        e, n, u = llh2enu(gps_data['lat'], gps_data['lon'], gps_data['alt'], origin)
-        e = np.interp(t, gps_data['gps_ms'], e)
-        n = np.interp(t, gps_data['gps_ms'], n)
-        u = np.interp(t, gps_data['gps_ms'], u)
-        r = sdr.gps_data['r'].values
-        p = sdr.gps_data['p'].values
-        y = sdr.gps_data['y'].values
-        if gimbal_data is None:
-            try:
-                pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
-                                sdr.gimbal['pan'].values.astype(np.float64))
-                tilt = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
-                                 sdr.gimbal['tilt'].values.astype(np.float64))
-            except TypeError:
-                pan = np.zeros_like(sdr.gps_data['systime'].values)
-                tilt = np.zeros_like(sdr.gps_data['systime'].values)
-            pan = np.interp(t, sdr.gps_data.index.values, pan)
-            tilt = np.interp(t, sdr.gps_data.index.values, tilt)
-        else:
-            if len(gimbal_data['systime']) == 0:
-                # This is for the weird interpolated to each channel data
-                times = sdr[channel].pulse_time[:len(gimbal_data['pan'])]
-            else:
-                times = np.interp(gimbal_data['systime'], sdr.gps_data['systime'], sdr.gps_data.index)
-            pan = np.interp(t, times, gimbal_data['pan'])
-            tilt = np.interp(t, times, gimbal_data['tilt'])
-        goff = np.array(
-            [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
-        grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
-        try:
-            channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2
-        except KeyError:
-            channel_dep = sdr.ant[0].dep_ang / DTR
-        if sdr[channel].is_receive_only:
-            tx_num = np.where([n is not None for n in sdr.port])[0][0]
-        else:
-            tx_num = sdr[channel].trans_num
-            tx_offset = np.array(
-                [sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
-        rx_num = sdr[channel].rec_num
-        rx_offset = np.array(
-            [sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]) if rx_offset is None else rx_offset
-        super().__init__(e=e, n=n, u=u, r=r, p=p, y=y, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
-                         gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
-                         dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
-                         az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
-                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, gps_t=gps_data['gps_ms'],
-                         tx_num=tx_num, rx_num=rx_num, gps_az=gps_data['az'], gps_rxpos=gps_data['rxpos'],
-                         gps_txpos=gps_data['txpos'])
-        self._sdr: SDRBase = sdr
-        self.origin = origin
-        self._channel = channel
-
-    def calcRanges(self, fdelay, partial_pulse_percent=1., **kwargs):
-        """
-        Calculate near and far ranges for this collect using the SAR file.
-        :param fdelay: float. FDelay desired in TAC.
-        :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
-        :return: tuple of near and far ranges in meters.
-        """
-        nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
-                  self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
-                  self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        return nrange, frange
-
-    def calcPulseLength(self, height=0, pulse_length_percent=1., use_tac=False, nrange=None, **kwargs):
-        """
-        Calculate the pulse length for this collect.
-        :param height: Not used. Here for compatibility with parent classes.
-        :param pulse_length_percent: Not used. Here for compatibility with parent classes.
-        :param use_tac: bool. If True, returns pulse length in TAC, otherwise in seconds.
-        :return: Pulse length in TAC, otherwise in seconds.
-        """
-        return self._sdr[self._channel].pulse_length_N if use_tac else self._sdr[self._channel].pulse_length_S
-
-    def calcNumSamples(self, height=0, plp=1., ranges=None, **kwargs):
-        """
-        Get number of samples in a pulse.
-        :param height: Not used. Here for compatibility with parent classes.
-        :param plp: Not used. Here for compatibility with parent classes.
-        :return: Number of samples in a pulse.
-        """
-        return self._sdr[self._channel].nsam
-
-    def calcRangeBins(self, fdelay, upsample=1, plp=1., ranges=None, **kwargs):
-        """
-        Calculate range bins for a pulse/collect.
-        :param fdelay: float. FDelay desired for this pulse in TAC.
-        :param upsample: int. Upsample factor.
-        :param plp: float, <1. Percentage of maximum pulse length to use in radar.
-        :param ranges: For compatibility. Not used.
-        :return: array of range bins in meters.
-        """
-        nrange, frange = self.calcRanges(fdelay, partial_pulse_percent=plp)
-        MPP = c0 / self.fs / upsample
-        return (nrange * 2 + np.arange(self.calcNumSamples() * upsample) * MPP) / 2
-
-    def calcRadVelRes(self, cpi_len, dopplerBroadeningFactor=2.5):
-        """
-        Calculate the radial velocity resolution for this collect. :param cpi_len: int. Length of CPI in number of
-        pulses. :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected
-        optimal value. :return: Radial velocity resolution in meters per second.
-        """
-        return dopplerBroadeningFactor * c0 * self._sdr[self._channel].prf / \
-            (self._sdr[self._channel].fc * cpi_len)
-
-    def calcDopRes(self, cpi_len, dopplerBroadeningFactor=2.5):
-        """
-        Calculate the Doppler resolution for this collect. :param cpi_len: int. Length of CPI in number of pulses.
-        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal
-        :param cpi_len: CPI length.
-        value. :return: Doppler resolution in Hz.
-        """
-        return dopplerBroadeningFactor * self._sdr[self._channel].prf / cpi_len
-
-    def calcWrapVel(self):
-        """
-        Calculate the wrap velocity for this collect.
-        :return: Wrap velocity in meters per second.
-        """
-        return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
-
 
 class SDRPlatform(RadarPlatform):
     _sdr = None
@@ -569,12 +444,15 @@ class SDRPlatform(RadarPlatform):
                  channel: int = 0,
                  gimbal_offset: np.ndarray = None):
         """
-        Init function.
+        Init function. Inherits RadarPlatform to allow for storing radar parameters such as center frequency.
+        This is a Platform object specifically built for SlimSDR collects. Represents a single channel of data.
         :param sdr: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
             or the SDRParse object of an already parsed file.
         :param origin: 3-tuple. Point used as the origin for ENU reference frame, in (lat, lon, alt).
-        :param tx_offset: 3-tuple. Offset of Tx antenna from body frame in meters.
-        :param rx_offset: 3-tuple. Offset of Rx antenna from body frame in meters.
+        :param tx_offset: 3-tuple. Offset of Tx antenna from body frame in meters. Only used if a different offset is wanted than
+        the one in the SlimSDR .xml file.
+        :param rx_offset: 3-tuple. Offset of Rx antenna from body frame in meters. Only used if a different offset is wanted than
+        the one in the SlimSDR .xml file.
         :param fs: float. Sampling frequency in Hz.
         :param channel: int. Channel of data for this object to represent in the SAR file.
         """
@@ -599,7 +477,7 @@ class SDRPlatform(RadarPlatform):
             [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
         grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
         try:
-            channel_dep = (sdr.xml['Channel_0']['Near_Range_D'] + sdr.xml['Channel_0']['Far_Range_D']) / 2
+            channel_dep = (sdr.xml.Channel_0.Near_Range_D + sdr.xml.Channel_0.Far_Range_D) / 2
         except KeyError:
             channel_dep = sdr.ant[0].dep_ang / DTR
         if sdr[channel].is_receive_only:

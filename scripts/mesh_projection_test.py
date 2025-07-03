@@ -47,10 +47,10 @@ if __name__ == '__main__':
     plp = 0.
     fdelay = 10.
     upsample = 8
-    num_bounces = 1
+    num_bounces = 2
     max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**22
+    points_to_sample = 2**15
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -66,7 +66,7 @@ if __name__ == '__main__':
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
-    sdr_f = load(fnme)
+    sdr_f = load(fnme, import_pickle=True)
     bg, rp = getRadarAndEnvironment(sdr_f)
     rp.el_half_bw *= 2
     rp.az_half_bw *= 2
@@ -81,7 +81,7 @@ if __name__ == '__main__':
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 200, 200, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
+    gx, gy, gz = bg.getGrid(grid_origin, 250, 250, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
     grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
@@ -90,16 +90,17 @@ if __name__ == '__main__':
     scene = Scene()
     # mesh_ids = []
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
         Mesh(
             mesh,
             max_tris_per_split=max_tris_per_split,
-            material_sigma=[0.017 for _ in mesh.triangle_material_ids],
+            material_sigma=[0.17 for _ in mesh.triangle_material_ids],
+            material_emissivity=[2. for _ in mesh.triangle_material_ids],
         )
-    )'''
+    )
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
@@ -120,7 +121,7 @@ if __name__ == '__main__':
             material_sigma=[0.017 for _ in mesh.triangle_material_ids]))
     triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
 
-    fnme = '/home/jeff/Documents/WM_UtahDesert_Test_01_Mesh_Output.obj'
+    '''fnme = '/home/jeff/Documents/WM_UtahDesert_Test_01_Mesh_Output.obj'
     obj_fnme = '/home/jeff/Documents/target_meshes/farmhouse_obj.obj'
     plane_fnme = '/home/jeff/Documents/target_meshes/piper_pa18.obj'
     ground = readCombineMeshFile(fnme, points=150000, scale=100)
@@ -174,10 +175,9 @@ if __name__ == '__main__':
     plane0 = readCombineMeshFile(plane_fnme, points=50000, scale=1)
     plane0 = plane0.rotate(plane0.get_rotation_matrix_from_xyz(np.array([1.35, 0, 0])))
     plane0 = plane0.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    plane0 = plane0.translate(np.array([-50, 50, -2.7]), relative=True)
     plane0.triangle_material_ids = o3d.utility.IntVector(
         [0 for _ in range(len(plane0.triangles))])
-    plane0 = plane0.translate(np.array([-75, -100, -2.7]), relative=True)
+    plane0 = plane0.translate(np.array([-75, 100, -2.7]), relative=True)
     scene.add(
         Mesh(
             plane0,
@@ -185,7 +185,7 @@ if __name__ == '__main__':
             material_sigma=[0.01],
             material_emissivity=[1e6]
         )
-    )
+    )'''
 
     '''mesh = o3d.geometry.TriangleMesh()
     mesh.vertices = o3d.utility.Vector3dVector(
@@ -209,7 +209,7 @@ if __name__ == '__main__':
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
     mesh_extent = car.get_max_bound() - car.get_min_bound()
-    car = car.translate(np.array([gx.mean() - 50, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2 - 16]), relative=False)
+    car = car.translate(np.array([gx.mean() - 50, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2 - 11.5]), relative=False)
     m_emissivity = [1e6 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
     m_emissivity[0] = m_emissivity[15] = 5.24  # seats
     m_emissivity[6] = m_emissivity[13] = m_emissivity[17] = 1e6  # body
@@ -218,8 +218,7 @@ if __name__ == '__main__':
     m_sigma[0] = m_sigma[15] = .017  # seats
     m_sigma[6] = m_sigma[13] = m_sigma[17] = .0017  # body
     m_sigma[12] = m_sigma[4] = .017  # windshield
-    scene.add(Mesh(car, num_box_levels=4, material_emissivity=m_emissivity, material_sigma=m_sigma,
-                   use_box_pts=True))'''
+    scene.add(Mesh(car, max_tris_per_split=128, material_emissivity=m_emissivity, material_sigma=m_sigma))'''
 
     '''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
     building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))

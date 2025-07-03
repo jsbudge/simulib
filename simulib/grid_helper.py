@@ -215,9 +215,9 @@ class SDREnvironment(Environment):
         self.heading = np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
         if sdr.ash is None:
             try:
-                hght = sdr.xml['Flight_Line']['Flight_Line_Altitude_M']
-                pt = ((sdr.xml['Flight_Line']['Start_Latitude_D'] + sdr.xml['Flight_Line']['Stop_Latitude_D']) / 2,
-                      (sdr.xml['Flight_Line']['Start_Longitude_D'] + sdr.xml['Flight_Line']['Stop_Longitude_D']) / 2)
+                hght = sdr.xml.Flight_Line.Flight_Line_Altitude_M
+                pt = ((sdr.xml.Flight_Line.Start_Latitude_D + sdr.xml.Flight_Line.Stop_Latitude_D) / 2,
+                      (sdr.xml.Flight_Line.Start_Longitude_D + sdr.xml.Flight_Line.Stop_Longitude_D) / 2)
                 alt = getElevation(*pt)
             except KeyError:
                 alt = sdr.gps_data['alt'].mean()

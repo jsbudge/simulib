@@ -455,20 +455,19 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
 
 
 @cuda.jit()
-def calcBounceWithoutReflect(ray_dir, ray_power, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, leaf_list, leaf_key, tri_vert, tri_idx,
-                   tri_norm, tri_material, pd_r, pd_i, receive_xyz, pan, tilt, params):
+def calcRayBinVariance(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
+                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, counts, receive_xyz, pan,
+                   tilt, params, conical_sampling):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
+        rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
             rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
-            rho = ray_power[tt, ray_idx]
-            if rho < 1e-9:
-                return
-            did_intersect, nrho, inter, rng, _ = traverseOctreeAndReflection(rec_xyz, rd, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, rho, leaf_list,
-                                                                               leaf_key, tri_idx, tri_vert,
-                                                                               tri_norm, tri_material, 0, params[0])
+            did_intersect, nrho, inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd,
+                                                                             kd_tree, ray_power[tt, ray_idx],
+                                                                             leaf_list, leaf_key, tri_idx,
+                                                                             tri_vert, tri_norm, tri_material, 0, params[0])
             if did_intersect:
                 acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                            pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
@@ -477,6 +476,41 @@ def calcBounceWithoutReflect(ray_dir, ray_power, boxminx, boxminy, boxminz, boxm
                     acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                     cuda.atomic.add(pd_r, (tt, but), acc_real)
                     cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                    ray_origin[tt, ray_idx, 0] = inter.x
+                    ray_origin[tt, ray_idx, 1] = inter.y
+                    ray_origin[tt, ray_idx, 2] = inter.z
+                    ray_dir[tt, ray_idx, 0] = b.x
+                    ray_dir[tt, ray_idx, 1] = b.y
+                    ray_dir[tt, ray_idx, 2] = b.z
+                    ray_power[tt, ray_idx] = nrho
+                    ray_distance[tt, ray_idx] = rng
+                    cuda.atomic.add(counts, (tt, but), 1)
+                # Apply supersampling if wanted
+                if params[6]:
+                    for n in prange(conical_sampling.shape[0]):
+                        if abs(rd.y) > 1e-9:
+                            sc = normalize(make_float3(2 * rd.y * rd.z, 0., -2 * rd.x * rd.y))
+                        else:
+                            sc = normalize(make_float3(-2 * rd.y * rd.z, 2 * rd.x * rd.z, 0.))
+                        rd = normalize(inter + rotate(rd, sc, conical_sampling[n, 0]) * conical_sampling[n, 1] - rec_xyz)
+                        did_intersect, nrho, cone_inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd, kd_tree,
+                                                                                         ray_power[tt, ray_idx],
+                                                                                         leaf_list, leaf_key, tri_idx,
+                                                                                         tri_vert, tri_norm,
+                                                                                         tri_material, 0, params[0])
+                        if did_intersect:
+                            acc_real, acc_imag, but = calcReturnAndBin(cone_inter, rec_xyz, rng, params[1], params[2],
+                                                                       pd_r.shape[1],
+                                                                       pan[tt], tilt[tt], params[3], params[4],
+                                                                       params[0], nrho)
+                            if but >= 0:
+                                acc_real = acc_real if abs(acc_real) < np.inf else 0.
+                                acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
+                                cuda.atomic.add(pd_r, (tt, but), acc_real)
+                                cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                                cuda.atomic.add(counts, (tt, but), 1)
+            else:
+                ray_power[tt, ray_idx] = 0.
 
 
 @cuda.jit()
@@ -501,19 +535,6 @@ def calcReturnPower(ray_origin, ray_distance, ray_power, pd_r, pd_i, counts, rec
                 cuda.atomic.add(counts, (tt, but), 1)
 
 
-@cuda.jit()
-def calcSceneOcclusion(ray_origin, ray_poss, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
-                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, receive_xyz):
-    t, r = cuda.grid(ndim=2)
-    tt_stride, ray_stride = cuda.gridsize(2)
-    for tt in prange(t, ray_origin.shape[0], tt_stride):
-        for ray_idx in prange(r, ray_origin.shape[1], ray_stride):
-            inter = make_float3(ray_origin[tt, ray_idx, 0], ray_origin[tt, ray_idx, 1], ray_origin[tt, ray_idx, 2])
-            # Check for occlusion against the receiver
-            if traverseOctreeForOcclusion(inter, normalize(make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]) - inter), boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz, leaf_list, leaf_key,
-                                                                       tri_idx, tri_vert, tri_norm):
-                ray_poss[tt, ray_idx] = False
-
 
 
 @cuda.jit()
@@ -537,15 +558,16 @@ def calcOriginDirAtt(rec_xyz, sample_points, pan, tilt, params, ray_dir, ray_ori
 
 
 @cuda.jit()
-def determineSceneRayIntersections(transmit_xyz, ray_intersect, ray_dir, ray_distance, ray_power, ray_bounce_power, kd_tree,
+def determineSceneRayIntersections(ray_origin, ray_intersect, ray_dir, ray_distance, ray_bounce, ray_power, ray_bounce_power, kd_tree,
                                    leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, params):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
-        tx = make_float3(transmit_xyz[tt, 0], transmit_xyz[tt, 1], transmit_xyz[tt, 2])
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
             rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
-            did_intersect, nrho, inter, rng, b, inter_tri = traverseOctreeAndReflection(tx, rd,
+            did_intersect, nrho, inter, rng, b, inter_tri = traverseOctreeAndReflection(make_float3(ray_origin[tt, ray_idx, 0],
+                                                                                                    ray_origin[tt, ray_idx, 1],
+                                                                                                    ray_origin[tt, ray_idx, 2]), rd,
                                                                                         kd_tree, ray_power[tt, ray_idx],
                                                                                         leaf_list, leaf_key, tri_idx,
                                                                                         tri_vert, tri_norm,
@@ -554,6 +576,9 @@ def determineSceneRayIntersections(transmit_xyz, ray_intersect, ray_dir, ray_dis
                 ray_intersect[tt, ray_idx, 0] = inter.x
                 ray_intersect[tt, ray_idx, 1] = inter.y
                 ray_intersect[tt, ray_idx, 2] = inter.z
+                ray_bounce[tt, ray_idx, 0] = b.x
+                ray_bounce[tt, ray_idx, 1] = b.y
+                ray_bounce[tt, ray_idx, 2] = b.z
                 ray_bounce_power[tt, ray_idx] = nrho
                 ray_distance[tt, ray_idx] = rng
 

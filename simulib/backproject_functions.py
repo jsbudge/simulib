@@ -4,9 +4,10 @@ from numba.cuda.random import create_xoroshiro128p_states
 from .cuda_kernels import getMaxThreads, backproject, genRangeProfile, optimizeThreadBlocks, \
     optimizeStridedThreadBlocks2d
 from .grid_helper import SDREnvironment
-from .platform_helper import SDRPlatform, RadarPlatform
+# from .platform_helper import SDRPlatform, RadarPlatform
 from tqdm import tqdm
 from sdrparse import load, SDRParse
+from sdrparse.platform import SDRPlatform, RadarPlatform
 
 _float = np.float32
 
