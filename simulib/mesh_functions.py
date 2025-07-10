@@ -382,6 +382,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
     for c in counts:
         c[c == 0.] += 1
     final_rp = [s * (pr + 1j * pi) / n for pr, pi, s, n in zip(pd_r, pd_i, sa_bins, counts)]
+    # final_rp = [pr + 1j * pi for pr, pi in zip(pd_r, pd_i)]
     if debug:
         return final_rp, debug_rays, debug_raydirs, debug_raypower
     else:
@@ -579,6 +580,7 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, f
     gridsz = 512
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
                                           radar_equation_constant]).astype(_float))
+    set_npoints = int(np.ceil(npoints / a_obs_pt.shape[0]))
     for t in range(a_obs_pt.shape[0]):
         transmit_xyz_gpu = cuda.to_device(a_obs_pt[t])
         threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((gridsz, gridsz))
@@ -644,11 +646,11 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, f
             # npts = ray_points_gpu.copy_to_host()
             npts = npts[np.sum(npts, axis=1) != 0]
 
-            points = np.concatenate((points, npts))
+            points = np.concatenate((points, npts[np.random.choice(np.arange(npts.shape[0]), set_npoints)]))
             del ray_points_gpu
         del tri_norm_gpu, tri_idxes_gpu, tri_verts_gpu, leaf_key_gpu, leaf_list_gpu, kd_tree_gpu
     del params_gpu
-    return points[np.random.choice(np.arange(points.shape[0]), npoints)]
+    return points[1:npoints]
 
 
 def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds: np.ndarray, bounding_box: np.ndarray):
@@ -789,8 +791,10 @@ def getMeshFig(mesh, triangle_colors=None, title='Title Goes Here', zrange=100):
     return fig
 
 
-def getSceneFig(scene, triangle_colors=None, title='Title Goes Here', zrange=100):
+def getSceneFig(scene, triangle_colors=None, title='Title Goes Here', zrange=None):
     # Get for first mesh
+    if zrange is None:
+        zrange = [-30, 100]
     fig = go.Figure(data=[
         go.Mesh3d(
             x=scene.meshes[0].vertices[:, 0],
@@ -828,7 +832,7 @@ def getSceneFig(scene, triangle_colors=None, title='Title Goes Here', zrange=100
     ]
     fig.update_layout(
         title=title,
-        scene=dict(zaxis=dict(range=[-30, zrange]), xaxis=dict(range=[mixis[0], maxis[0]]), yaxis=dict(range=[mixis[1], maxis[1]])),
+        scene=dict(zaxis=dict(range=zrange), xaxis=dict(range=[mixis[0], maxis[0]]), yaxis=dict(range=[mixis[1], maxis[1]])),
     )
     return fig
 

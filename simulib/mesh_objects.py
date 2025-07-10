@@ -60,8 +60,9 @@ class Mesh(object):
         self.center = a_mesh.get_center().astype(_float)
         self.ntri = mesh_tri_idx.shape[0]
         self.bvh_levels = num_box_levels
+        self.source_mesh = a_mesh
 
-    def sample(self, sample_points: int, view_pos: np.ndarray, bw_az: float = None, bw_el: float = None):
+    '''def sample(self, sample_points: int, view_pos: np.ndarray, bw_az: float = None, bw_el: float = None):
         # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
         pvecs = self.center - view_pos
         pointing_az = np.arctan2(pvecs[:, 0], pvecs[:, 1])
@@ -73,7 +74,11 @@ class Mesh(object):
             bw_az = abs(pointing_az[:, None] - view_az).max()
             bw_el = abs(pointing_el[:, None] - view_el).max()
         return detectPoints(self.bvh, self.leaf_list, self.leaf_key, self.tri_idx, self.vertices, self.normals,
-                            self.materials, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)
+                            self.materials, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)'''
+
+    def sample(self, sample_points: int):
+        pc = self.source_mesh.sample_points_uniformly(sample_points)
+        return np.asarray(pc.points)
 
 
 
@@ -105,7 +110,7 @@ class Scene(object):
     def __str__(self):
         return f'Scene with {len(self.meshes)} meshes.'
     
-    def sample(self, sample_points: int, view_pos: np.ndarray, fc: float = None, fs: float = None,
+    '''def sample(self, sample_points: int, view_pos: np.ndarray, fc: float = None, fs: float = None,
                near_range_s: float = None, radar_equation_constant: float = None, bw_az: float = None,
                bw_el: float = None):
         if bw_az is None:
@@ -121,7 +126,11 @@ class Scene(object):
             view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
             bw_az = max(bw_az, abs(pointing_az[:, None] - view_az).max())
             bw_el = max(bw_el, abs(pointing_el[:, None] - view_el).max())
-        return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)
+        return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)'''
+
+    def sample(self, sample_points: int):
+        pc = self.meshes[0].source_mesh.sample_points_poisson_disk(sample_points)
+        return np.asarray(pc.points)
 
     @cached_property
     def bounding_box(self):

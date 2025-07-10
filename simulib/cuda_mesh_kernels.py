@@ -333,7 +333,7 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                             roughness = math.exp(-.5 * (2. * wavenumber * tri_material[
                                 ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
                             spec = math.exp(-(1. - cosa) ** 2 / .0000007442)  # This should drop the specular component to zero by 2 degrees
-                            L = .7 * ((1 + abs(dot(b, rd))) / 2.) + .3
+                            L = .6 * ((1 + abs(dot(b, rd))) / 2.) + .4
                             nrho = rho * inv_rng * inv_rng * cosa * Rs * (
                                     roughness * spec + (
                                     1. - roughness) * L ** 2)  # Final reflected power
@@ -412,7 +412,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
             if did_intersect:
                 acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                            pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
-                if but >= 0:
+                if pd_r.shape[1] > but >= 0:
                     acc_real = acc_real if abs(acc_real) < np.inf else 0.
                     acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                     cuda.atomic.add(pd_r, (tt, but), acc_real)
@@ -444,7 +444,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                                                                        pd_r.shape[1],
                                                                        pan[tt], tilt[tt], params[3], params[4],
                                                                        params[0], nrho)
-                            if but >= 0:
+                            if pd_r.shape[1] > but >= 0:
                                 acc_real = acc_real if abs(acc_real) < np.inf else 0.
                                 acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
                                 cuda.atomic.add(pd_r, (tt, but), acc_real)
