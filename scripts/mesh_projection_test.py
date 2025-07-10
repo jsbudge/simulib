@@ -11,7 +11,7 @@ from simulib.backproject_functions import getRadarAndEnvironment, backprojectPul
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, getRadarCoeff, \
     azelToVec
 from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
-    getMeshFig, getSceneFig, drawOctreeBox
+    getMeshFig, getSceneFig, drawOctreeBox, loadTarget
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -47,10 +47,10 @@ if __name__ == '__main__':
     plp = 0.
     fdelay = 10.
     upsample = 8
-    num_bounces = 2
+    num_bounces = 1
     max_tris_per_split = 64
     nstreams = 1
-    points_to_sample = 2**15
+    points_to_sample = 2**17
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -61,7 +61,7 @@ if __name__ == '__main__':
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     do_randompts = False
-    use_supersampling = True
+    use_supersampling = False
     nbpj_pts = (1024, 1024)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
@@ -90,7 +90,7 @@ if __name__ == '__main__':
     scene = Scene()
     # mesh_ids = []
 
-    mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
+    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
@@ -100,7 +100,33 @@ if __name__ == '__main__':
             material_sigma=[0.17 for _ in mesh.triangle_material_ids],
             material_emissivity=[2. for _ in mesh.triangle_material_ids],
         )
+    )'''
+
+    mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
+    # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    scene.add(
+        Mesh(
+            mesh,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[mesh_materials[mtid][0] for mtid in
+                            range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+            material_emissivity=[mesh_materials[mtid][1] for mtid in
+                                 range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+        )
     )
+
+    '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/air_balloon.targ')
+    mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
+    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    scene.add(
+        Mesh(
+            mesh,
+            max_tris_per_split=max_tris_per_split,
+            material_sigma=[mesh_materials[mtid][0] for mtid in range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+            material_emissivity=[mesh_materials[mtid][1] for mtid in range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+        )
+    )'''
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
     mesh = mesh.translate(np.array([0, 0, 0]), relative=False)

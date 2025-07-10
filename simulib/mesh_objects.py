@@ -1,7 +1,7 @@
 from functools import cached_property, singledispatch
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints, detectPointsScene, genKDTree
+from .mesh_functions import detectPoints, detectPointsScene, genKDTree, _float
 
 
 class Mesh(object):
@@ -49,15 +49,15 @@ class Mesh(object):
 
 
         # Set them all as properties of the object
-        self.tri_idx = mesh_tri_idx
-        self.vertices = mesh_vertices
-        self.normals = mesh_normals
-        self.materials = tri_material
-        self.bvh = tree_bounds
-        self.bounding_box = root_box
-        self.leaf_list = sorted_tri_idx[:, 1]
-        self.leaf_key = mesh_idx_key
-        self.center = a_mesh.get_center()
+        self.tri_idx = mesh_tri_idx.astype(np.int32)
+        self.vertices = mesh_vertices.astype(_float)
+        self.normals = mesh_normals.astype(_float)
+        self.materials = tri_material.astype(_float)
+        self.bvh = tree_bounds.astype(_float)
+        self.bounding_box = root_box.astype(_float)
+        self.leaf_list = sorted_tri_idx[:, 1].astype(np.int32)
+        self.leaf_key = mesh_idx_key.astype(np.int32)
+        self.center = a_mesh.get_center().astype(_float)
         self.ntri = mesh_tri_idx.shape[0]
         self.bvh_levels = num_box_levels
 

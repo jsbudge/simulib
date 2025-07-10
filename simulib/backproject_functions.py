@@ -191,9 +191,9 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
 
     # Calculate out points on the ground
     with cuda.defer_cleanup():
-        gx_gpu = cuda.to_device(gx)
-        gy_gpu = cuda.to_device(gy)
-        gz_gpu = cuda.to_device(gz)
+        gx_gpu = cuda.to_device(gx.astype(_float))
+        gy_gpu = cuda.to_device(gy.astype(_float))
+        gz_gpu = cuda.to_device(gz.astype(_float))
 
         # GPU device calculations
         # threads_per_block, bpg_bpj = optimizeThreadBlocks(getMaxThreads(), nbpj_pts)

@@ -3,7 +3,7 @@ import multiprocessing as mp
 from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
     assignBoxPoints, determineSceneRayIntersections, calcReturnPower
-from .cuda_triangle_kernels import calcBinTotalSurfaceArea, calcViewVariance, calcViewSamples
+from .cuda_triangle_kernels import calcBinTotalSurfaceArea, calcViewSamples
 from .simulation_functions import azelToVec, factors
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 import numpy as np
@@ -11,14 +11,105 @@ import open3d as o3d
 from .cuda_kernels import optimizeStridedThreadBlocks2d
 import plotly.graph_objects as go
 from tqdm import tqdm
+from pathlib import Path
 
 c0 = 299792458.0
 _float = np.float32
 
-BOX_CUSHION = .01
 MULTIPROCESSORS = cuda.get_current_device().MULTIPROCESSOR_COUNT
 THREADS_PER_BLOCK = 512
 BLOCK_MULTIPLIER = 64
+
+
+def loadTarget(fnme):
+    with open(fnme, 'r') as f:
+        targ_data = f.readlines()
+
+    obj_fnme = targ_data[0].strip()
+    material_key = {}
+    for l in targ_data[1:]:
+        parts = l.split(' ')
+        material_key[parts[0]] = int(parts[1])
+        material_key[int(parts[1])] = [float(parts[2]), float(parts[3])]
+    if Path(obj_fnme).suffix == '.obj':
+        build_mesh = _loadOBJ(obj_fnme, material_key)
+    elif Path(obj_fnme).suffix == '.gltf':
+        build_mesh = _loadGLTF(obj_fnme)
+
+    build_mesh.compute_vertex_normals()
+    build_mesh.compute_triangle_normals()
+    build_mesh.normalize_normals()
+    return build_mesh, material_key
+
+
+def _loadGLTF(obj_fnme):
+    return o3d.io.read_triangle_mesh(obj_fnme)
+
+
+
+def _loadOBJ(obj_fnme, material_key):
+    with open(obj_fnme, 'r') as f:
+        lines = f.readlines()
+    vertices = []
+    vertex_normals = []
+    vertex_textures = []
+    o = {}
+    curr_o = None
+    curr_mat = 0
+    faces = []
+    face_normals = []
+    face_mats = []
+    for line in lines:
+        if isinstance(line, str):
+            if line.startswith('v '):
+                vertices.append(list(map(float, line.split()[1:4])))
+            elif line.startswith('vn '):
+                vertex_normals.append(list(map(float, line.split()[1:4])))
+            elif line.startswith('vt '):
+                vertex_textures.append(list(map(float, line.split()[1:4])))
+            if line.startswith('f '):
+                # Face data (e.g., f v1 v2 v3)
+                parts = line.split()
+                fces = [int(p.split('/')[0]) - 1 for p in parts[1:]]
+                fc_norms = [int(p.split('/')[2]) - 1 for p in parts[1:]]
+                if len(fces) > 3:
+                    for n in range(len(fces) - 2):
+                        faces.append([fces[0], fces[n + 1], fces[n + 2]])
+                        face_normals.append([fc_norms[0], fc_norms[n + 1], fc_norms[n + 2]])
+                        face_mats.append(curr_mat)
+                else:
+                    faces.append(fces)
+                    face_normals.append(fc_norms)
+                    face_mats.append(curr_mat)
+            elif line.startswith('o '):
+                if curr_o is not None and len(faces) > 0:
+                    o[curr_o] = [np.array(faces), np.array(face_normals), np.array(face_mats)]
+                faces = []
+                face_normals = []
+                face_mats = []
+                curr_o = line[2:].strip()
+                curr_mat = material_key[curr_o]
+            elif line.startswith('usemtl '):
+                curr_mat = material_key[line.split(' ')[1]]
+    o[curr_o] = [np.array(faces), np.array(face_normals), np.array(face_mats)]
+    vertex_normals = np.array(vertex_normals)
+    # Get material numbers correct
+    mat_nums = []
+    triangles = []
+    tri_norms = []
+    for i, (key, val) in enumerate(o.items()):
+        mat_nums.append(val[2])
+        triangles.append(val[0])
+        tri_norms.append(vertex_normals[val[1]].mean(axis=1))
+    tri_norms = np.concatenate(tri_norms)
+    tri_norms = tri_norms / np.linalg.norm(tri_norms, axis=1)[:, None]
+    build_mesh = o3d.geometry.TriangleMesh()
+    build_mesh.vertices = o3d.utility.Vector3dVector(np.array(vertices))
+    build_mesh.triangles = o3d.utility.Vector3iVector(np.concatenate(triangles).astype(int))
+    build_mesh.triangle_material_ids = o3d.utility.IntVector(list(np.concatenate(mat_nums).astype(int)))
+    build_mesh.triangle_normals = o3d.utility.Vector3dVector(tri_norms)
+    build_mesh.compute_vertex_normals()
+    return build_mesh
 
 
 def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d.geometry.TriangleMesh:
@@ -26,10 +117,10 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
     mesh = o3d.geometry.TriangleMesh()
     num_tris = [len(me.mesh.triangles) for me in full_mesh.meshes]
     mids = []
+    for me in full_mesh.meshes:
+        mesh += me.mesh
+        mids += [me.material_idx for _ in range(len(me.mesh.triangles))]
     if sum(num_tris) > points:
-        for me in full_mesh.meshes:
-            mesh += me.mesh
-            mids += [me.material_idx for _ in range(len(me.mesh.triangles))]
         pcd = o3d.geometry.PointCloud(mesh.vertices)
         vertex_size = np.asarray(pcd.compute_nearest_neighbor_distance()).mean()
         tm = mesh.simplify_vertex_clustering(vertex_size * 2)
@@ -45,31 +136,6 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
             brit += 1
         mids = list(np.zeros(len(tm.triangles), dtype=int))
         mesh = tm
-    else:
-        for me in full_mesh.meshes:
-            mesh += me.mesh
-            mids += [me.material_idx for _ in range(len(me.mesh.triangles))]
-    '''if sum(num_tris) > points:
-        scaling = points / sum(num_tris)
-        target_tris = [int(np.ceil(max(1., t * scaling))) for t in num_tris]
-        for me_idx, me in enumerate(full_mesh.meshes):
-            me.mesh.triangle_uvs = o3d.utility.Vector2dVector([])
-            pcd = o3d.geometry.PointCloud(me.mesh.vertices)
-            vertex_size = np.asarray(pcd.compute_nearest_neighbor_distance()).mean()
-            tm = me.mesh.simplify_vertex_clustering(vertex_size)
-            tm.remove_duplicated_vertices()
-            tm.remove_unreferenced_vertices()
-            bounce = 1
-            while len(tm.triangles) > target_tris[me_idx] or len(tm.triangles) == 0:
-                vertex_size *= (10. if len(tm.triangles) > target_tris[me_idx] else .2) * bounce
-                tm = me.mesh.simplify_vertex_clustering(vertex_size)
-                tm.remove_duplicated_vertices()
-                tm.remove_unreferenced_vertices()
-                bounce -= .1
-                if bounce < .01:
-                    break
-            mesh += tm
-            mids += [me.material_idx for _ in range(len(tm.triangles))]'''
 
     mesh.triangle_material_ids = o3d.utility.IntVector(mids)
 
@@ -498,7 +564,7 @@ def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray
         newpoints = ray_origins_gpu.copy_to_host()[pts_used]
         points = (
             newpoints
-            if newpoints.shape[0] > npoints or len(points) == 0
+            if newpoints.shape[0] > npoints or not points
             else np.concatenate((points, newpoints))
         )
 
@@ -683,20 +749,22 @@ def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_b
         box_idxes = ptidx_gpu.copy_to_host()
         tri_box_idxes = np.concatenate((tri_box_idxes, box_idxes), axis=1)
 
-        if np.median(box_idxes.sum(axis=0)) > min_tri_per_box and depth < max_depth:
-            depth += 1
-            ntree_bounds = np.zeros((2**depth, 2, 3))
-            for idx in range(level, next_level):
-                act_pts = vidx == idx
-                ntree_bounds[(idx - level) * 2], ntree_bounds[(idx - level) * 2 + 1], sp_pt, sp_axis = (
-                    surfaceAreaHeuristic(tri_area[act_pts], centroids[act_pts], tri_bounds[act_pts], tree_bounds[idx]))
-                lefties = np.logical_and(sp_pt < verts[:, sp_axis], vidx == idx)
-                righties = np.logical_and(sp_pt >= verts[:, sp_axis], vidx == idx)
-                vidx[lefties] = idx * 2 + 1
-                vidx[righties] = idx * 2 + 2
-            tree_bounds = np.concatenate((tree_bounds, ntree_bounds), axis=0)
-        else:
+        if (
+            np.median(box_idxes.sum(axis=0)) <= min_tri_per_box
+            or depth >= max_depth
+        ):
             break
+        depth += 1
+        ntree_bounds = np.zeros((2**depth, 2, 3))
+        for idx in range(level, next_level):
+            act_pts = vidx == idx
+            ntree_bounds[(idx - level) * 2], ntree_bounds[(idx - level) * 2 + 1], sp_pt, sp_axis = (
+                surfaceAreaHeuristic(tri_area[act_pts], centroids[act_pts], tri_bounds[act_pts], tree_bounds[idx]))
+            lefties = np.logical_and(sp_pt < verts[:, sp_axis], vidx == idx)
+            righties = np.logical_and(sp_pt >= verts[:, sp_axis], vidx == idx)
+            vidx[lefties] = idx * 2 + 1
+            vidx[righties] = idx * 2 + 2
+        tree_bounds = np.concatenate((tree_bounds, ntree_bounds), axis=0)
     return tree_bounds, tri_box_idxes[:, 1:]
 
 
