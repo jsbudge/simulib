@@ -50,11 +50,6 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
 
 
 @cuda.jit(device=True, fast_math=True)
-def calcConicalIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
-    pass
-
-
-@cuda.jit(device=True, fast_math=True)
 def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
     r, r_rng, r_az, r_el = getRangeAndAngles(inter, re)
@@ -67,20 +62,6 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
         return acc_val.real, acc_val.imag, rng_bin
 
     return 0, 0, -1
-
-
-@cuda.jit(device=True, fast_math=True)
-def c1b2(x):
-    x &= 0x09249249                # x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
-    x = (x ^ (x >>  2)) & 0x030c30c3 # x = ---- --98 ---- 76-- --54 ---- 32-- --10
-    x = (x ^ (x >>  4)) & 0x0300f00f # x = ---- --98 ---- ---- 7654 ---- ---- 3210
-    x = (x ^ (x >>  8)) & 0xff0000ff # x = ---- --98 ---- ---- ---- ---- 7654 3210
-    x = (x ^ (x >> 16)) & 0x000003ff # x = ---- ---- ---- ---- ---- --98 7654 3210
-    return x
-
-@cuda.jit(device=True, fast_math=True)
-def morton_decode(code):
-    return make_float3(c1b2(code >> 0), c1b2(code >> 1), c1b2(code >> 2))
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -326,14 +307,15 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                             b = tb + 0.
                             # Some parts of the Fresnel coefficient calculation
                             cosa = abs(dot(rd, tn))
+                            # sina = tri_material[ti, 0] * math.sqrt(
+                            #     1. - (1. / tri_material[ti, 0] * 0.) ** 2)
                             sina = tri_material[ti, 0] * math.sqrt(
                                 1. - (1. / tri_material[ti, 0] * length(cross(rd, tn))) ** 2)
                             Rs = abs((cosa - sina) / (
                                     cosa + sina)) ** 2  # Reflectance using Fresnel coefficient
-                            roughness = math.exp(-.5 * (2. * wavenumber * tri_material[
-                                ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
+                            roughness = math.exp(-.5 * (2. * wavenumber * tri_material[ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
                             spec = math.exp(-(1. - cosa) ** 2 / .0000007442)  # This should drop the specular component to zero by 2 degrees
-                            L = .6 * ((1 + abs(dot(b, rd))) / 2.) + .4
+                            L = .7 * ((1 + abs(dot(b, rd))) / 2.) + .3
                             nrho = rho * inv_rng * inv_rng * cosa * Rs * (
                                     roughness * spec + (
                                     1. - roughness) * L ** 2)  # Final reflected power

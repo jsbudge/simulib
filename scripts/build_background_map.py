@@ -84,7 +84,7 @@ def loadOBJ(fnme):
                 if parts[1] not in material_key.keys():
                     mat_idx += 1
                     material_key[parts[1]] = [mat_idx, 1000000., .0017]
-                curr_mat = parts[1]
+                curr_mat = parts[1].strip()
             '''elif line.startswith('vt '):
                 vertex_textures.append(list(map(float, line.split()[1:4])))'''
 

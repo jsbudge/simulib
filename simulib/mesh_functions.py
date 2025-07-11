@@ -90,7 +90,7 @@ def _loadOBJ(obj_fnme, material_key):
                 curr_o = line[2:].strip()
                 curr_mat = material_key[curr_o]
             elif line.startswith('usemtl '):
-                curr_mat = material_key[line.split(' ')[1]]
+                curr_mat = material_key[line.split(' ')[1].strip()]
     o[curr_o] = [np.array(faces), np.array(face_normals), np.array(face_mats)]
     vertex_normals = np.array(vertex_normals)
     # Get material numbers correct

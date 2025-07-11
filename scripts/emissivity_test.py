@@ -28,7 +28,7 @@ from itertools import product
 pio.renderers.default = 'browser'
 
 def addNoise(range_profile, a_chirp, npower, mf, a_fft_len):
-    data = a_chirp * np.fft.fft(range_profile, a_fft_len)
+    data = a_chirp * np.fft.fft(range_profile, a_fft_len, axis=1)
     data = data + np.random.normal(0, npower, data.shape) + 1j * np.random.normal(0, npower, data.shape)
     return data * mf
 
@@ -38,7 +38,7 @@ DTR = np.pi / 180
 
 if __name__ == '__main__':
     fc = 9.6e9
-    fs = 2e9
+    fs = 4e9
     rx_gain = 32  # dB
     tx_gain = 32  # dB
     rec_gain = 100  # dB
@@ -49,26 +49,29 @@ if __name__ == '__main__':
     n_samples = 2**17
 
     nposes = 64
-    azes = np.linspace(0, 2 * np.pi, nposes)
-    eles = np.ones(nposes) * np.pi
+    azes = np.linspace(np.pi / 2 - .01, np.pi / 2 + .01, nposes)
+    # azes = np.ones(nposes) * -np.pi / 2
+    eles = np.ones(nposes) * 0
     poses = np.ascontiguousarray(azelToVec(azes, eles).T * exp_range, dtype=_float)
     pointing = -poses
     pans = np.arctan2(pointing[:, 0], pointing[:, 1]).astype(_float)
     tilts = -np.arcsin(pointing[:, 2] / np.linalg.norm(pointing, axis=1)).astype(_float)
+    # pans = np.linspace(np.pi / 2 - 1., np.pi / 2 + 1., nposes).astype(_float)
+    # tilts = np.zeros(nposes).astype(_float)
     near_range_s = (exp_range - 50) / c0
     nsam = 4096
-    nr = 1024
+    nr = 4000
     fft_len = 8192
 
     scene = Scene()
 
-    mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/air_balloon.targ')
-    mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0]))).scale(1 / 50., center=mesh.get_center())
+    mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/Humvee.targ')
+    mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0]))).scale(1 / 30., center=mesh.get_center())
     mesh = mesh.translate(np.array([0, 0, 0.]), relative=False)
     scene.add(
         Mesh(
             mesh,
-            max_tris_per_split=256,
+            max_tris_per_split=64,
             material_sigma=[mesh_materials[mtid][1] for mtid in
                             range(np.asarray(mesh.triangle_material_ids).max() + 1)],
             material_emissivity=[mesh_materials[mtid][0] for mtid in
@@ -99,7 +102,7 @@ if __name__ == '__main__':
     # Generate a chirp
     # fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
     # mf_chirp = sdr_f.genMatchedFilter(0, fft_len=fft_len)
-    chirp_bandwidth = 400e6
+    chirp_bandwidth = 1400e6
     chirp = genChirp(nr, fs, fc, chirp_bandwidth)
     fft_chirp = np.fft.fft(chirp, fft_len)
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
@@ -122,9 +125,9 @@ if __name__ == '__main__':
                                                                                   [pans.astype(_float)],
                                                                                   [tilts.astype(_float)],
                                                                                   radar_coeff,
-                                                                                  np.pi / 128, np.pi / 128,
+                                                                                  np.pi / 4, np.pi / 4,
                                                                                   nsam, fc, near_range_s, fs,
-                                                                                  num_bounces=1,
+                                                                                  num_bounces=4,
                                                                                   debug=True, streams=streams, use_supersampling=True)
     single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                                  is_freq=True, time_len=nsam)
@@ -137,21 +140,22 @@ if __name__ == '__main__':
     mfig.add_scatter(y=db(single_mf_pulse[0].flatten()), mode='markers')
 
     bounce_colors = ['blue', 'red', 'green', 'yellow']
+    pulse_idx = 16
     for bounce in range(len(ray_origins)):
         fig = getSceneFig(scene,
-                          title=f'Bounce {bounce}', zrange=[-10, 10])
+                          title=f'Bounce {bounce}', zrange=[-2, 6])
         for idx, (ro, rd, nrp) in enumerate(
                 zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
-            valids = nrp[0] > 0.
-            sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
-            fig.add_trace(go.Cone(x=ro[0, valids, 0], y=ro[0, valids, 1], z=ro[0, valids, 2], u=rd[0, valids, 0] * sc,
-                                  v=rd[0, valids, 1] * sc, w=rd[0, valids, 2] * sc, anchor='tail', sizeref=80,
+            valids = nrp[pulse_idx] > 0.
+            sc = (1 + nrp[pulse_idx, valids] / nrp[pulse_idx, valids].max()) * 10
+            fig.add_trace(go.Cone(x=ro[pulse_idx, valids, 0], y=ro[pulse_idx, valids, 1], z=ro[pulse_idx, valids, 2], u=rd[pulse_idx, valids, 0] * sc,
+                                  v=rd[pulse_idx, valids, 1] * sc, w=rd[pulse_idx, valids, 2] * sc, anchor='tail', sizeref=80,
                                   colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
 
         fig.show()
 
 
-    fig = getSceneFig(scene, title='Depth', zrange=[-10, 10])
+    fig = getSceneFig(scene, title='Depth', zrange=[-2, 6])
 
     for mesh in scene.meshes:
         d = mesh.bvh_levels - 1
@@ -160,7 +164,7 @@ if __name__ == '__main__':
                 fig.add_trace(drawOctreeBox(b))
     fig.show()
 
-    fig = getSceneFig(scene, title='Depth', zrange=[-10, 10])
+    fig = getSceneFig(scene, title='Depth', zrange=[-2, 6])
     fig.add_scatter3d(x=sample_points[0][:, 0], y=sample_points[0][:, 1], z=sample_points[0][:, 2], mode='markers')
     fig.show()
     rpfig.show()
@@ -172,3 +176,7 @@ if __name__ == '__main__':
     plt.axis('tight')
 
     
+'''fig = go.Figure()
+fig.add_trace(go.Cone(x=[ro[0]], y=[ro[1]], z=[ro[2]], u=[rd[0]], v=[rd[1]], w=[rd[2]]))
+fig.add_trace(go.Cone(x=[ro[0]], y=[ro[1]], z=[ro[2]], u=[b[0]], v=[b[1]], w=[b[2]]))
+fig.show()'''
