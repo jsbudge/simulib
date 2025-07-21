@@ -1,7 +1,7 @@
 from functools import cached_property, singledispatch
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPoints, detectPointsScene, genKDTree, _float
+from .mesh_functions import detectPointsScene, genKDTree, _float
 
 
 class Mesh(object):
@@ -60,24 +60,14 @@ class Mesh(object):
         self.center = a_mesh.get_center().astype(_float)
         self.ntri = mesh_tri_idx.shape[0]
         self.bvh_levels = num_box_levels
-        self.source_mesh = a_mesh
-
-    '''def sample(self, sample_points: int, view_pos: np.ndarray, bw_az: float = None, bw_el: float = None):
-        # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
-        pvecs = self.center - view_pos
-        pointing_az = np.arctan2(pvecs[:, 0], pvecs[:, 1])
-        pointing_el = -np.arcsin(pvecs[:, 2] / np.linalg.norm(pvecs, axis=1))
-        mesh_views = self.vertices[None, :, :] - view_pos[:, None, :]
-        if bw_az is None:
-            view_az = np.arctan2(mesh_views[:, :, 0], mesh_views[:, :, 1])
-            view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
-            bw_az = abs(pointing_az[:, None] - view_az).max()
-            bw_el = abs(pointing_el[:, None] - view_el).max()
-        return detectPoints(self.bvh, self.leaf_list, self.leaf_key, self.tri_idx, self.vertices, self.normals,
-                            self.materials, sample_points, view_pos, bw_az, bw_el, pointing_az, pointing_el)'''
+        # self.source_mesh = a_mesh
 
     def sample(self, sample_points: int):
-        pc = self.source_mesh.sample_points_uniformly(sample_points)
+        sm = o3d.geometry.TriangleMesh()
+        sm.triangles = o3d.utility.Vector3iVector(self.tri_idx)
+        sm.vertices = o3d.utility.Vector3dVector(self.vertices)
+        sm.triangle_normals = o3d.utility.Vector3dVector(self.normals)
+        pc = sm.sample_points_poisson_disk(sample_points)
         return np.asarray(pc.points)
 
 
@@ -129,8 +119,13 @@ class Scene(object):
         return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)'''
 
     def sample(self, sample_points: int):
-        pc = self.meshes[0].source_mesh.sample_points_poisson_disk(sample_points)
-        return np.asarray(pc.points)
+        return detectPointsScene(self, sample_points)
+        '''sm = o3d.geometry.TriangleMesh()
+        sm.triangles = o3d.utility.Vector3iVector(self.meshes[0].tri_idx)
+        sm.vertices = o3d.utility.Vector3dVector(self.meshes[0].vertices)
+        sm.triangle_normals = o3d.utility.Vector3dVector(self.meshes[0].normals)
+        pc = sm.sample_points_poisson_disk(sample_points)
+        return np.asarray(pc.points)'''
 
     @cached_property
     def bounding_box(self):

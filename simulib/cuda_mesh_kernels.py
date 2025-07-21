@@ -519,7 +519,7 @@ def calcReturnPower(ray_origin, ray_distance, ray_power, pd_r, pd_i, counts, rec
 
 
 
-@cuda.jit()
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcOriginDirAtt(rec_xyz, sample_points, pan, tilt, params, ray_dir, ray_origin, ray_power):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)

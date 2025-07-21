@@ -224,7 +224,7 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
                 triangle_bin_surface_area[tri_idx, b] = sa
 
 
-@cuda.jit(max_registers=64)
+@cuda.jit(max_registers=32)
 def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, tri_idxes, sa_bins, params):
     tri, pulse = cuda.grid(ndim=2)
     tri_stride, pulse_stride = cuda.gridsize(2)
@@ -241,13 +241,15 @@ def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, tri_idxes, sa_bins, params)
             rmin = min(length(tx - p2), length(tx - p0), length(tx - p1))
             rmax = max(length(tx - p2), length(tx - p0), length(tx - p1))
             if rmin > params[1] * c0:
-                first_bin = int(math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2]))
+                first_bin = max(int(math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2])), 0)
                 nbins = int(math.ceil(((2 * rmax) / c0 - 2 * params[1]) * params[2]) -
                                                   math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2]))
-            for b in prange(first_bin, first_bin + nbins, 1):
-                R = (b / params[2] + 2 * params[1]) * c0 * .5
-                sa, _ = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
-                cuda.atomic.add(sa_bins, (t, b), sa)
+            if first_bin < sa_bins.shape[1]:
+                for b in prange(first_bin, first_bin + nbins, 1):
+                    if b < sa_bins.shape[1]:
+                        R = (b / params[2] + 2 * params[1]) * c0 * .5
+                        sa, _ = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
+                        cuda.atomic.add(sa_bins, (t, b), sa)
 
 
 
@@ -417,10 +419,10 @@ def calcViewSamples(transmit_xyz, pan, tilt, tri_verts, tri_idxes, tri_norm, kd_
         for el_idx in prange(e, target_samples.shape[1], e_stride):
             if target_samples[az_idx, el_idx, 0] > 0:
                 for n in prange(target_samples[az_idx, el_idx, 0]):
-                    az = (az_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[3] / target_samples.shape[
-                        0] + pan - params[3]
-                    el = (el_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[4] / target_samples.shape[
-                        1] + tilt - params[4]
+                    az = (az_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[0] / target_samples.shape[
+                        0] + pan - params[0]
+                    el = (el_idx + xoroshiro128p_uniform_float32(rands, az_idx)) * 2 * params[1] / target_samples.shape[
+                        1] + tilt - params[1]
                     rd = azelToVec(az, el)
                     did_intersect, inter, rng, _ = traverseOctreeAndIntersection(tx, rd, kd_tree, leaf_list, leaf_key,
                                                                                  tri_idxes, tri_verts, tri_norm, 0)

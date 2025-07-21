@@ -12,6 +12,7 @@ from .cuda_kernels import optimizeStridedThreadBlocks2d
 import plotly.graph_objects as go
 from tqdm import tqdm
 from pathlib import Path
+import pickle
 
 c0 = 299792458.0
 _float = np.float32
@@ -71,7 +72,10 @@ def _loadOBJ(obj_fnme, material_key):
                 # Face data (e.g., f v1 v2 v3)
                 parts = line.split()
                 fces = [int(p.split('/')[0]) - 1 for p in parts[1:]]
-                fc_norms = [int(p.split('/')[2]) - 1 for p in parts[1:]]
+                try:
+                    fc_norms = [int(p.split('/')[2]) - 1 for p in parts[1:]]
+                except IndexError:
+                    fc_norms = [0, 0, 0.]
                 if len(fces) > 3:
                     for n in range(len(fces) - 2):
                         faces.append([fces[0], fces[n + 1], fces[n + 2]])
@@ -100,15 +104,17 @@ def _loadOBJ(obj_fnme, material_key):
     for i, (key, val) in enumerate(o.items()):
         mat_nums.append(val[2])
         triangles.append(val[0])
-        tri_norms.append(vertex_normals[val[1]].mean(axis=1))
-    tri_norms = np.concatenate(tri_norms)
-    tri_norms = tri_norms / np.linalg.norm(tri_norms, axis=1)[:, None]
+        # tri_norms.append(vertex_normals[val[1]].mean(axis=1))
+    # tri_norms = np.concatenate(tri_norms)
+    # tri_norms = tri_norms / np.linalg.norm(tri_norms, axis=1)[:, None]
     build_mesh = o3d.geometry.TriangleMesh()
     build_mesh.vertices = o3d.utility.Vector3dVector(np.array(vertices))
     build_mesh.triangles = o3d.utility.Vector3iVector(np.concatenate(triangles).astype(int))
     build_mesh.triangle_material_ids = o3d.utility.IntVector(list(np.concatenate(mat_nums).astype(int)))
-    build_mesh.triangle_normals = o3d.utility.Vector3dVector(tri_norms)
+    # build_mesh.triangle_normals = o3d.utility.Vector3dVector(tri_norms)
     build_mesh.compute_vertex_normals()
+    build_mesh.compute_triangle_normals()
+    build_mesh.normalize_normals()
     return build_mesh
 
 
@@ -288,7 +294,7 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
 
     threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
     threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d(
-        (mesh.tri_idx.shape[0], nsam))
+        (mesh.tri_idx.shape[0], npulses))
 
     # These are the mesh constants that don't change with intersection points
 
@@ -387,6 +393,12 @@ def getRangeProfileFromMesh(mesh, sampled_points: int | np.ndarray, tx_pos: list
         return final_rp, debug_rays, debug_raydirs, debug_raypower
     else:
         return final_rp
+
+
+def loadMesh(fnme: str):
+    with open(fnme, 'rb') as f:
+        m = pickle.load(f)
+    return m
 
 
 def getMeshErrorBounds(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
@@ -510,109 +522,65 @@ def getMeshErrorBounds(mesh, sampled_points: int | np.ndarray, tx_pos: list[np.n
         return final_rp
 
 
-def detectPoints(boxes: np.ndarray, tri_box: np.ndarray, tri_box_key: np.ndarray, tri_idxes: np.ndarray,
-                            tri_verts: np.ndarray, tri_norm: np.ndarray, tri_material: np.ndarray,
-                            npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, pointing_az, pointing_el):
-    npulses = a_obs_pt.shape[0]
-
-    # These are the mesh constants that don't change with intersection points
-    tri_norm_gpu = cuda.to_device(tri_norm.astype(_float))
-    tri_idxes_gpu = cuda.to_device(tri_idxes.astype(np.int32))
-    tri_verts_gpu = cuda.to_device(tri_verts.astype(_float))
-    tri_material_gpu = cuda.to_device(tri_material.astype(_float))
-    tri_box_gpu = cuda.to_device(tri_box.astype(np.int32))
-    tri_box_key_gpu = cuda.to_device(tri_box_key.astype(np.int32))
-    # This is for optimization purposes
-    bxminx_gpu = cuda.to_device(boxes[:, 0, 0].astype(_float))
-    bxminy_gpu = cuda.to_device(boxes[:, 0, 1].astype(_float))
-    bxminz_gpu = cuda.to_device(boxes[:, 0, 2].astype(_float))
-    bxmaxx_gpu = cuda.to_device(boxes[:, 1, 0].astype(_float))
-    bxmaxy_gpu = cuda.to_device(boxes[:, 1, 1].astype(_float))
-    bxmaxz_gpu = cuda.to_device(boxes[:, 1, 2].astype(_float))
-
-    ray_origins_gpu = cuda.to_device(np.zeros((npulses, npoints, 3)).astype(_float))
-    receive_xyz_gpu = cuda.to_device(a_obs_pt.astype(_float))
-
-    # Calculate out direction vectors for the beam to hit
-    points = []
-    threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
-    while len(points) < npoints:
-        ray_power_gpu = cuda.to_device(np.ones((npulses, npoints)))
-
-        # Group az and el for faster traversal of octree
-        n_anchors = min(16, npoints)
-        if npoints < n_anchors**2:
-            azes = pointing_az[:, None] + np.random.uniform(-bw_az, bw_az, (npulses, npoints))
-            eles = np.sort(pointing_el[:, None] + np.random.uniform(-bw_el, bw_el, (npulses, npoints)))
-        else:
-            az_anchors, el_anchors = np.meshgrid(np.linspace(-bw_az, bw_az, n_anchors), np.linspace(-bw_el, bw_el, n_anchors))
-            azes = np.concatenate([pointing_az[:, None] + np.random.uniform(a - bw_az / n_anchors, a + bw_az / n_anchors,
-                                                                            (npulses, npoints // n_anchors**2)) for a in
-                                   az_anchors.flatten()], axis=1)
-            eles = np.concatenate([pointing_el[:, None] + np.random.uniform(a - bw_el / n_anchors, a + bw_el / n_anchors,
-                                                                            (npulses, npoints // n_anchors**2)) for a in
-                                   el_anchors.flatten()], axis=1)
-        rdirs = azelToVec(azes,eles).T.swapaxes(0, 1)
-        ray_dir_gpu = cuda.to_device(np.ascontiguousarray(rdirs.astype(_float)))
-
-        calcIntersectionPoints[blocks_strided, threads_strided](ray_origins_gpu, ray_dir_gpu, ray_power_gpu, bxminx_gpu, bxminy_gpu, bxminz_gpu, bxmaxx_gpu,
-                                                                 bxmaxy_gpu, bxmaxz_gpu, tri_box_gpu,
-                                                             tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
-                                                             tri_norm_gpu, tri_material_gpu, receive_xyz_gpu)
-
-        pts_used = ray_power_gpu.copy_to_host().astype(bool)
-
-        newpoints = ray_origins_gpu.copy_to_host()[pts_used]
-        points = (
-            newpoints
-            if newpoints.shape[0] > npoints or not points
-            else np.concatenate((points, newpoints))
-        )
-
-    points = points[:npoints, :]
-
-    return points
-
-
-def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, fc, fs, near_range_s,
-                      radar_equation_constant):
+def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray = None):
     points = np.zeros((1, 3))
     gridsz = 512
-    params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
-                                          radar_equation_constant]).astype(_float))
+    if a_obs_pt is None:
+        azes, eles = np.meshgrid(np.linspace(0, 2 * np.pi, 8), np.linspace(-np.pi / 2, np.pi / 2, 8))
+        a_obs_pt = azelToVec(azes.flatten(), eles.flatten()).T * max(scene.bounding_box[1] - scene.bounding_box[0]) / (2 * np.tan(1 * np.pi / 180.)) + scene.center
+        cosz = np.cos(azes.flatten())
+        sinz = np.sin(azes.flatten())
+        cosy = np.cos(eles.flatten())
+        siny = np.sin(eles.flatten())
+        cosx = 1.
+        sinx = 0.
+        x = scene.bounding_box[:, 0][:, None] - a_obs_pt[:, 0][None, :]
+        y = scene.bounding_box[:, 1][:, None] - a_obs_pt[:, 1][None, :]
+        z = scene.bounding_box[:, 2][:, None] - a_obs_pt[:, 2][None, :]
+        dx = cosy * (sinz * y + cosz * x) - siny * z
+        dy = sinx * (cosy * z + siny * (sinz * y + cosz * x)) + cosx * (cosz * y - sinz * x)
+        dz = cosx * (cosy * z + siny * (sinz * y + cosz * x)) - sinx * (cosz * y - sinz * x)
+        az_des = np.arctan2(dx, dy)
+        az_des[az_des < 0] += 2 * np.pi
+        el_des = -np.arcsin(dz / np.sqrt(dx ** 2 + dy ** 2 + dz ** 2))
+        el_des[el_des < 0] += 2 * np.pi
+        bw_az = az_des.max(axis=0) - az_des.min(axis=0)
+        bw_az[bw_az > np.pi] = 2 * np.pi - bw_az[bw_az > np.pi]
+        bw_el = el_des.max(axis=0) - el_des.min(axis=0)
+        bw_el[bw_el > np.pi] = 2 * np.pi - bw_el[bw_el > np.pi]
+        test_ranges = (max(scene.bounding_box[1] - scene.bounding_box[0]) /
+                       np.array([2 * np.tan(bw_az), 2 * np.tan(bw_el), np.ones_like(bw_az) * 2 * np.tan(1 * np.pi / 180)])).T
+        a_obs_pt = np.ascontiguousarray(azelToVec(azes.flatten(), eles.flatten()).T *
+                                        test_ranges.max(axis=1)[:, None] + scene.center)
+    else:
+        azes = np.arctan2((a_obs_pt - scene.center)[:, 0], (a_obs_pt - scene.center)[:, 1])
+        eles = -np.arcsin((a_obs_pt - scene.center)[:, 2] / np.linalg.norm(a_obs_pt - scene.center, axis=1))
+    cosz = np.cos(azes.flatten())
+    sinz = np.sin(azes.flatten())
+    cosy = np.cos(eles.flatten())
+    siny = np.sin(eles.flatten())
+    cosx = 1.
+    sinx = 0.
+    x = scene.bounding_box[:, 0][:, None] - a_obs_pt[:, 0][None, :]
+    y = scene.bounding_box[:, 1][:, None] - a_obs_pt[:, 1][None, :]
+    z = scene.bounding_box[:, 2][:, None] - a_obs_pt[:, 2][None, :]
+    dx = cosy * (sinz * y + cosz * x) - siny * z
+    dy = sinx * (cosy * z + siny * (sinz * y + cosz * x)) + cosx * (cosz * y - sinz * x)
+    dz = cosx * (cosy * z + siny * (sinz * y + cosz * x)) - sinx * (cosz * y - sinz * x)
+    az_des = np.arctan2(dx, dy)
+    az_des[az_des < 0] += 2 * np.pi
+    el_des = -np.arcsin(dz / np.sqrt(dx ** 2 + dy ** 2 + dz ** 2))
+    el_des[el_des < 0] += 2 * np.pi
+    bw_az = az_des.max() - az_des.min() if az_des.max() - az_des.min() < np.pi else 2 * np.pi - (
+                az_des.max() - az_des.min())
+    bw_el = el_des.max() - el_des.min() if el_des.max() - el_des.min() < np.pi else 2 * np.pi - (
+                el_des.max() - el_des.min())
+    params_gpu = cuda.to_device(np.array([bw_az, bw_el]).astype(_float))
     set_npoints = int(np.ceil(npoints / a_obs_pt.shape[0]))
     for t in range(a_obs_pt.shape[0]):
         transmit_xyz_gpu = cuda.to_device(a_obs_pt[t])
         threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((gridsz, gridsz))
         rng_states = create_xoroshiro128p_states([gridsz], seed=np.random.randint(1, 10000))
-        '''pixel_mu_r_gpu = cuda.to_device(np.zeros((gridsz, gridsz)).astype(_float))
-        pixel_mu_i_gpu = cuda.to_device(np.zeros((gridsz, gridsz)).astype(_float))
-        pixel_m2_r_gpu = cuda.to_device(np.zeros((gridsz, gridsz)).astype(_float))
-        pixel_m2_i_gpu = cuda.to_device(np.zeros((gridsz, gridsz)).astype(_float))
-        pixel_count_gpu = cuda.to_device(np.zeros((gridsz, gridsz)).astype(_float))
-        for mesh in scene.meshes:
-            tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
-            tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
-            tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
-            tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
-            leaf_list_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
-            leaf_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
-
-            # This is for optimization purposes
-            kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
-            center_pt_vec = mesh.center - a_obs_pt[t]
-            az = np.float32(np.arctan2(center_pt_vec[0], center_pt_vec[1]))
-            el = np.float32(-np.arcsin(center_pt_vec[2] / np.linalg.norm(center_pt_vec)))
-            calcViewVariance[blocks_strided, threads_strided](transmit_xyz_gpu, az, el, tri_verts_gpu, tri_idxes_gpu,
-                                                             tri_norm_gpu, tri_material_gpu, kd_tree_gpu, leaf_key_gpu,
-                                                              leaf_list_gpu, pixel_mu_r_gpu, pixel_mu_i_gpu,
-                                                              pixel_m2_r_gpu, pixel_m2_i_gpu, pixel_count_gpu,
-                                                              rng_states, params_gpu)
-        pm2r = pixel_m2_r_gpu.copy_to_host()
-        pm2i = pixel_m2_i_gpu.copy_to_host()
-        pc = pixel_count_gpu.copy_to_host()'''
-
-        # pixel_bins = (np.sqrt(pm2r**2 + pm2i**2) / pc)**(1/5)
         pixel_bins = np.ones((gridsz, gridsz))
 
         test = (pixel_bins / np.sum(pixel_bins)).ravel()
@@ -650,7 +618,7 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray, bw_az, bw_el, f
             del ray_points_gpu
         del tri_norm_gpu, tri_idxes_gpu, tri_verts_gpu, leaf_key_gpu, leaf_list_gpu, kd_tree_gpu
     del params_gpu
-    return points[1:npoints]
+    return points[1:npoints + 1]
 
 
 def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds: np.ndarray, bounding_box: np.ndarray):
