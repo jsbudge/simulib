@@ -310,9 +310,7 @@ if __name__ == '__main__':
         sample_points = ptsam
     else:
         # sample_points = [grid_pts]
-        sample_points = [scene.sample(int(splits[s + 1] - splits[s]),
-                                    view_pos=rp.txpos(rp.gpst[np.linspace(0, len(rp.gpst) - 1, 4).astype(int)]), fc=fc,
-                                    fs=fs, near_range_s=near_range_s,  radar_equation_constant=radar_coeff)
+        sample_points = [scene.sample(int(splits[s + 1] - splits[s]))
                          for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
@@ -407,7 +405,7 @@ if __name__ == '__main__':
     scaled_rp = (ray_powers[0] - sc_min) * sc
 
 
-    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title='Full Mesh', zrange=flight_path[:, 2].mean() + 10)
+    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title='Full Mesh', zrange=[-30, flight_path[:, 2].mean() + 10])
     fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
     fig.show()
 

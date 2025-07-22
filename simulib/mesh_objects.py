@@ -119,13 +119,13 @@ class Scene(object):
         return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)'''
 
     def sample(self, sample_points: int):
-        return detectPointsScene(self, sample_points)
-        '''sm = o3d.geometry.TriangleMesh()
+        # return detectPointsScene(self, sample_points)
+        sm = o3d.geometry.TriangleMesh()
         sm.triangles = o3d.utility.Vector3iVector(self.meshes[0].tri_idx)
         sm.vertices = o3d.utility.Vector3dVector(self.meshes[0].vertices)
         sm.triangle_normals = o3d.utility.Vector3dVector(self.meshes[0].normals)
-        pc = sm.sample_points_poisson_disk(sample_points)
-        return np.asarray(pc.points)'''
+        pc = sm.compute_convex_hull()[0].sample_points_uniformly(sample_points)
+        return np.asarray(pc.points)
 
     @cached_property
     def bounding_box(self):

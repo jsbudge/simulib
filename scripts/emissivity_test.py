@@ -48,13 +48,16 @@ if __name__ == '__main__':
     noise_power_db = -120
     upsample = 8
     exp_range = 500
-    n_samples = 2**14
-    target_fnme = '/home/jeff/Documents/target_meshes/air_balloon.targ'
+    n_samples = 2**18
+    single_target = '/home/jeff/Documents/target_meshes/Seahawk.targ'
 
-    nposes = 64
-    azes = np.linspace(np.pi / 2 - .01, np.pi / 2 + .01, nposes)
+    nposes = 8
+    azes, eles = np.meshgrid(np.linspace(0, 2 * np.pi, nposes), np.linspace(-np.pi / 2, np.pi / 2, nposes))
+    azes = azes.flatten()
+    eles = eles.flatten()
+    # azes = np.linspace(0, 2 * np.pi, nposes)
     # azes = np.ones(nposes) * -np.pi / 2
-    eles = np.ones(nposes) * 0
+    # eles = np.ones(nposes) * 0
     poses = np.ascontiguousarray(azelToVec(azes, eles).T * exp_range, dtype=_float)
     pointing = -poses
     pans = np.arctan2(pointing[:, 0], pointing[:, 1]).astype(_float)
@@ -84,10 +87,16 @@ if __name__ == '__main__':
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
     for target_fnme in targets:
+        if target_fnme != single_target:
+            continue
+        print(target_fnme)
         with open(target_fnme, 'r') as f:
             tdata = f.readlines()
-        target_scaling = 1 / float(target_info.loc[target_info['filename'] ==
-                                             f'{Path(tdata[0]).stem}{Path(tdata[0]).suffix}'.strip()]['scaling'].iloc[0])
+        try:
+            target_scaling = 1 / float(target_info.loc[target_info['filename'] ==
+                                                 f'{Path(tdata[0]).stem}{Path(tdata[0]).suffix}'.strip()]['scaling'].iloc[0])
+        except IndexError:
+            target_scaling = 1.
 
         scene = Scene()
 
@@ -106,7 +115,6 @@ if __name__ == '__main__':
                                      range(np.asarray(mesh.triangle_material_ids).max() + 1)],
             )
         )
-        print('Done.')
 
         '''mesh = o3d.geometry.TriangleMesh.create_sphere(10., resolution=10)
         mesh.triangle_material_ids = o3d.utility.IntVector([0 for _ in range(len(mesh.triangles))])
@@ -132,7 +140,6 @@ if __name__ == '__main__':
             scene = pickle.load(f)
         print('Sampling mesh...', end='')
         sample_points = [scene.sample(n_samples)]
-        print('Done.')
 
         streams = [cuda.stream()]
         rpfig = go.Figure()
@@ -147,19 +154,18 @@ if __name__ == '__main__':
                                                                                       [pans.astype(_float)],
                                                                                       [tilts.astype(_float)],
                                                                                       radar_coeff,
-                                                                                      np.pi / 128, np.pi / 128,
+                                                                                      np.pi / 4, np.pi / 4,
                                                                                       nsam, fc, near_range_s, fs,
-                                                                                      num_bounces=1,
-                                                                                      debug=True, streams=streams, use_supersampling=False)
+                                                                                      num_bounces=2,
+                                                                                      debug=True, streams=streams, use_supersampling=True)
         single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                                      is_freq=True, time_len=nsam)
         single_mf_pulse = upsamplePulse(
             addNoise(single_rp[0], fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample,
             is_freq=True, time_len=nsam)
-        print('Done.')
 
-        rpfig.add_scatter(y=db(single_rp[0][0].flatten()), mode='markers')
-        pfig.add_scatter(y=db(single_pulse[0].flatten()), mode='markers')
+        # rpfig.add_scatter(y=db(single_rp[0][0].flatten()), mode='markers')
+        # pfig.add_scatter(y=db(single_pulse[0].flatten()), mode='markers')
         mfig.add_scatter(y=db(single_mf_pulse[0].flatten()), mode='markers')
 
         zranges = [scene.bounding_box[0, 2] - 1, scene.bounding_box[1, 2] + 1]
@@ -192,25 +198,26 @@ if __name__ == '__main__':
         rgba_colors = cmap(norm(tri_materials))
 
 
-        fig = getSceneFig(scene, triangle_colors=rgba_colors[:, :3], title='Depth', zrange=zranges)
+        '''fig = getSceneFig(scene, triangle_colors=rgba_colors[:, :3], title='Depth', zrange=zranges)
 
         for mesh in scene.meshes:
             d = mesh.bvh_levels - 1
             for b in mesh.bvh[sum(2 ** n for n in range(d)):sum(2 ** n for n in range(d + 1))]:
                 if np.sum(b) != 0:
                     fig.add_trace(drawOctreeBox(b))
-        fig.show()
+        fig.show()'''
 
         fig = getSceneFig(scene, title='Depth', zrange=zranges)
         fig.add_scatter3d(x=sample_points[0][:, 0], y=sample_points[0][:, 1], z=sample_points[0][:, 2], mode='markers')
         fig.show()
-        rpfig.show()
+        # rpfig.show()
         mfig.show()
-        pfig.show()
+        # pfig.show()
 
         plt.figure()
         plt.imshow(db(single_mf_pulse))
         plt.axis('tight')
+        print('Done.')
 
 
 
