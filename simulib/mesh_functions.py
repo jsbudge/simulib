@@ -153,6 +153,27 @@ def readCombineMeshFile(fnme: str, points: int=100000, scale: float=None) -> o3d
     return mesh
 
 
+def readVTC(filepath: str):
+    # Load in the VCS file using the format reader
+    with open(filepath, 'r') as f:
+        # Total azimuths, elevations, scatterers
+        header = [int(k) for k in f.readline().strip().split(' ')]
+        scatterers = np.zeros((header[2], 5))
+        nblock = 0
+        _scat_data = []
+        _angles = []
+        while nblock < header[2]:
+            subhead = [int(k) for k in f.readline().strip().split(' ')]
+            _angles.append(subhead[:2])
+            for scat in range(subhead[2]):
+                scatdata = np.array([float(k) for k in f.readline().strip().split(' ')])
+                scatterers[nblock + scat, :] = scatdata[:5]
+            blockdata = scatterers[nblock:nblock + scat, :]
+            _scat_data.append(blockdata[blockdata[:, 3] + blockdata[:, 4] > 1e-1])
+            nblock += subhead[2]
+    return _scat_data, np.array(_angles) * np.pi / 180.
+
+
 def getRangeProfileFromScene(scene, sampled_points: int | np.ndarray, tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,

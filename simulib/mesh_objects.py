@@ -1,7 +1,7 @@
 from functools import cached_property, singledispatch
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPointsScene, genKDTree, _float
+from .mesh_functions import detectPointsScene, genKDTree, _float, readVTC
 
 
 class Mesh(object):
@@ -69,6 +69,20 @@ class Mesh(object):
         sm.triangle_normals = o3d.utility.Vector3dVector(self.normals)
         pc = sm.sample_points_poisson_disk(sample_points)
         return np.asarray(pc.points)
+
+
+class VTCMesh(Mesh):
+
+    def __init__(self, a_filepath: str):
+        scat_data, angles = readVTC(a_filepath)
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(scat_data[:, :3])
+        pc.estimate_normals()
+
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pc, o3d.utility.DoubleVector([.1, 10.]))
+        mesh.triangle_material_ids = o3d.utility.IntVector([0 for _ in range(len(mesh.triangles))])
+
+        super().__init__(mesh, material_emissivity=[1e6], material_sigma=[.0017])
 
 
 

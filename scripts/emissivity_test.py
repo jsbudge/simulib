@@ -22,7 +22,7 @@ from sdrparse import load
 import matplotlib as mplib
 mplib.use('TkAgg')
 import pandas as pd
-from simulib.mesh_objects import Mesh, Scene
+from simulib.mesh_objects import Mesh, Scene, VTCMesh
 from simulib.mesh_functions import loadTarget
 from itertools import product
 from glob import glob
@@ -48,8 +48,8 @@ if __name__ == '__main__':
     noise_power_db = -120
     upsample = 8
     exp_range = 500
-    n_samples = 2**18
-    single_target = '/home/jeff/Documents/target_meshes/Seahawk.targ'
+    n_samples = 2**16
+    single_target = '/home/jeff/Documents/target_meshes/tacoma_VTC.dat'
 
     nposes = 8
     azes, eles = np.meshgrid(np.linspace(0, 2 * np.pi, nposes), np.linspace(-np.pi / 2, np.pi / 2, nposes))
@@ -71,7 +71,7 @@ if __name__ == '__main__':
 
     target_info = pd.read_csv('/home/jeff/repo/apache/data/target_info.csv')
 
-    targets = glob('/home/jeff/Documents/target_meshes/*.targ')
+    targets = [*glob('/home/jeff/Documents/target_meshes/*.targ'), single_target]
     # Generate a chirp
     # fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
     # mf_chirp = sdr_f.genMatchedFilter(0, fft_len=fft_len)
@@ -90,46 +90,35 @@ if __name__ == '__main__':
         if target_fnme != single_target:
             continue
         print(target_fnme)
-        with open(target_fnme, 'r') as f:
-            tdata = f.readlines()
-        try:
-            target_scaling = 1 / float(target_info.loc[target_info['filename'] ==
-                                                 f'{Path(tdata[0]).stem}{Path(tdata[0]).suffix}'.strip()]['scaling'].iloc[0])
-        except IndexError:
-            target_scaling = 1.
-
         scene = Scene()
+        # Check if this is some VTC data and load the mesh data accordingly
+        if Path(target_fnme).suffix == '.dat':
+            mesh = VTCMesh(target_fnme)
+        else:
+            with open(target_fnme, 'r') as f:
+                tdata = f.readlines()
+            try:
+                target_scaling = 1 / float(target_info.loc[target_info['filename'] ==
+                                                     f'{Path(tdata[0]).stem}{Path(tdata[0]).suffix}'.strip()]['scaling'].iloc[0])
+            except IndexError:
+                target_scaling = 1.
 
-        print('Loading mesh...', end='')
-        mesh, mesh_materials = loadTarget(target_fnme)
-        mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0]))).scale(target_scaling,
-                                                                                                 center=mesh.get_center())
-        mesh = mesh.translate(np.array([0, 0, 0.]), relative=False)
-        scene.add(
-            Mesh(
-                mesh,
+
+
+            print('Loading mesh...', end='')
+            source_mesh, mesh_materials = loadTarget(target_fnme)
+            source_mesh = source_mesh.rotate(source_mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0]))).scale(target_scaling,
+                                                                                                     center=source_mesh.get_center())
+            source_mesh = source_mesh.translate(np.array([0, 0, 0.]), relative=False)
+            mesh = Mesh(
+                source_mesh,
                 max_tris_per_split=64,
                 material_sigma=[mesh_materials[mtid][1] if mtid in mesh_materials.keys() else mesh_materials[0][1] for mtid in
-                                range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+                                range(np.asarray(source_mesh.triangle_material_ids).max() + 1)],
                 material_emissivity=[mesh_materials[mtid][0] if mtid in mesh_materials.keys() else mesh_materials[0][0] for mtid in
-                                     range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+                                     range(np.asarray(source_mesh.triangle_material_ids).max() + 1)],
             )
-        )
-
-        '''mesh = o3d.geometry.TriangleMesh.create_sphere(10., resolution=10)
-        mesh.triangle_material_ids = o3d.utility.IntVector([0 for _ in range(len(mesh.triangles))])
-        mesh.compute_vertex_normals()
-        mesh.compute_triangle_normals()
-        mesh.normalize_normals()
-        scene.add(
-            Mesh(
-                mesh,
-                max_tris_per_split=64,
-                material_sigma=[1000000.],
-                material_emissivity=[mesh_materials[mtid][1] for mtid in
-                                     range(np.asarray(mesh.triangle_material_ids).max() + 1)],
-            )
-        )'''
+        scene.add(mesh)
 
         model_name = f'/home/jeff/repo/apache/data/target_meshes/{Path(target_fnme).stem}.model'
 
