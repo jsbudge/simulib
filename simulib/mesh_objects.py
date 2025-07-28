@@ -2,6 +2,7 @@ from functools import cached_property, singledispatch
 import open3d as o3d
 import numpy as np
 from .mesh_functions import detectPointsScene, genKDTree, _float, readVTC
+from sklearn.cluster import AgglomerativeClustering
 
 
 class Mesh(object):
@@ -70,6 +71,13 @@ class Mesh(object):
         pc = sm.sample_points_poisson_disk(sample_points)
         return np.asarray(pc.points)
 
+    def shift(self, new_center, relative=False):
+        _shift = new_center if relative else new_center - self.center
+        self.vertices += _shift
+        self.center += _shift
+        self.bounding_box += _shift
+        self.bvh += _shift
+
 
 class VTCMesh(Mesh):
 
@@ -114,23 +122,8 @@ class Scene(object):
     def __str__(self):
         return f'Scene with {len(self.meshes)} meshes.'
     
-    '''def sample(self, sample_points: int, view_pos: np.ndarray, fc: float = None, fs: float = None,
-               near_range_s: float = None, radar_equation_constant: float = None, bw_az: float = None,
-               bw_el: float = None):
-        if bw_az is None:
-            bw_az = 0.
-            bw_el = 0.
-            center = np.mean(self.bounding_box, axis=0)
-            # Calculate out the beamwidths so we don't waste GPU cycles on rays into space
-            pvecs = center - view_pos
-            pointing_az = np.arctan2(pvecs[:, 0], pvecs[:, 1])
-            pointing_el = -np.arcsin(pvecs[:, 2] / np.linalg.norm(pvecs, axis=1))
-            mesh_views = np.vstack(self.tree)[None, :, :] - view_pos[:, None, :]
-            view_az = np.arctan2(mesh_views[:, :, 0], mesh_views[:, :, 1])
-            view_el = -np.arcsin(mesh_views[:, :, 2] / np.linalg.norm(mesh_views, axis=2))
-            bw_az = max(bw_az, abs(pointing_az[:, None] - view_az).max())
-            bw_el = max(bw_el, abs(pointing_el[:, None] - view_el).max())
-        return detectPointsScene(self, sample_points, view_pos, bw_az, bw_el, fc, fs, near_range_s, radar_equation_constant)'''
+    '''def sample(self, sample_points: int, view_pos: np.ndarray):
+        return detectPointsScene(self, sample_points, view_pos)'''
 
     def sample(self, sample_points: int):
         # return detectPointsScene(self, sample_points)
@@ -138,10 +131,17 @@ class Scene(object):
         sm.triangles = o3d.utility.Vector3iVector(self.meshes[0].tri_idx)
         sm.vertices = o3d.utility.Vector3dVector(self.meshes[0].vertices)
         sm.triangle_normals = o3d.utility.Vector3dVector(self.meshes[0].normals)
-        pc = sm.compute_convex_hull()[0].sample_points_uniformly(sample_points)
+        # pc = sm.compute_convex_hull()[0].sample_points_uniformly(sample_points)
+        pc = sm.sample_points_uniformly(sample_points)
         return np.asarray(pc.points)
 
-    @cached_property
+    def shift(self, new_center, relative=False):
+        _shift = new_center - self.center if relative else new_center
+        for mesh in self.meshes:
+            mesh.shift(_shift, relative)
+
+
+    @property
     def bounding_box(self):
         return np.array([[np.min(np.array([m.bounding_box[0, :] for m in self.meshes]), axis=0)],
                          [np.max(np.array([m.bounding_box[1, :] for m in self.meshes]), axis=0)]]).squeeze(1)

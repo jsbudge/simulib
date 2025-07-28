@@ -104,7 +104,7 @@ if __name__ == '__main__':
 
     mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    # mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
         Mesh(
             mesh,
@@ -115,6 +115,7 @@ if __name__ == '__main__':
                                  range(np.asarray(mesh.triangle_material_ids).max() + 1)],
         )
     )
+    scene.shift(llh2enu(*grid_origin, bg.ref))
 
     '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/air_balloon.targ')
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
@@ -310,7 +311,7 @@ if __name__ == '__main__':
         sample_points = ptsam
     else:
         # sample_points = [grid_pts]
-        sample_points = [scene.sample(int(splits[s + 1] - splits[s]))
+        sample_points = [scene.sample(int(splits[s + 1] - splits[s]), rp.txpos(rp.gpst[::32]))
                          for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])

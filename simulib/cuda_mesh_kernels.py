@@ -310,12 +310,13 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                             # sina = tri_material[ti, 0] * math.sqrt(
                             #     1. - (1. / tri_material[ti, 0] * 0.) ** 2)
                             sina = tri_material[ti, 0] * math.sqrt(
-                                1. - (1. / tri_material[ti, 0] * length(cross(rd, tn))) ** 2)
+                                max(0., 1. - (1. / tri_material[ti, 0] * length(cross(rd, tn))) ** 2))
                             Rs = abs((cosa - sina) / (
                                     cosa + sina)) ** 2  # Reflectance using Fresnel coefficient
                             roughness = math.exp(-.5 * (2. * wavenumber * tri_material[ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
                             spec = math.exp(-(1. - cosa) ** 2 / .0000007442)  # This should drop the specular component to zero by 2 degrees
                             L = .7 * ((1 + abs(dot(b, rd))) / 2.) + .3
+                            # print(sina)
                             nrho = rho * inv_rng * inv_rng * cosa * Rs * (
                                     roughness * spec + (
                                     1. - roughness) * L ** 2)  # Final reflected power
@@ -387,6 +388,7 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
         rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
             rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
+            # print(nrho)
             did_intersect, nrho, inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd,
                                                                              kd_tree, ray_power[tt, ray_idx],
                                                                              leaf_list, leaf_key, tri_idx,
