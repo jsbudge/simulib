@@ -7,20 +7,13 @@ from .cuda_kernels import applyOneWayRadiationPattern, getRangeAndAngles
 from .cuda_mesh_kernels import traverseOctreeAndIntersection, traverseOctreeAndReflection
 from numba.cuda.random import xoroshiro128p_uniform_float32
 
-c0 = 299792458.0
+c0 = np.float32(299792458.0)
 MAX_REGISTERS = 128
-
-
-@cuda.jit(device=True, fast_math=True)
-def calcReturn(inter, re, pan, tilt, bw_az, bw_el, rho):
-    r, r_rng, r_az, r_el = getRangeAndAngles(inter, re)
-
-    return applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) / (4 * r_rng * r_rng) * rho
 
 @cuda.jit(device=True, fast_math=True)
 def calcTriangleSurfaceArea(ro, p0, p1, p2, Rm, Rp):
     pcycle = cuda.local.array((7, 4), dtype=np.float32)
-    pnum = 0
+    pnum = np.int32(0)
 
     # This is for l0
     lmm, lmp = lambdaFromRange(ro, p2, p1, Rm)
@@ -28,29 +21,29 @@ def calcTriangleSurfaceArea(ro, p0, p1, p2, Rm, Rp):
     # print(lmm, lmp, lpm, lpp)
     if 0 < lmp < 1:
         pcycle[pnum, 2] = lmp
-        pcycle[pnum, 1] = 1. - lmp
+        pcycle[pnum, 1] = np.float32(1.) - lmp
         pnum += 1
     if 0 < lpp < 1:
         pcycle[pnum, 2] = lpp
-        pcycle[pnum, 1] = 1. - lpp
+        pcycle[pnum, 1] = np.float32(1.) - lpp
         pnum += 1
     if 0 < lpm < 1:
         pcycle[pnum, 2] = lpm
-        pcycle[pnum, 1] = 1. - lpm
+        pcycle[pnum, 1] = np.float32(1.) - lpm
         pnum += 1
     if 0 < lmm < 1:
         pcycle[pnum, 2] = lmm
-        pcycle[pnum, 1] = 1. - lmm
+        pcycle[pnum, 1] = np.float32(1.) - lmm
         pnum += 1
     if (1 > lmm > 0 > lpm) or (1 > lmp > 0 > lpp):
-        pcycle[pnum, 0] = 0.
-        pcycle[pnum, 1] = 1.
-        pcycle[pnum, 2] = 0.
+        pcycle[pnum, 0] = np.float32(0.)
+        pcycle[pnum, 1] = np.float32(1.)
+        pcycle[pnum, 2] = np.float32(0.)
         pnum += 1
     elif (1 > lpm > 0 > lmm) or (1 > lpp > 0 > lmp):
-        pcycle[pnum, 0] = 0.
-        pcycle[pnum, 1] = 1.
-        pcycle[pnum, 2] = 0.
+        pcycle[pnum, 0] = np.float32(0.)
+        pcycle[pnum, 1] = np.float32(1.)
+        pcycle[pnum, 2] = np.float32(0.)
         pnum += 1
 
     # Repeat with side l2
@@ -59,29 +52,29 @@ def calcTriangleSurfaceArea(ro, p0, p1, p2, Rm, Rp):
     # print(lmm, lmp, lpm, lpp)
     if 0 < lmp < 1:
         pcycle[pnum, 1] = lmp
-        pcycle[pnum, 0] = 1. - lmp
+        pcycle[pnum, 0] = np.float32(1.) - lmp
         pnum += 1
     if 0 < lpp < 1:
         pcycle[pnum, 1] = lpp
-        pcycle[pnum, 0] = 1. - lpp
+        pcycle[pnum, 0] = np.float32(1.) - lpp
         pnum += 1
     if 0 < lpm < 1:
         pcycle[pnum, 1] = lpm
-        pcycle[pnum, 0] = 1. - lpm
+        pcycle[pnum, 0] = np.float32(1.) - lpm
         pnum += 1
     if 0 < lmm < 1:
         pcycle[pnum, 1] = lmm
-        pcycle[pnum, 0] = 1. - lmm
+        pcycle[pnum, 0] = np.float32(1.) - lmm
         pnum += 1
     if (1 > lmm > 0 > lpm) or (1 > lmp > 0 > lpp):
-        pcycle[pnum, 0] = 1.
-        pcycle[pnum, 1] = 0.
-        pcycle[pnum, 2] = 0.
+        pcycle[pnum, 0] = np.float32(1.)
+        pcycle[pnum, 1] = np.float32(0.)
+        pcycle[pnum, 2] = np.float32(0.)
         pnum += 1
     elif (1 > lpm > 0 > lmm) or (1 > lpp > 0 > lmp):
-        pcycle[pnum, 0] = 1.
-        pcycle[pnum, 1] = 0.
-        pcycle[pnum, 2] = 0.
+        pcycle[pnum, 0] = np.float32(1.)
+        pcycle[pnum, 1] = np.float32(0.)
+        pcycle[pnum, 2] = np.float32(0.)
         pnum += 1
 
     # Repeat with side l1
@@ -90,54 +83,40 @@ def calcTriangleSurfaceArea(ro, p0, p1, p2, Rm, Rp):
     # print(lmm, lmp, lpm, lpp)
     if 0 < lmp < 1:
         pcycle[pnum, 0] = lmp
-        pcycle[pnum, 2] = 1. - lmp
+        pcycle[pnum, 2] = np.float32(1.) - lmp
         pnum += 1
     if 0 < lpp < 1:
         pcycle[pnum, 0] = lpp
-        pcycle[pnum, 2] = 1. - lpp
+        pcycle[pnum, 2] = np.float32(1.) - lpp
         pnum += 1
     if 0 < lpm < 1:
         pcycle[pnum, 0] = lpm
-        pcycle[pnum, 2] = 1. - lpm
+        pcycle[pnum, 2] = np.float32(1.) - lpm
         pnum += 1
     if 0 < lmm < 1:
         pcycle[pnum, 0] = lmm
-        pcycle[pnum, 2] = 1. - lmm
+        pcycle[pnum, 2] = np.float32(1.) - lmm
         pnum += 1
     if (1 > lmm > 0 > lpm) or (1 > lmp > 0 > lpp):
-        pcycle[pnum, 0] = 0.
-        pcycle[pnum, 1] = 0.
-        pcycle[pnum, 2] = 1.
+        pcycle[pnum, 0] = np.float32(0.)
+        pcycle[pnum, 1] = np.float32(0.)
+        pcycle[pnum, 2] = np.float32(1.)
         pnum += 1
     elif (1 > lpm > 0 > lmm) or (1 > lpp > 0 > lmp):
-        pcycle[pnum, 0] = 0.
-        pcycle[pnum, 1] = 0.
-        pcycle[pnum, 2] = 1.
+        pcycle[pnum, 0] = np.float32(0.)
+        pcycle[pnum, 1] = np.float32(0.)
+        pcycle[pnum, 2] = np.float32(1.)
         pnum += 1
 
-    '''if pnum == 0:
-        pcycle[0, 0] = 1.
-        pcycle[0, 1] = 0.
-        pcycle[0, 2] = 0.
-        pcycle[1, 0] = 0.
-        pcycle[1, 1] = 1.
-        pcycle[1, 2] = 0.
-        pcycle[2, 0] = 0.
-        pcycle[2, 1] = 0.
-        pcycle[2, 2] = 1.
-        pnum += 3
-
-        pcycle[1, 3] = 1.
-        crossprod = .5 * length(cross(p0 - p1, p0 - p2))'''
     ref_pt = pcycle[0, 0] * p0 + pcycle[0, 1] * p1 + pcycle[0, 2] * p2
-    crossprod = .5 * length(cross((pcycle[2, 0] * p0 + pcycle[2, 1] * p1 + pcycle[2, 2] * p2) - ref_pt,
+    crossprod = np.float32(.5) * length(cross((pcycle[2, 0] * p0 + pcycle[2, 1] * p1 + pcycle[2, 2] * p2) - ref_pt,
                                              (pcycle[1, 0] * p0 + pcycle[1, 1] * p1 + pcycle[1, 2] * p2) - ref_pt))
     # print(crossprod)
     pcycle[1, 3] = crossprod
     for n in range(2, pnum - 1):
         sa = length(cross((pcycle[n, 0] * p0 + pcycle[n, 1] * p1 + pcycle[n, 2] * p2) - ref_pt,
                                      (pcycle[n + 1, 0] * p0 + pcycle[n + 1, 1] * p1 + pcycle[
-                                         n + 1, 2] * p2) - ref_pt)) * .5
+                                         n + 1, 2] * p2) - ref_pt)) * np.float32(.5)
         crossprod = crossprod + sa
         pcycle[n, 3] = sa
     sa_sum = 0
@@ -154,16 +133,16 @@ def calcTriangleSurfaceArea(ro, p0, p1, p2, Rm, Rp):
 @cuda.jit(device=True, fast_math=True)
 def lambdaFromRange(r0, p0, p1, R):
     # Solving for l2 == 0 and l1 = 1 - l0
-    a = 2 * p0.x * p1.x + 2 * p0.y * p1.y + 2 * p0.z * p1.z - p0.x ** 2 - p0.y ** 2 - p0.z ** 2 - p1.x ** 2 - \
+    a = 2. * p0.x * p1.x + 2. * p0.y * p1.y + 2. * p0.z * p1.z - p0.x ** 2 - p0.y ** 2 - p0.z ** 2 - p1.x ** 2 - \
         p1.y ** 2 - p1.z ** 2
-    c = 2 * p1.x * r0.x + 2 * p1.y * r0.y + 2 * p1.z * r0.z - p1.x ** 2 - p1.y ** 2 - p1.z ** 2 - r0.x ** 2 - \
+    c = 2. * p1.x * r0.x + 2. * p1.y * r0.y + 2. * p1.z * r0.z - p1.x ** 2 - p1.y ** 2 - p1.z ** 2 - r0.x ** 2 - \
         r0.y ** 2 - r0.z ** 2 + R ** 2
-    b = -2 * p0.x * p1.x - 2 * p0.y * p1.y - 2 * p0.z * p1.z + 2 * p0.x * r0.x + 2 * p0.y * r0.y + 2 * p0.z * \
-        r0.z - 2 * p1.x * r0.x - 2 * p1.y * r0.y - 2 * p1.z * r0.z + 2 * p1.x ** 2 + 2 * p1.y ** 2 + 2 * p1.z ** 2
+    b = -2. * p0.x * p1.x - 2. * p0.y * p1.y - 2. * p0.z * p1.z + 2. * p0.x * r0.x + 2. * p0.y * r0.y + 2. * p0.z * \
+        r0.z - 2. * p1.x * r0.x - 2. * p1.y * r0.y - 2. * p1.z * r0.z + 2. * p1.x ** 2 + 2. * p1.y ** 2 + 2. * p1.z ** 2
 
-    l_tp = (-b + math.sqrt(b ** 2 - 4 * a * c)) / (2 * a)
+    l_tp = (-b + math.sqrt(b ** 2 - np.float32(4.) * a * c)) / (2. * a)
     l_tp = -np.inf if math.isnan(l_tp) else l_tp
-    l_tm = (-b - math.sqrt(b ** 2 - 4 * a * c)) / (2 * a)
+    l_tm = (-b - math.sqrt(b ** 2 - np.float32(4.) * a * c)) / (2. * a)
     l_tm = -np.inf if math.isnan(l_tm) else l_tm
     return min(l_tp, l_tm), max(l_tp, l_tm)
 
@@ -224,31 +203,35 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
                 triangle_bin_surface_area[tri_idx, b] = sa
 
 
-@cuda.jit(max_registers=32)
-def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, tri_idxes, sa_bins, params):
+@cuda.jit('void(float32[:, :], float32[:, :, :], float32[:, :], float32[:])', max_registers=40)
+def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, sa_bins, params):
     tri, pulse = cuda.grid(ndim=2)
     tri_stride, pulse_stride = cuda.gridsize(2)
-
-    for tri_idx in prange(tri, tri_idxes.shape[0], tri_stride):
-        p0 = make_float3(tri_verts[tri_idxes[tri_idx, 0], 0], tri_verts[tri_idxes[tri_idx, 0], 1],
-                         tri_verts[tri_idxes[tri_idx, 0], 2])
-        p1 = make_float3(tri_verts[tri_idxes[tri_idx, 1], 0], tri_verts[tri_idxes[tri_idx, 1], 1],
-                         tri_verts[tri_idxes[tri_idx, 1], 2])
-        p2 = make_float3(tri_verts[tri_idxes[tri_idx, 2], 0], tri_verts[tri_idxes[tri_idx, 2], 1],
-                         tri_verts[tri_idxes[tri_idx, 2], 2])
+    for tri_idx in prange(tri, tri_verts.shape[0], tri_stride):
+        p0 = make_float3(tri_verts[tri_idx, 0, 0], tri_verts[tri_idx, 0, 1], tri_verts[tri_idx, 0, 2])
+        p1 = make_float3(tri_verts[tri_idx, 1, 0], tri_verts[tri_idx, 1, 1], tri_verts[tri_idx, 1, 2])
+        p2 = make_float3(tri_verts[tri_idx, 2, 0], tri_verts[tri_idx, 2, 1], tri_verts[tri_idx, 2, 2])
         for t in prange(pulse, transmit_xyz.shape[0], pulse_stride):
             tx = make_float3(transmit_xyz[t, 0], transmit_xyz[t, 1], transmit_xyz[t, 2])
             rmin = min(length(tx - p2), length(tx - p0), length(tx - p1))
+            '''rmin = length(tx - p2)
+            rmax = length(tx - p0)
+            if rmin > rmax:
+                rmin = rmax
+                rmax = length(tx - p2)
+            if length(tx - p1) > rmax:
+                rmax = length(tx - p1)
+            elif length(tx - p1) < rmin:
+                rmin = length(tx - p1)'''
             rmax = max(length(tx - p2), length(tx - p0), length(tx - p1))
             if rmin > params[1] * c0:
-                first_bin = max(int(math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2])), 0)
-                nbins = int(math.ceil(((2 * rmax) / c0 - 2 * params[1]) * params[2]) -
-                                                  math.floor(((2 * rmin) / c0 - 2 * params[1]) * params[2]))
-            if first_bin < sa_bins.shape[1]:
+                first_bin = int(((np.float32(2.) * rmin) / c0 - np.float32(2.) * params[1]) * params[2])
+            if np.float32(0.) <= first_bin < sa_bins.shape[1]:
+                nbins = int(((np.float32(2.) * rmax) / c0 - np.float32(2.) * params[1]) * params[2] + np.float32(1.)) - first_bin
                 for b in prange(first_bin, first_bin + nbins, 1):
                     if b < sa_bins.shape[1]:
-                        R = (b / params[2] + 2 * params[1]) * c0 * .5
-                        sa, _ = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (1 / params[2]) * c0 * .5)
+                        R = (b / params[2] + np.float32(2.) * params[1]) * c0 * np.float32(.5)
+                        sa, _ = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (np.float32(1.) / params[2]) * c0 * np.float32(.5))
                         cuda.atomic.add(sa_bins, (t, b), sa)
 
 

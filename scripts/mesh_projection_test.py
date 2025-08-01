@@ -11,7 +11,7 @@ from simulib.backproject_functions import getRadarAndEnvironment, backprojectPul
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, getRadarCoeff, \
     azelToVec
 from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
-    getMeshFig, getSceneFig, drawOctreeBox, loadTarget
+    getMeshFig, getSceneFig, drawOctreeBox, loadTarget, loadMesh
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -40,8 +40,8 @@ if __name__ == '__main__':
     fc = 9.6e9
     rx_gain = 32  # dB
     tx_gain = 32  # dB
-    rec_gain = 100  # dB
-    ant_transmit_power = 100  # watts
+    rec_gain = 80  # dB
+    ant_transmit_power = 50  # watts
     noise_power_db = -120
     npulses = 32
     plp = 0.
@@ -49,7 +49,6 @@ if __name__ == '__main__':
     upsample = 8
     num_bounces = 1
     max_tris_per_split = 64
-    nstreams = 1
     points_to_sample = 2**17
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
@@ -61,7 +60,7 @@ if __name__ == '__main__':
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     do_randompts = False
-    use_supersampling = False
+    use_supersampling = True
     nbpj_pts = (1024, 1024)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
@@ -75,6 +74,7 @@ if __name__ == '__main__':
     idx_t = sdr_f[0].frame_num[sdr_f[0].nframes // 2: sdr_f[0].nframes // 2 + npulses]
     data_t = sdr_f[0].pulse_time[idx_t]
     fs = rp.fs
+    nstreams = max(1, points_to_sample // max_pts_per_run)
 
 
     pointing_vec = rp.boresight(data_t).mean(axis=0)
@@ -311,7 +311,7 @@ if __name__ == '__main__':
         sample_points = ptsam
     else:
         # sample_points = [grid_pts]
-        sample_points = [scene.sample(int(splits[s + 1] - splits[s]), rp.txpos(rp.gpst[::32]))
+        sample_points = [scene.sample(int(splits[s + 1] - splits[s]), rp.txpos(rp.gpst[::100]))
                          for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
@@ -320,24 +320,25 @@ if __name__ == '__main__':
     flight_path = rp.txpos(sdr_f[0].pulse_time)
     sp = scene.bounding_box
     pmax = sp.max(axis=0)
-    vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1],
-                     pmax[2] - flight_path[:, 2]]).T
+    vecs = np.array([pmax[0] - flight_path[:, 0], pmax[1] - flight_path[:, 1], pmax[2] - flight_path[:, 2]]).T
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     max_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
     pmin = sp.min(axis=0)
-    vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1],
-                     pmin[2] - flight_path[:, 2]]).T
+    vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1], pmin[2] - flight_path[:, 2]]).T
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
-    pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000, sdr_f[0].frame_num[-1])]
+    pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000,
+                                                                      sdr_f[0].frame_num[-1])]
     streams = [cuda.stream() for _ in range(nstreams)]
 
     # Single pulse for debugging
     print('Generating single pulse...')
     single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points[0],
-                                                                                 [rp.txpos(data_t).astype(_float)], [rp.txpos(data_t).astype(_float)],
-                                                                                 [rp.pan(data_t).astype(_float)], [rp.tilt(data_t).astype(_float)], radar_coeff,
-                                                                                 rp.az_half_bw, rp.el_half_bw,
+                                                                                 [rp.txpos(data_t).astype(_float)],
+                                                                                  [rp.txpos(data_t).astype(_float)],
+                                                                                 [rp.pan(data_t).astype(_float)],
+                                                                                  [rp.tilt(data_t).astype(_float)],
+                                                                                  radar_coeff, rp.az_half_bw, rp.el_half_bw,
                                                                                  nsam, fc, near_range_s, fs,
                                                                                  num_bounces=num_bounces,
                                                                                  debug=True, streams=streams,
@@ -347,7 +348,7 @@ if __name__ == '__main__':
     single_mf_pulse = upsamplePulse(
         addNoise(single_rp[0], fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample,
         is_freq=True, time_len=nsam)
-    bpj_grid = np.zeros_like(gx).astype(np.complex128)
+    bpj_grid = np.zeros_like(gx).astype(np.complex64)
 
     print('Running main loop...')
     # Get the data into CPU memory for later
@@ -356,18 +357,18 @@ if __name__ == '__main__':
     torch_pos = []
     torch_pans = []
     torch_tilts = []'''
-    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),) * nstreams))):
-        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        pans = [rp.pan(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
-        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[n]:frame[n] + npulses]).astype(_float) for n in range(nstreams)]
+    for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),)))):
+        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
+        rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
+        pans = [rp.pan(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
+        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
         trp = [getRangeProfileFromScene(scene, sam, txposes, rxposes, pans, tilts,
                                       radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
                                       num_bounces=num_bounces, streams=streams, use_supersampling=use_supersampling) for sam in sample_points]
         trp = [sum(i) for i in zip(*trp)]
         mf_pulses = [np.ascontiguousarray(upsamplePulse(
             addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True,
-            time_len=nsam).T, dtype=np.complex128) for range_profile in trp]
+            time_len=nsam).T, dtype=np.complex64) for range_profile in trp]
         bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
@@ -398,7 +399,7 @@ if __name__ == '__main__':
     plt.show()'''
 
     px.imshow(db_bpj, origin='lower', color_continuous_scale='gray',
-              range_color=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 2]).show()
+              range_color=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 3]).show()
 
     scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
     sc_min = scaling[0] - 1e-3
@@ -440,7 +441,7 @@ if __name__ == '__main__':
         )'''
     fig.show()
 
-    fig = getSceneFig(scene, title=f'Depth')
+    fig = getSceneFig(scene, title='Depth')
 
     for mesh in scene.meshes:
         d = mesh.bvh_levels - 1

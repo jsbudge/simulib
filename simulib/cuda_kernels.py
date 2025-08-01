@@ -6,7 +6,7 @@ from .cuda_functions import make_float3, length
 from .simulation_functions import findPowerOf2
 import numpy as np
 
-c0 = 299792458.0
+c0 = np.float32(299792458.0)
 TAC = 125e6
 fs = 2e9
 DTR = np.pi / 180
@@ -25,7 +25,7 @@ def cpudiff(x, y):
 
 
 @cuda.jit(device=True)
-def raisedCosine(x, bw, a0):
+def raisedCosine(x, bw):
     """
     Raised Cosine windowing function.
     :param x: float. Azimuth difference between point and beam center in radians.
@@ -33,8 +33,7 @@ def raisedCosine(x, bw, a0):
     :param a0: float. Factor for raised cosine window generation.
     :return: float. Window value.
     """
-    xf = x / bw + .5
-    return a0 - (1 - a0) * math.cos(2 * np.pi * xf)
+    return np.float32(.5) - np.float32(.5) * math.cos(np.float32(2.) * np.float32(np.pi) * (x / bw + np.float32(.5)))
 
 
 @cuda.jit(device=True, fastmath=True)
@@ -86,13 +85,14 @@ def applyOneWayRadiationPattern(el_c, az_c, az_rx, el_rx, bw_az, bw_el):
     :param bw_el: float. elevation beamwidth of antenna in radians.
     :return: float. Value by which a point should be scaled.
     """
-    a = np.pi / bw_az
-    b = np.pi / bw_el
+    a = np.float32(np.pi) / bw_az
+    b = np.float32(np.pi) / bw_el
     # Abs shouldn't be a problem since the pattern is symmetrical about zero
-    eldiff = diff(el_c, el_rx)
-    azdiff = diff(az_c, az_rx)
+    # eldiff = (el_c - el_rx)
+    # azdiff = (az_c - az_rx)
     # rx_pat = math.sin(a * azdiff) * math.sin(b * eldiff) / (cuda.fma(a, azdiff, 1e-9) + cuda.fma(b, eldiff, 1e-9))
-    rx_pat = math.sin(a * azdiff) / cuda.fma(a, azdiff, 1e-9) * math.sin(b * eldiff) / cuda.fma(b, eldiff, 1e-9)
+    rx_pat = (math.sin(a * (az_c - az_rx)) / cuda.fma(a, (az_c - az_rx), np.float32(1e-9)) *
+              math.sin(b * (el_c - el_rx)) / cuda.fma(b, (el_c - el_rx), np.float32(1e-9)))
     # rx_pat = math.sin(a * azdiff) / (a * azdiff) * math.sin(b * eldiff) / (b * eldiff)
     return rx_pat * rx_pat
 
@@ -231,9 +231,9 @@ def genRangeProfile(gx, gy, vgz, vert_reflectivity,
             cuda.syncthreads()
 
 
-@cuda.jit()
-def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, pulse_data, final_grid,
-                wavelength, near_range_s, source_fs, bw_az, bw_el, poly):
+@cuda.jit('void(float32[:, :], float32[:, :], float32[:, :], float32[:, :], float32[:, :], float32[:], complex64[:, :], complex64[:, :], float32, float32, float32, float32, int32)')
+def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, pulse_data, final_grid, wavelength, near_range_s,
+                source_fs, bw_az, poly):
     """
     Backprojection kernel.
     :param source_xyz: array. XYZ values of the source, usually Tx antenna, in meters.
@@ -261,8 +261,6 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
     :param debug_flag: bool. If True, populates the calc_pts and calc_angs arrays.
     :return: Nothing, technically. final_grid is the returned product.
     """
-    # Load in all the parameters that don't change
-    k = 2 * np.pi / wavelength
     x, y = cuda.grid(ndim=2)
     x_stride, y_stride = cuda.gridsize(2)
     for pcol in range(x, gx.shape[0], x_stride):
@@ -282,20 +280,20 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, elrx, pantx, eltx, p
                 # _, rx_rng, r_az, r_el = getRangeAndAngles(gl, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
 
                 # Get index into range compressed data
-                bi1 = int(((tx_rng + rx_rng) / c0 - 2 * near_range_s) * source_fs) + 1
+                bi1 = int(((tx_rng + rx_rng) / c0 - np.float32(2.) * near_range_s) * source_fs) + 1
                 if bi1 >= pulse_data.shape[0] or bi1 < 0:
                     continue
 
                 if poly == 0:
                     # This is how APS does it (for reference, I guess)
-                    acc_val += pulse_data[bi1, tt] * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(diff(r_az, panrx[tt]), bw_az, .5)
+                    acc_val += pulse_data[bi1, tt] * cmath.exp(1j * (np.float32(2.) * np.pi / wavelength) * (tx_rng + rx_rng)) * raisedCosine((r_az - panrx[tt]), bw_az)
                 elif poly == 1:
                     bi0 = bi1 - 1
                     # Linear interpolation between bins (slower but more accurate)
-                    bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
-                    bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
+                    bi1_rng = c0 / np.float32(2.) * (bi1 / source_fs + np.float32(2.) * near_range_s)
+                    bi0_rng = c0 / np.float32(2.) * (bi0 / source_fs + np.float32(2.) * near_range_s)
                     acc_val += (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
-                        / (bi1_rng - bi0_rng) * cmath.exp(1j * k * (tx_rng + rx_rng)) * raisedCosine(diff(r_az, panrx[tt]), bw_az, .5)
+                        / (bi1_rng - bi0_rng) * cmath.exp(1j * (np.float32(2.) * np.pi / wavelength) * (tx_rng + rx_rng)) * raisedCosine((r_az - panrx[tt]), bw_az)
 
             final_grid[pcol, prow] = acc_val
 
@@ -377,7 +375,7 @@ def backprojectRegularGrid(source_xyz, receive_xyz, transform, gz, panrx, elrx, 
             # Gaussian window
             # az_win = math.exp(-az_diffrx * az_diffrx / (2 * .001))
             # Raised Cosine window (a0=.5 for Hann window, .54 for Hamming)
-            az_win = raisedCosine(az_diffrx, bw_az, .5)
+            az_win = raisedCosine(az_diffrx, bw_az)
             # az_win = 1.
 
             if poly == 0:

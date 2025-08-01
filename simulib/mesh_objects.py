@@ -122,10 +122,10 @@ class Scene(object):
     def __str__(self):
         return f'Scene with {len(self.meshes)} meshes.'
     
-    '''def sample(self, sample_points: int, view_pos: np.ndarray):
-        return detectPointsScene(self, sample_points, view_pos)'''
+    def sample(self, sample_points: int, a_obs_pts: np.ndarray):
+        return detectPointsScene(self, sample_points, a_obs_pts)
 
-    def sample(self, sample_points: int):
+    '''def sample(self, sample_points: int):
         # return detectPointsScene(self, sample_points)
         sm = o3d.geometry.TriangleMesh()
         sm.triangles = o3d.utility.Vector3iVector(self.meshes[0].tri_idx)
@@ -133,7 +133,7 @@ class Scene(object):
         sm.triangle_normals = o3d.utility.Vector3dVector(self.meshes[0].normals)
         # pc = sm.compute_convex_hull()[0].sample_points_uniformly(sample_points)
         pc = sm.sample_points_uniformly(sample_points)
-        return np.asarray(pc.points)
+        return np.asarray(pc.points)'''''
 
     def shift(self, new_center, relative=False):
         _shift = new_center - self.center if relative else new_center

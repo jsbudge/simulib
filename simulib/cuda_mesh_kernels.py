@@ -5,7 +5,7 @@ from numba import cuda, prange
 import numpy as np
 from .cuda_kernels import applyOneWayRadiationPattern
 
-c0 = 299792458.0
+c0_inv = np.float32(1. / 299792458.0)
 MAX_REGISTERS = 128
 
 
@@ -23,45 +23,46 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
     rcrosse = cross(rd, v2 - v0)
     det = dot(v1 - v0, rcrosse)
     # Check to see if ray is parallel to triangle
-    if abs(det) < 1e-9:
+    if abs(det) < np.float32(1e-9):
         return False, None, None
 
-    inv_det = 1. / det
+    inv_det = np.float32(1.) / det
 
     u = inv_det * dot(ro - v0, rcrosse)
-    if u < 0 or u > 1:
+    if u < np.float32(0.) or u > np.float32(1.):
         return False, None, None
 
     # Recompute cross for s and edge 1
     rcrosse = cross(ro - v0, v1 - v0)
     det = inv_det * dot(rd, rcrosse)
-    if det < 0 or u + det > 1:
+    if det < np.float32(0.) or u + det > np.float32(1.):
         return False, None, None
 
     # Compute intersection point
     det = inv_det * dot(v2 - v0, rcrosse)
-    if det < 1e-9:
+    if det < np.float32(1e-9):
         return False, None, None
 
     if not get_bounce:
         return True, None, None
 
-    return True, normalize(det * rd - vn * dot(det * rd, vn) * 2.), ro + det * rd
+    return True, normalize(det * rd - vn * dot(det * rd, vn) * np.float32(2.)), ro + det * rd
 
 
 @cuda.jit(device=True, fast_math=True)
 def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
-    r, r_rng, r_az, r_el = getRangeAndAngles(inter, re)
-
-    rng_bin = int(((rng + r_rng) / c0 - 2 * near_range_s) * source_fs)
+    t = inter - re
+    r_rng = length(t)
+    rng_bin = int(((rng + r_rng) * c0_inv - np.float32(2.) * near_range_s) * source_fs)
 
     if n_samples > rng_bin > 0:
-        acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
-                   (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng)))
-        return acc_val.real, acc_val.imag, rng_bin
+        # acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
+        #            (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng)))
+        return (applyOneWayRadiationPattern(-math.asin(t.z / rng), math.atan2(t.x, t.y), pan, tilt, bw_az, bw_el) /
+                   (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng))), rng_bin
 
-    return 0, 0, -1
+    return 0, -1
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -97,7 +98,7 @@ def findBoxIntersection(ro, ray, bounds):
 
 @cuda.jit(device=True, fast_math=True)
 def testIntersection(ro, rd, bounds):
-    ray = 1 / rd
+    ray = np.float32(1.) / rd
     boxmin = make_float3(bounds[0, 0], bounds[0, 1], bounds[0, 2])
     boxmax = make_float3(bounds[1, 0], bounds[1, 1], bounds[1, 2])
     if ray.x >= 0:
@@ -124,9 +125,7 @@ def testIntersection(ro, rd, bounds):
     else:
         tminy = (boxmax.z - ro.z) * ray.z
         tmaxy = (boxmin.z - ro.z) * ray.z
-    if tmin <= tmaxy and tminy <= tmax:
-        return True
-    return False
+    return tmin <= tmaxy and tminy <= tmax
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -182,8 +181,7 @@ def traverseOctreeForOcclusion(ro, rd, kd_tree, leaf_list, leaf_key, tri_idx, tr
 
 
 @cuda.jit(device=True, fast_math=True)
-def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
-                                  leaf_key, tri_idx, tri_vert, tri_norm, rng):
+def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, rng):
     """
     Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
     params:
@@ -205,10 +203,9 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
     did_intersect = False
     inter = None
     if not testIntersection(ro, rd, kd_tree[0]):
-        return False, None, None, None
+        return False, None, None
     idx = 2
     skip = False
-    inter_tri = -1
 
     while 0 < idx < kd_tree.shape[0]:
         # idx, tmp_tmin, tmp_tmax = stack[-1]
@@ -235,7 +232,6 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
                             int_rng = tmp_rng + rng
                             inter = tinter + 0.
                             did_intersect = True
-                            inter_tri = ti
             else:
                 # Move down into the box
                 idx = idx * 2 + 2
@@ -247,11 +243,40 @@ def traverseOctreeAndIntersection(ro, rd, kd_tree, leaf_list,
                 break
             idx -= 1
         skip = False
-    return did_intersect, inter, int_rng, inter_tri
+    return did_intersect, inter, int_rng
+
+
+'''@cuda.jit('void(float32[:], float32[:], float32[:, :, :], float32, int32[:], int32[:, :], float32[:, :, :], float32[:, :], float32[:, :], float32, float32, int32, float32, boolean, float32[:], float32, float32[:])', device=True, fast_math=True)
+def recurseReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_vert, tri_norm, tri_material,
+                        rng, wavenumber, idx, int_rng, did_intersect, inter, nrho, b):
+    if testIntersection0(ro, rd, kd_tree[idx]):
+        if math.log2(idx + 1) >= math.log2(kd_tree.shape[0] + 1) - 1:
+            tri_min = leaf_key[idx, 0]
+            for t_idx in prange(tri_min, tri_min + leaf_key[idx, 1]):
+
+                ti = leaf_list[t_idx]
+                curr_intersect = tri_vert[ti, 0, 0] > 7
+                if curr_intersect:
+                    int_rng = np.float32(7.)
+                    nrho = np.float32(14.)
+                    b = ro
+                    inter = rd
+                    did_intersect = True
+        else:
+            recurseReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_vert, tri_norm, tri_material,
+                            rng, wavenumber, (idx << 1) + 1, int_rng, did_intersect, inter, nrho, b)
+            recurseReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_vert, tri_norm, tri_material,
+                              rng, wavenumber, (idx << 1) + 2, int_rng, did_intersect, inter, nrho, b)'''
+
+@cuda.jit("int64(int64)", device=True)
+def fib(n):
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
 
 
 @cuda.jit(device=True, fast_math=True)
-def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, tri_material,
+def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_vert, tri_norm, tri_material,
                                 rng, wavenumber):
     """
     Traverse an octree structure, given some triangle indexes, and return the reflected power, bounce angle, and intersection point.
@@ -273,9 +298,8 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
     int_rng = np.inf
     did_intersect = False
     inter = None
-    inter_tri = 0
     if not testIntersection(ro, rd, kd_tree[0]):
-        return False, None, None, None, None, None
+        return False, None, None, None, None
     idx = 2
     skip = False
 
@@ -286,55 +310,55 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_i
                 tri_min = leaf_key[idx, 0]
                 for t_idx in prange(tri_min, tri_min + leaf_key[idx, 1]):
                     ti = leaf_list[t_idx]
-                    ti_idx = make_uint3(tri_idx[ti, 0], tri_idx[ti, 1], tri_idx[ti, 2])
                     tn = make_float3(tri_norm[ti, 0], tri_norm[ti, 1], tri_norm[ti, 2])
                     curr_intersect, tb, tinter = (
-                        calcSingleIntersection(rd, ro, make_float3(tri_vert[ti_idx.x, 0],
-                                                                   tri_vert[ti_idx.x, 1],
-                                                                   tri_vert[ti_idx.x, 2]),
-                                               make_float3(tri_vert[ti_idx.y, 0],
-                                                           tri_vert[ti_idx.y, 1],
-                                                           tri_vert[ti_idx.y, 2]),
-                                               make_float3(tri_vert[ti_idx.z, 0],
-                                                           tri_vert[ti_idx.z, 1],
-                                                           tri_vert[ti_idx.z, 2]),
+                        calcSingleIntersection(rd, ro, make_float3(tri_vert[ti, 0, 0],
+                                                                   tri_vert[ti, 0, 1],
+                                                                   tri_vert[ti, 0, 2]),
+                                               make_float3(tri_vert[ti, 1, 0],
+                                                           tri_vert[ti, 1, 1],
+                                                           tri_vert[ti, 1, 2]),
+                                               make_float3(tri_vert[ti, 2, 0],
+                                                           tri_vert[ti, 2, 1],
+                                                           tri_vert[ti, 2, 2]),
                                                tn, True))
                     if curr_intersect:
                         tmp_rng = length(ro - tinter)
-                        if 1. < tmp_rng < int_rng:
-                            int_rng = tmp_rng + rng
-                            inv_rng = 1. / int_rng
-                            b = tb + 0.
+                        if np.float32(1.) < tmp_rng < int_rng:
+                            int_rng = tmp_rng
+                            inv_rng = np.float32(1.) / (tmp_rng + rng)
+                            b = tb + np.float32(0.)
                             # Some parts of the Fresnel coefficient calculation
                             cosa = abs(dot(rd, tn))
-                            # sina = tri_material[ti, 0] * math.sqrt(
-                            #     1. - (1. / tri_material[ti, 0] * 0.) ** 2)
                             sina = tri_material[ti, 0] * math.sqrt(
-                                max(0., 1. - (1. / tri_material[ti, 0] * length(cross(rd, tn))) ** 2))
-                            Rs = abs((cosa - sina) / (
-                                    cosa + sina)) ** 2  # Reflectance using Fresnel coefficient
-                            roughness = math.exp(-.5 * (2. * wavenumber * tri_material[ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
-                            spec = math.exp(-(1. - cosa) ** 2 / .0000007442)  # This should drop the specular component to zero by 2 degrees
-                            L = .7 * ((1 + abs(dot(b, rd))) / 2.) + .3
-                            # print(sina)
-                            nrho = rho * inv_rng * inv_rng * cosa * Rs * (
-                                    roughness * spec + (
-                                    1. - roughness) * L ** 2)  # Final reflected power
-                            inter = tinter + 0.
+                                max(np.float32(0.), np.float32(1.) - (np.float32(1.) / tri_material[ti, 0] * length(cross(rd, tn))) ** 2))
+                            # Rs = abs((cosa - sina) / (
+                            #         cosa + sina)) ** 2  # Reflectance using Fresnel coefficient
+                            roughness = math.exp(-np.float32(.5) * (np.float32(2.) * wavenumber * tri_material[ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
+                            # spec = math.exp(-(np.float32(1.) - cosa) ** 2 / np.float32(.0000007442))  # This should drop the specular component to zero by 2 degrees
+                            Lsq = ((np.float32(.7) * ((np.float32(1.) + abs(dot(b, rd))) * np.float32(.5)) + np.float32(.3)) *
+                                   (np.float32(.7) * ((np.float32(1.) + abs(dot(b, rd))) * np.float32(.5)) + np.float32(.3)))
+                            # nrho = rho * inv_rng * inv_rng * cosa * Rs * (
+                            #         roughness * spec + (
+                            #         np.float32(1.) - roughness) * Lsq)  # Final reflected power
+                            nrho = rho * inv_rng * inv_rng * cosa * (abs((cosa - sina) / (
+                                    cosa + sina)) ** 2) * (
+                                    roughness * math.exp(-(np.float32(1.) - cosa) ** 2 / np.float32(.0000007442)) + (
+                                    np.float32(1.) - roughness) * Lsq)  # Final reflected power
+                            inter = tinter + np.float32(0.)
                             did_intersect = True
-                            inter_tri = int(ti)
             else:
                 # Move down into the box
                 idx = idx * 2 + 2
                 skip = True
         if not skip:
             while idx % 2 == 1 and idx != 1:
-                idx = (idx >> 1)
+                idx = idx >> 1
             if idx == 1:
                 break
             idx -= 1
         skip = False
-    return did_intersect, nrho, inter, int_rng, b, inter_tri
+    return did_intersect, nrho, inter, int_rng + rng, b
 
 
 @cuda.jit(max_registers=MAX_REGISTERS)
@@ -348,7 +372,7 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
             # Load in all the parameters that don't change
             rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
             rng = ray_distance[tt, ray_idx]
-            did_intersect, nrho, inter, int_rng, b, _ = traverseOctreeAndReflection(
+            did_intersect, nrho, inter, int_rng, b = traverseOctreeAndReflection(
                 make_float3(ray_origin[tt, ray_idx, 0], ray_origin[tt, ray_idx, 1], ray_origin[tt, ray_idx, 2]),
                 make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]), kd_tree,
                 ray_power[tt, ray_idx], leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, tri_material, rng, params[0])
@@ -357,13 +381,11 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                 # Check for occlusion against the receiver
                 if not traverseOctreeForOcclusion(inter, normalize(rec_xyz - inter), kd_tree, leaf_list, leaf_key,
                                                                            tri_idx, tri_vert, tri_norm):
-                    acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
+                    acc, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                                pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
                     if but >= 0:
-                        acc_real = acc_real if abs(acc_real) < np.inf else 0.
-                        acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
-                        cuda.atomic.add(pd_r, (tt, but), acc_real)
-                        cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                        cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
+                        cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
                         cuda.atomic.add(counts, (tt, but), 1)
 
                 ray_origin[tt, ray_idx, 0] = inter.x
@@ -378,29 +400,33 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                 ray_power[tt, ray_idx] = 0.
 
 
-@cuda.jit(max_registers=MAX_REGISTERS)
-def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
-                   leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, pd_r, pd_i, counts, receive_xyz, pan,
-                   tilt, params, conical_sampling):
+@cuda.jit('void(float32[:, :, :], float32[:, :, :], float32[:, :], float32[:, :], float32[:, :], float32[:, :, :], int32[:], '
+          'int32[:, :], float32[:, :, :], float32[:, :], float32[:, :], float32[:, :], float32[:, :], int32[:, :], '
+          'float32[:, :], float32[:], float32[:], float32[:], float32[:, :])', max_registers=MAX_REGISTERS)
+def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, sample_points, kd_tree, leaf_list, leaf_key, tri_vert, tri_norm,
+                   tri_material, pd_r, pd_i, counts, receive_xyz, pan, tilt, params, conical_sampling):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
         rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
-            # print(nrho)
-            did_intersect, nrho, inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd,
-                                                                             kd_tree, ray_power[tt, ray_idx],
-                                                                             leaf_list, leaf_key, tri_idx,
+            rd = normalize(
+                make_float3(sample_points[ray_idx, 0], sample_points[ray_idx, 1], sample_points[ray_idx, 2]) - rec_xyz)
+            rho = (params[5] *
+             applyOneWayRadiationPattern(pan[tt], tilt[tt],
+                                         math.atan2(rd.x, rd.y), -math.asin(rd.z),
+                                         params[3], params[4]))
+            # rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
+            did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd,
+                                                                             kd_tree, rho,
+                                                                             leaf_list, leaf_key,
                                                                              tri_vert, tri_norm, tri_material, 0, params[0])
             if did_intersect:
-                acc_real, acc_imag, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
+                acc, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                            pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
                 if pd_r.shape[1] > but >= 0:
-                    acc_real = acc_real if abs(acc_real) < np.inf else 0.
-                    acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
-                    cuda.atomic.add(pd_r, (tt, but), acc_real)
-                    cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                    cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
+                    cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
                     ray_origin[tt, ray_idx, 0] = inter.x
                     ray_origin[tt, ray_idx, 1] = inter.y
                     ray_origin[tt, ray_idx, 2] = inter.z
@@ -413,26 +439,24 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                 # Apply supersampling if wanted
                 if params[6]:
                     for n in prange(conical_sampling.shape[0]):
-                        if abs(rd.y) > 1e-9:
-                            sc = normalize(make_float3(2 * rd.y * rd.z, 0., -2 * rd.x * rd.y))
+                        if abs(rd.y) > np.float32(1e-9):
+                            sc = normalize(make_float3(np.float32(2.) * rd.y * rd.z, np.float32(0.), -2 * rd.x * rd.y))
                         else:
                             sc = normalize(make_float3(-2 * rd.y * rd.z, 2 * rd.x * rd.z, 0.))
                         rd = normalize(inter + rotate(rd, sc, conical_sampling[n, 0]) * conical_sampling[n, 1] - rec_xyz)
-                        did_intersect, nrho, cone_inter, rng, b, inter_tri = traverseOctreeAndReflection(rec_xyz, rd, kd_tree,
+                        did_intersect, nrho, cone_inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd, kd_tree,
                                                                                          ray_power[tt, ray_idx],
-                                                                                         leaf_list, leaf_key, tri_idx,
+                                                                                         leaf_list, leaf_key,
                                                                                          tri_vert, tri_norm,
-                                                                                         tri_material, 0, params[0])
+                                                                                         tri_material, np.float32(0.), params[0])
                         if did_intersect:
-                            acc_real, acc_imag, but = calcReturnAndBin(cone_inter, rec_xyz, rng, params[1], params[2],
+                            acc, but = calcReturnAndBin(cone_inter, rec_xyz, rng, params[1], params[2],
                                                                        pd_r.shape[1],
                                                                        pan[tt], tilt[tt], params[3], params[4],
                                                                        params[0], nrho)
                             if pd_r.shape[1] > but >= 0:
-                                acc_real = acc_real if abs(acc_real) < np.inf else 0.
-                                acc_imag = acc_imag if abs(acc_imag) < np.inf else 0.
-                                cuda.atomic.add(pd_r, (tt, but), acc_real)
-                                cuda.atomic.add(pd_i, (tt, but), acc_imag)
+                                cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
+                                cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
                                 cuda.atomic.add(counts, (tt, but), 1)
             else:
                 ray_power[tt, ray_idx] = 0.
@@ -527,6 +551,7 @@ def calcOriginDirAtt(rec_xyz, sample_points, pan, tilt, params, ray_dir, ray_ori
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
+            # rd = normalize(sample_points[ray_idx] - rec_xyz[tt])
             rd = normalize(make_float3(sample_points[ray_idx, 0], sample_points[ray_idx, 1], sample_points[ray_idx, 2]) -
                   make_float3(rec_xyz[tt, 0], rec_xyz[tt, 1], rec_xyz[tt, 2]))
             ray_power[tt, ray_idx] = (params[5] *
@@ -536,6 +561,8 @@ def calcOriginDirAtt(rec_xyz, sample_points, pan, tilt, params, ray_dir, ray_ori
             ray_dir[tt, ray_idx, 0] = rd.x
             ray_dir[tt, ray_idx, 1] = rd.y
             ray_dir[tt, ray_idx, 2] = rd.z
+            # ray_dir[tt, ray_idx] = rd
+            # ray_origin[tt, ray_idx] = rec_xyz[tt]
             ray_origin[tt, ray_idx, 0] = rec_xyz[tt, 0]
             ray_origin[tt, ray_idx, 1] = rec_xyz[tt, 1]
             ray_origin[tt, ray_idx, 2] = rec_xyz[tt, 2]
@@ -568,23 +595,22 @@ def determineSceneRayIntersections(ray_origin, ray_intersect, ray_dir, ray_dista
 
 
 @cuda.jit()
-def calcIntersectionPoints(ray_origin, ray_dir, ray_power, boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
-                           leaf_list, leaf_key, tri_vert, tri_idx, tri_norm, tri_material, receive_xyz):
+def calcIntersectionPoints(receive_xyz, ray_intersect, ray_dir, kd_tree, leaf_list, leaf_key, tri_vert,
+                           tri_idx, tri_norm):
     t, r = cuda.grid(ndim=2)
     tt_stride, ray_stride = cuda.gridsize(2)
     for tt in prange(t, ray_dir.shape[0], tt_stride):
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
-            did_intersect, inter, rng, _ = (
-                traverseOctreeAndIntersection(make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]),
-                                              make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2]),
-                                              boxminx, boxminy, boxminz, boxmaxx, boxmaxy, boxmaxz,
+            rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
+            rxyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
+            did_intersect, inter, rng = (
+                traverseOctreeAndIntersection(rxyz, rd, kd_tree,
                                               leaf_list, leaf_key, tri_idx, tri_vert, tri_norm, 0))
+            # inter = make_float3(0., 1., 0.)
             if did_intersect:
-                ray_origin[tt, ray_idx, 0] = inter.x
-                ray_origin[tt, ray_idx, 1] = inter.y
-                ray_origin[tt, ray_idx, 2] = inter.z
-            else:
-                ray_power[tt, ray_idx] = 0.
+                ray_intersect[tt, ray_idx, 0] = inter.x
+                ray_intersect[tt, ray_idx, 1] = inter.y
+                ray_intersect[tt, ray_idx, 2] = inter.z
 
 
             

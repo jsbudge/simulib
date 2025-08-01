@@ -182,8 +182,8 @@ def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndar
     return rbj
 
 def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray], elrx: list[np.ndarray],
-                           posrx: list[np.ndarray], postx: list[np.ndarray], gz: np.ndarray, wavelength: float,
-                           near_range_s: float, upsample_fs: float, az_half_bw: float, el_half_bw: float,
+                           posrx: list[np.ndarray], postx: list[np.ndarray], gz: np.ndarray, wavelength: _float,
+                           near_range_s: _float, upsample_fs: _float, az_half_bw: _float, el_half_bw: float,
                            gx: np.ndarray = None, gy: np.ndarray = None, a_poly_num: int = 0,
                            streams: list[cuda.stream]=None) -> np.ndarray:
     nbpj_pts = gz.shape
@@ -200,21 +200,18 @@ def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray]
 
         # Run through loop to get data simulated
         # Data blocks for imaging
-        r_bpj = [np.zeros(nbpj_pts, dtype=np.complex128) for _ in panrx]
-        for az, el, prx, ptx, data, stream, rbj in zip(panrx, elrx, posrx, postx, pulse_data, streams, r_bpj):
+        r_bpj = [np.zeros(nbpj_pts, dtype=np.complex64) for _ in panrx]
+        for az, prx, ptx, data, stream, rbj in zip(panrx, posrx, postx, pulse_data, streams, r_bpj):
             with cuda.pinned(data, rbj):
                 panrx_gpu = cuda.to_device(az, stream=stream)
-                elrx_gpu = cuda.to_device(el, stream=stream)
                 posrx_gpu = cuda.to_device(prx, stream=stream)
                 postx_gpu = cuda.to_device(ptx, stream=stream)
                 bpj_grid = cuda.to_device(rbj, stream=stream)
                 rtdata = cuda.to_device(data, stream=stream)
-                backproject[blocks_strided, threads_strided, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu,
-                                                                elrx_gpu, panrx_gpu, elrx_gpu, rtdata, bpj_grid,
-                                                                wavelength, near_range_s, upsample_fs, az_half_bw,
-                                                                el_half_bw, a_poly_num)
+                backproject[blocks_strided, threads_strided, stream](postx_gpu, posrx_gpu, gx_gpu, gy_gpu, gz_gpu, panrx_gpu, rtdata, bpj_grid,
+                                                                wavelength, near_range_s, upsample_fs, az_half_bw, a_poly_num)
                 bpj_grid.copy_to_host(rbj, stream=stream)
-                del panrx_gpu, elrx_gpu, posrx_gpu, postx_gpu, bpj_grid, rtdata
+                del panrx_gpu, posrx_gpu, postx_gpu, bpj_grid, rtdata
         cuda.synchronize()
     del gx_gpu, gy_gpu, gz_gpu
 
