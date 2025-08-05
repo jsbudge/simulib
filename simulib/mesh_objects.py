@@ -6,6 +6,11 @@ from sklearn.cluster import AgglomerativeClustering
 
 
 class Mesh(object):
+    bvh: np.ndarray
+    bvh_levels: int
+    leaf_key: np.ndarray
+    leaf_list: np.ndarray
+    bounding_box: np.ndarray
 
     def __init__(self, a_mesh: o3d.geometry.TriangleMesh, material_emissivity: list=None,
                  material_sigma: list=None, max_tris_per_split: int = 64):
@@ -13,7 +18,9 @@ class Mesh(object):
         # Generate bounding box tree
         mesh_tri_idx = np.asarray(a_mesh.triangles)
         mesh_vertices = np.asarray(a_mesh.vertices)
+        a_mesh = a_mesh.compute_vertex_normals()
         mesh_normals = np.asarray(a_mesh.triangle_normals)
+        vertex_normals = np.asarray(a_mesh.vertex_normals)
 
         assert mesh_tri_idx.shape[0] != 0, 'No triangle indexes found.'
         assert mesh_vertices.shape[0] != 0, 'No vertices found.'
@@ -39,6 +46,7 @@ class Mesh(object):
         self.tri_idx = mesh_tri_idx.astype(np.int32)
         self.vertices = mesh_vertices.astype(_float)
         self.normals = mesh_normals.astype(_float)
+        self.vertex_normals = vertex_normals.astype(_float)
         self.materials = tri_material.astype(_float)
         self.center = a_mesh.get_center().astype(_float)
         self.ntri = mesh_tri_idx.shape[0]

@@ -48,7 +48,7 @@ if __name__ == '__main__':
     noise_power_db = -120
     upsample = 8
     exp_range = 500
-    n_samples = 2**16
+    n_samples = 2**12
     single_target = '/home/jeff/Documents/target_meshes/tacoma_VTC.dat'
 
     nposes = 8
@@ -87,8 +87,8 @@ if __name__ == '__main__':
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
     for target_fnme in targets:
-        if target_fnme != single_target:
-            continue
+        # if target_fnme != single_target:
+        #     continue
         print(target_fnme)
         scene = Scene()
         # Check if this is some VTC data and load the mesh data accordingly
@@ -128,7 +128,7 @@ if __name__ == '__main__':
         with open(model_name, 'rb') as f:
             scene = pickle.load(f)
         print('Sampling mesh...', end='')
-        sample_points = [scene.sample(n_samples)]
+        sample_points = [scene.sample(n_samples, a_obs_pts=poses[::16])]
 
         streams = [cuda.stream()]
         rpfig = go.Figure()
@@ -145,7 +145,7 @@ if __name__ == '__main__':
                                                                                       radar_coeff,
                                                                                       np.pi / 4, np.pi / 4,
                                                                                       nsam, fc, near_range_s, fs,
-                                                                                      num_bounces=2,
+                                                                                      num_bounces=1,
                                                                                       debug=True, streams=streams, use_supersampling=True)
         single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
                                      is_freq=True, time_len=nsam)
@@ -180,7 +180,7 @@ if __name__ == '__main__':
         cmap = cm.get_cmap('viridis')
 
         # Normalize the data
-        tri_materials = np.asarray(mesh.triangle_material_ids)
+        tri_materials = np.asarray(source_mesh.triangle_material_ids)
         norm = mcolors.Normalize(vmin=np.min(tri_materials), vmax=np.max(tri_materials))
 
         # Map data to colors

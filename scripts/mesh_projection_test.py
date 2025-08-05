@@ -117,6 +117,7 @@ if __name__ == '__main__':
     )
     scene.shift(llh2enu(*grid_origin, bg.ref))
     scene.rotate(np.array([np.pi / 2, 0, 0]))
+    scene.recalcKDTree(max_tris_per_split)
 
     '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/air_balloon.targ')
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
