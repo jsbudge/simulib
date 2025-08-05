@@ -561,14 +561,15 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
     tri_areas = np.linalg.norm(np.cross(tverts[:, 0] - tverts[:, 2], tverts[:, 1] - tverts[:, 2]), axis=1) / 2
     bvh = scene.meshes[0].bvh[scene.meshes[0].bvh.shape[0] // 2:]
     volumes = np.prod(bvh[:, 1, :] - bvh[:, 0, :], axis=1)
-    for idx, k in enumerate(scene.meshes[0].leaf_key[4095:]):
+    box_lim = 2**(scene.meshes[0].bvh_levels - 1) - 1
+    for idx, k in enumerate(scene.meshes[0].leaf_key[box_lim:]):
         volumes[idx] = sum(tri_areas[scene.meshes[0].leaf_list[k[0]:k[0]+k[1]]])
     alloc_pts = np.ceil(volumes / np.sum(volumes) * npoints).astype(int)
     while sum(alloc_pts) > npoints:
         alloc_pts[np.where(alloc_pts == alloc_pts.max())[0][0]] -= 1
 
     for idx, (box, apts) in enumerate(zip(volumes, alloc_pts)):
-        keys = scene.meshes[0].leaf_key[idx + 4095]
+        keys = scene.meshes[0].leaf_key[idx + box_lim]
         tris = scene.meshes[0].leaf_list[keys[0]:keys[0]+keys[1]]
 
         # Select the appropriate amount of points for this box

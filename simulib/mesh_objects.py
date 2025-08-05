@@ -9,11 +9,15 @@ class Mesh(object):
 
     def __init__(self, a_mesh: o3d.geometry.TriangleMesh, material_emissivity: list=None,
                  material_sigma: list=None, max_tris_per_split: int = 64):
+
         # Generate bounding box tree
         mesh_tri_idx = np.asarray(a_mesh.triangles)
         mesh_vertices = np.asarray(a_mesh.vertices)
         mesh_normals = np.asarray(a_mesh.triangle_normals)
-        mesh_tri_vertices = mesh_vertices[mesh_tri_idx]
+
+        assert mesh_tri_idx.shape[0] != 0, 'No triangle indexes found.'
+        assert mesh_vertices.shape[0] != 0, 'No vertices found.'
+        assert mesh_normals.shape[0] != 0, 'No triangle normals found.'
 
         # Material triangle stuff
         if material_emissivity is None:
@@ -29,7 +33,20 @@ class Mesh(object):
 
         tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
                                        mesh_kd.reshape((-1, 1))], axis=1)
+        assert tri_material.shape[0] == mesh_tri_idx.shape[0], 'Materials do not match triangles.'
 
+        # Set them all as properties of the object
+        self.tri_idx = mesh_tri_idx.astype(np.int32)
+        self.vertices = mesh_vertices.astype(_float)
+        self.normals = mesh_normals.astype(_float)
+        self.materials = tri_material.astype(_float)
+        self.center = a_mesh.get_center().astype(_float)
+        self.ntri = mesh_tri_idx.shape[0]
+
+        self.set_bounding_box(a_mesh, max_tris_per_split)
+
+    def set_bounding_box(self, a_mesh, max_tris_per_split):
+        mesh_tri_vertices = self.vertices[self.tri_idx]
         # Generate octree and associate triangles with boxes
         aabb = a_mesh.get_axis_aligned_bounding_box()
         max_bound = aabb.get_max_bound()
@@ -48,20 +65,12 @@ class Mesh(object):
         mesh_idx_key[box_num, 0] = start_idxes
         mesh_idx_key[box_num, 1] = mesh_extent
 
-
-        # Set them all as properties of the object
-        self.tri_idx = mesh_tri_idx.astype(np.int32)
-        self.vertices = mesh_vertices.astype(_float)
-        self.normals = mesh_normals.astype(_float)
-        self.materials = tri_material.astype(_float)
         self.bvh = tree_bounds.astype(_float)
         self.bounding_box = root_box.astype(_float)
         self.leaf_list = sorted_tri_idx[:, 1].astype(np.int32)
         self.leaf_key = mesh_idx_key.astype(np.int32)
-        self.center = a_mesh.get_center().astype(_float)
-        self.ntri = mesh_tri_idx.shape[0]
         self.bvh_levels = num_box_levels
-        # self.source_mesh = a_mesh
+
 
     def sample(self, sample_points: int):
         sm = o3d.geometry.TriangleMesh()
@@ -77,6 +86,11 @@ class Mesh(object):
         self.center += _shift
         self.bounding_box += _shift
         self.bvh += _shift
+
+    def rotate(self, rot_mat):
+        self.vertices = self.vertices @ rot_mat
+        self.center = self.center @ rot_mat
+        self.normals = self.normals @ rot_mat
 
 
 class VTCMesh(Mesh):
@@ -139,6 +153,25 @@ class Scene(object):
         _shift = new_center - self.center if relative else new_center
         for mesh in self.meshes:
             mesh.shift(_shift, relative)
+
+
+    def rotate(self, rot_xyz: np.ndarray):
+        x, y, z = rot_xyz
+        rot_mat = np.array([[np.cos(y) * np.cos(z), np.sin(x) * np.sin(y) * np.cos(z) - np.cos(x) * np.sin(z), np.cos(x) * np.sin(y) * np.cos(z) + np.sin(x) * np.sin(z)],
+                            [np.cos(y) * np.sin(z), np.sin(x) * np.sin(y) * np.sin(z) + np.cos(x) * np.cos(z), np.cos(x) * np.sin(y) * np.sin(z) - np.sin(x) * np.cos(z)],
+                            [-np.sin(y), np.sin(x) * np.cos(y), np.cos(x) * np.cos(y)]])
+        for mesh in self.meshes:
+            scene_center = self.center + 0.  # store the scene center, as the method re-calculates it from meshes
+            mesh.shift(mesh.center - scene_center, False)
+            mesh.rotate(rot_mat)
+            mesh.shift(scene_center + mesh.center, False)
+
+    def recalcKDTree(self, max_tris_per_split):
+        for mesh in self.meshes:
+            new_mesh = o3d.geometry.TriangleMesh()
+            new_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
+            new_mesh.triangles = o3d.utility.Vector3iVector(mesh.tri_idx)
+            mesh.set_bounding_box(new_mesh, max_tris_per_split)
 
 
     @property
