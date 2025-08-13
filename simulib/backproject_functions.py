@@ -181,9 +181,9 @@ def backprojectPulseSet(pulse_data: np.ndarray, panrx: np.ndarray, elrx: np.ndar
 
     return rbj
 
-def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray], elrx: list[np.ndarray],
+def backprojectPulseStream(pulse_data: list[np.ndarray], panrx: list[np.ndarray],
                            posrx: list[np.ndarray], postx: list[np.ndarray], gz: np.ndarray, wavelength: _float,
-                           near_range_s: _float, upsample_fs: _float, az_half_bw: _float, el_half_bw: float,
+                           near_range_s: _float, upsample_fs: _float, az_half_bw: _float,
                            gx: np.ndarray = None, gy: np.ndarray = None, a_poly_num: int = 0,
                            streams: list[cuda.stream]=None) -> np.ndarray:
     nbpj_pts = gz.shape

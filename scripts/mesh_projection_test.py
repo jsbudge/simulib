@@ -20,6 +20,7 @@ import plotly.io as pio
 import plotly.graph_objects as go
 from sdrparse import load
 import matplotlib as mplib
+import pickle
 mplib.use('TkAgg')
 from simulib.mesh_objects import Mesh, Scene
 
@@ -42,14 +43,15 @@ if __name__ == '__main__':
     tx_gain = 32  # dB
     rec_gain = 80  # dB
     ant_transmit_power = 50  # watts
+    noise_figure = 20
+    operating_temperature = 290  # degrees Kelvin
     noise_power_db = -120
     npulses = 32
     plp = 0.
-    fdelay = 10.
     upsample = 8
     num_bounces = 1
     max_tris_per_split = 64
-    points_to_sample = 2**12
+    points_to_sample = 2**16
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**17
     # grid_origin = (40.139343, -111.663541, 1360.10812)
@@ -59,14 +61,14 @@ if __name__ == '__main__':
     # grid_origin = (40.198354, -111.924774, 1560.)
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
-    do_randompts = False
-    use_supersampling = False
-    nbpj_pts = (1024, 1024)
+    supersamples = 0
+    nbpj_pts = (64, 64)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
     sdr_f = load(fnme, import_pickle=True)
     bg, rp = getRadarAndEnvironment(sdr_f)
+    rp1 = SDRPlatform(sdr_f, origin=rp.origin, tx_offset=np.array([1., 0., 1.]), rx_offset=np.array([-1., 0., -1.]))
     rp.el_half_bw *= 2
     rp.az_half_bw *= 2
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
@@ -81,13 +83,13 @@ if __name__ == '__main__':
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 250, 250, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
+    gx, gy, gz = bg.getGrid(grid_origin, 10, 10, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
     grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
     print('Loading mesh...', end='')
     # mesh = o3d.geometry.TriangleMesh()
-    scene = Scene()
+    # scene = Scene()
     # mesh_ids = []
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
@@ -102,7 +104,10 @@ if __name__ == '__main__':
         )
     )'''
 
-    mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
+    with open('/home/jeff/repo/apache/data/target_meshes/Humvee.model', 'rb') as f:
+        scene = pickle.load(f)
+
+    '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     # mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
@@ -114,10 +119,12 @@ if __name__ == '__main__':
             material_emissivity=[mesh_materials[mtid][1] for mtid in
                                  range(np.asarray(mesh.triangle_material_ids).max() + 1)],
         )
-    )
+    )'''
     scene.shift(llh2enu(*grid_origin, bg.ref))
-    scene.rotate(np.array([np.pi / 2, 0, 0]))
-    scene.recalcKDTree(max_tris_per_split)
+    # scene.rotate(np.array([np.pi / 2, 0, 0]))
+    # scene.recalcKDTree(max_tris_per_split)
+
+
 
     '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/air_balloon.targ')
     mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
@@ -286,16 +293,23 @@ if __name__ == '__main__':
 
     # This is all the constants in the radar equation for this simulation
     radar_coeff = getRadarCoeff(fc, ant_transmit_power, rx_gain, tx_gain, rec_gain)
-    noise_power = 10**(noise_power_db / 10)
+    noise_power = 10**(noise_figure / 10) * operating_temperature * 1.38e-23
 
     # Generate a chirp
     # fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
     # mf_chirp = sdr_f.genMatchedFilter(0, fft_len=fft_len)
     chirp_bandwidth = sdr_f[0].bw
     chirp = genChirp(nr, fs, fc, chirp_bandwidth)
+    phase = fc - chirp_bandwidth // 2 + chirp_bandwidth * np.interp(np.linspace(0, 1, nr), np.linspace(0, 1, 10), np.linspace(1, 0, 10))
+    sec_chirp = np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / fs))
+
     fft_chirp = np.fft.fft(chirp, fft_len)
+    sec_fft_chirp = np.fft.fft(sec_chirp, fft_len)
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
+    secmf_chirp = taytay / sec_fft_chirp
+    fft_chirps = [fft_chirp, sec_fft_chirp]
+    mf_chirps = [mf_chirp, secmf_chirp]
 
 
     # Load in boxes and meshes for speedup of ray tracing
@@ -309,12 +323,8 @@ if __name__ == '__main__':
     else:
         splits = np.array([0, points_to_sample])
 
-    if do_randompts:
-        sample_points = ptsam
-    else:
-        # sample_points = [grid_pts]
-        sample_points = [scene.sample(int(splits[s + 1] - splits[s]), rp.txpos(rp.gpst[::100]))
-                         for s in range(len(splits) - 1)]
+    sample_points = [scene.sample(int(splits[s + 1] - splits[s]), rp.txpos(rp.gpst[::100]))
+                     for s in range(len(splits) - 1)]
     boresight = rp.boresight(sdr_f[0].pulse_time).mean(axis=0)
     pointing_az = np.arctan2(boresight[0], boresight[1])
 
@@ -332,25 +342,42 @@ if __name__ == '__main__':
     pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000,
                                                                       sdr_f[0].frame_num[-1])]
     streams = [cuda.stream() for _ in range(nstreams)]
+    datasets = [rp, rp1]
 
     # Single pulse for debugging
     print('Generating single pulse...')
-    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points[0],
-                                                                                 [rp.txpos(data_t).astype(_float)],
-                                                                                  [rp.txpos(data_t).astype(_float)],
-                                                                                 [rp.pan(data_t).astype(_float)],
-                                                                                  [rp.tilt(data_t).astype(_float)],
+    single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
+                                                                                  [r.txpos(data_t).astype(_float) for r in datasets],
+                                                                                  [r.rxpos(data_t).astype(_float) for r in datasets],
+                                                                                  [r.pan(data_t).astype(_float) for r in datasets],
+                                                                                  [r.tilt(data_t).astype(_float) for r in datasets],
                                                                                   radar_coeff, rp.az_half_bw, rp.el_half_bw,
-                                                                                 nsam, fc, near_range_s, fs,
-                                                                                 num_bounces=num_bounces,
-                                                                                 debug=True, streams=streams,
-                                                                                  use_supersampling=use_supersampling)
-    single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
-                                 is_freq=True, time_len=nsam)
-    single_mf_pulse = upsamplePulse(
-        addNoise(single_rp[0], fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample,
-        is_freq=True, time_len=nsam)
+                                                                                  nsam, fc, near_range_s, fs,
+                                                                                  num_bounces=num_bounces,
+                                                                                  debug=True, streams=streams,
+                                                                                  supersamples=supersamples)
+    single_pulse = [
+        sum(
+            upsamplePulse(
+                f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, f.shape) + 1j * np.random.normal(0, noise_power * chirp_bandwidth, f.shape),
+                fft_len,
+                upsample,
+                is_freq=True,
+                time_len=nsam,
+            )
+            for s, f in zip(srp, fft_chirps)
+        )
+        for srp in single_rp
+    ]
+    single_mf_pulse = [
+        [upsamplePulse(sum(f * np.fft.fft(s, fft_len) for s, f in zip(srp, fft_chirps)) * mf, fft_len, upsample,
+                       is_freq=True, time_len=nsam)
+            for mf in mf_chirps
+        ]
+        for srp in single_rp
+    ]
     bpj_grid = np.zeros_like(gx).astype(np.complex64)
+    bpj2 = np.zeros_like(gx).astype(np.complex64)
 
     print('Running main loop...')
     # Get the data into CPU memory for later
@@ -360,19 +387,27 @@ if __name__ == '__main__':
     torch_pans = []
     torch_tilts = []'''
     for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),)))):
-        txposes = [rp.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
-        rxposes = [rp.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
-        pans = [rp.pan(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
-        tilts = [rp.tilt(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for _ in range(nstreams)]
-        trp = [getRangeProfileFromScene(scene, sam, txposes, rxposes, pans, tilts,
-                                      radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
-                                      num_bounces=num_bounces, streams=streams, use_supersampling=use_supersampling) for sam in sample_points]
-        trp = [sum(i) for i in zip(*trp)]
-        mf_pulses = [np.ascontiguousarray(upsamplePulse(
-            addNoise(range_profile, fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample, is_freq=True,
-            time_len=nsam).T, dtype=np.complex64) for range_profile in trp]
-        bpj_grid += backprojectPulseStream(mf_pulses, pans, tilts, rxposes, txposes, gz.astype(_float),
-                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw, rp.el_half_bw,
+        txposes = [r.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
+        rxposes = [r.rxpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
+        pans = [r.pan(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
+        tilts = [r.tilt(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
+        trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
+                                        radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
+                                        num_bounces=num_bounces, streams=streams, supersamples=supersamples)
+        rx_pulse = [
+            sum(
+                    f * np.fft.fft(s, fft_len)
+                for s, f in zip(srp, fft_chirps)
+            )
+            for srp in trp
+        ]
+        mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
+            time_len=nsam).T, dtype=np.complex64) for rpulse in rx_pulse] for mf in mf_chirps]
+        bpj_grid += backprojectPulseStream(mf_pulses[0], [pans[0]], [rxposes[0]], [txposes[0]], gz.astype(_float),
+                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
+                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
+        bpj2 += backprojectPulseStream(mf_pulses[1], [pans[1]], [rxposes[0]], [txposes[1]], gz.astype(_float),
+                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
         '''torch_data.append(trp[0])
         torch_pos.append(txposes[0])
@@ -380,9 +415,9 @@ if __name__ == '__main__':
         torch_tilts.append(tilts[0])'''
 
 
-    px.scatter(db(single_rp[0][0].flatten())).show()
-    px.scatter(db(single_pulse[0].flatten())).show()
-    px.scatter(db(single_mf_pulse[0].flatten())).show()
+    px.scatter(db(np.stack([[s[0] for s in sp] for sp in single_rp])[0].T)).show()
+    px.scatter(db(np.stack([sp[0] for sp in single_pulse]).T)).show()
+    px.scatter(db(np.stack([[s[0] for s in sp] for sp in single_mf_pulse])[0].T)).show()
 
     '''plt.figure('Data')
     plt.imshow(db(single_mf_pulse * 1e8))
@@ -402,6 +437,10 @@ if __name__ == '__main__':
 
     px.imshow(db_bpj, origin='lower', color_continuous_scale='gray',
               range_color=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 3]).show()
+    px.imshow(db(bpj2), origin='lower', color_continuous_scale='gray',
+              range_color=[np.mean(db(bpj2)), np.mean(db(bpj2)) + np.std(db(bpj2)) * 3]).show()
+    px.imshow(db(bpj2 + bpj_grid), origin='lower', color_continuous_scale='gray',
+              range_color=[np.mean(db(bpj2 + bpj_grid)), np.mean(db(bpj2 + bpj_grid)) + np.std(db(bpj2 + bpj_grid)) * 3]).show()
 
     scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
     sc_min = scaling[0] - 1e-3
@@ -409,13 +448,15 @@ if __name__ == '__main__':
     scaled_rp = (ray_powers[0] - sc_min) * sc
 
 
-    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title='Full Mesh', zrange=[-30, flight_path[:, 2].mean() + 10])
+    fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors,
+                      title='Full Mesh', zrange=[-30, flight_path[:, 2].mean() + 10])
     fig.add_trace(go.Scatter3d(x=flight_path[::100, 0], y=flight_path[::100, 1], z=flight_path[::100, 2], mode='lines'))
     fig.show()
 
     bounce_colors = ['blue', 'red', 'green', 'yellow']
     for bounce in range(len(ray_origins)):
-        fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors, title=f'Bounce {bounce}')
+        fig = getSceneFig(scene, triangle_colors=scene.meshes[0].normals if triangle_colors is None else triangle_colors,
+                          title=f'Bounce {bounce}')
         for idx, (ro, rd, nrp) in enumerate(zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
             valids = nrp[0] > 0.
             sc = (1 + nrp[0, valids] / nrp[0, valids].max()) * 10
@@ -471,8 +512,22 @@ if __name__ == '__main__':
     lin = kml.newlinestring(name='Flight Line', coords=[(lo, la, al - 1380) for la, lo, al in zip(lat, lon, alt)])
     kml.save('/home/jeff/repo/test.kml')'''
 
-    px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
+    '''px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
 
     plt.figure()
     plt.imshow(db(single_rp[0]))
+    plt.axis('tight')    tri_pcd.normals = o3d.utility.Vector3dVector(mesh.normals)
+    o3d.visualization.draw_geometries([tri_pcd])'''
+
+    '''import simplekml
+    from simulib import enu2llh
+    kml = simplekml.Kml()
+    lat, lon, alt = enu2llh(flight_path[:, 0], flight_path[:, 1], flight_path[:, 2], bg.ref)
+    lin = kml.newlinestring(name='Flight Line', coords=[(lo, la, al - 1380) for la, lo, al in zip(lat, lon, alt)])
+    kml.save('/home/jeff/repo/test.kml')'''
+
+    px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
+
+    plt.figure()
+    plt.imshow(db(single_rp[0][0]))
     plt.axis('tight')

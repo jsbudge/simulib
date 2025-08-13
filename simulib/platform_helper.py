@@ -73,91 +73,33 @@ class Platform(object):
         """
 
         self._gpst = t
-        self._txant = tx_offset
-        self._rxant = rx_offset
         self._gimbal = gimbal
         self._gimbal_offset = gimbal_offset
         self.gimbal_rotations = gimbal_rotations
-        use_gps = gps_t is not None
-        gps_t = gps_t if use_gps else t
 
-        pos = np.array([e, n, u]).T
+        position_matrix = np.stack([e, n, u, r, p, t, t])
+        position_matrix[5] = np.interp(t, gps_t, gps_az + 2 * np.pi) if gps_t is not None else y
 
-        # attitude spline
-        yy = np.interp(t, gps_t, gps_az + 2 * np.pi) if use_gps else y
-        self._att = CubicSpline(t, np.array([r, p, yy]).T)
+        self._tx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset)
+        self._rx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset)
+
+        self._att = self._tx.att
 
         # Take into account the gimbal if necessary
         if gimbal is not None:
             self._gimbal_offset_mat = getRotationOffsetMatrix(*gimbal_rotations)
-            # Matrix to rotate from body to inertial frame for each INS point
-            tx_offset = tx_offset if tx_offset is not None else np.array([0., 0., 0.])
-            rx_offset = rx_offset if rx_offset is not None else np.array([0., 0., 0.])
             self._gimbal_pan = CubicSpline(t, gimbal[:, 0])
             self._gimbal_tilt = CubicSpline(t, gimbal[:, 1])
 
-            # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
-            if use_gps:
-                tpos = gps_txpos
-                rpos = gps_rxpos
-            else:
-                tx_corrs = np.array(
-                    [getPhaseCenterInertialCorrection(self._gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n],
-                                                      p[n], r[n], tx_offset, gimbal_offset)
-                     for n in range(gimbal.shape[0])])
-                rx_corrs = np.array(
-                    [getPhaseCenterInertialCorrection(self._gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n],
-                                                      p[n], r[n], rx_offset, gimbal_offset)
-                     for n in range(gimbal.shape[0])])
-                tpos = pos + tx_corrs
-                rpos = pos + rx_corrs
-
-            # Rotate antenna into inertial frame in the same way as above
-            bai = np.array([getBoresightVector(self._gimbal_offset_mat, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
-                            for n in range(gimbal.shape[0])])
-            bai = bai.reshape((bai.shape[0], bai.shape[1])).T
-
-            # Calculate antenna azimuth/elevation for beampattern
-            if use_gps:
-                gtheta = np.interp(gps_t, t, np.arcsin(-bai[2, :]))
-                gphi = np.interp(gps_t, t, np.arctan2(bai[0, :], bai[1, :]))
-            else:
-                gtheta = np.arcsin(-bai[2, :])
-                gphi = np.arctan2(bai[0, :], bai[1, :])
-        else:
-            tpos = rpos = pos
-            gphi = y - np.pi / 2
-            gtheta = np.zeros(len(t)) + 20 * DTR
-
         # Build the position splines
-        self._pos = CubicSpline(t, pos)
-        self._txpos = CubicSpline(gps_t, tpos)
-        self._rxpos = CubicSpline(gps_t, rpos)
+        self._pos = CubicSpline(t, position_matrix[:3].T)
 
         # Build a velocity spline
-        self._vel = CubicSpline(t, median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *
+        self._vel = CubicSpline(t, median_filter(np.gradient(position_matrix[:3].T, axis=0), 15, axes=(0,)) *
                                 INS_REFRESH_HZ)
 
         # heading check
         self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
-
-        # Beampattern stuff
-        self.pan = CubicSpline(gps_t, gphi)
-        self.tilt = CubicSpline(gps_t, gtheta)
-
-    @singledispatch
-    def boresight(self, t):
-        # Get a boresight angle from the pan/tilt values
-        r, p, y = self._att(t).T
-        return np.array([getBoresightVector(
-            self._gimbal_offset_mat, self._gimbal_pan(t[i]), self._gimbal_tilt(t[i]), y[i], p[i], r[i])
-            for i in range(len(t))]).squeeze(2)
-
-    @boresight.register
-    def _(self, t: float):
-        # Get a boresight angle from the pan/tilt values
-        r, p, y = self._att(t).T
-        return getBoresightVector(self._gimbal_offset_mat, self._gimbal_pan(t), self._gimbal_tilt(t), y, p, r)
 
     @property
     def pos(self):
@@ -182,12 +124,12 @@ class Platform(object):
     @property
     def rxpos(self):
         # Return Rx position lambda
-        return self._rxpos
+        return self._rx.pos
 
     @property
     def txpos(self):
         # Return Tx position lambda
-        return self._txpos
+        return self._tx.pos
 
     @property
     def vel(self):
@@ -197,6 +139,14 @@ class Platform(object):
     @property
     def gimbal_offset(self):
         return self._gimbal_offset
+
+    @property
+    def pan(self):
+        return self._tx.pan
+
+    @property
+    def tilt(self):
+        return self._tx.tilt
 
 
 """
@@ -397,7 +347,7 @@ class RadarPlatform(Platform):
         MPP = c0 / self.fs / upsample
         return nrange + np.arange(nsam * upsample) * MPP + c0 / self.fs
 
-    def getRadarParams(self, fdelay, plp, upsample=1):
+    def getRadarParams(self, fdelay, plp, upsample=1, a_ranges=None):
         """
         A function to get many relevant radar parameters gathered in one spot.
 
@@ -416,13 +366,13 @@ class RadarPlatform(Platform):
             fft_len: The calculated FFT length.
             up_fft_len: The calculated upsampled FFT length.
         """
-        nsam = self.calcNumSamples(fdelay, plp)
-        nr = self.calcPulseLength(fdelay, plp, True)
-        ranges = self.calcRangeBins(fdelay, upsample, plp)
-        ranges_sampled = self.calcRangeBins(fdelay, 1, plp)
+        nsam = self.calcNumSamples(fdelay, plp, a_ranges)
+        nr = self.calcPulseLength(fdelay, plp, True, a_ranges[0] if a_ranges is not None else None)
+        ranges = self.calcRangeBins(fdelay, upsample, plp, a_ranges)
+        ranges_sampled = self.calcRangeBins(fdelay, 1, plp, a_ranges)
         near_range_s = ranges[0] / c0
         granges = ranges * np.cos(self.dep_ang)
-        fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True)))))
+        fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True, nrange=a_ranges[0] if a_ranges is not None else None)))))
         up_fft_len = fft_len * upsample
         return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
 
@@ -568,6 +518,85 @@ class SDRPlatform(RadarPlatform):
         :return: Wrap velocity in meters per second.
         """
         return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
+
+
+class Antenna:
+    bw_az: float
+    bw_el: float
+    gain_db: float
+
+    def __init__(self, pos_mat: np.ndarray, gimbal: np.ndarray, gimbal_offset: np.ndarray, gimbal_rotations: np.ndarray, offset: np.ndarray):
+
+        pos = pos_mat[:3].T  # np.array([e, n, u]).T
+
+        # attitude spline
+        # yy = np.interp(t, gps_t, gps_az + 2 * np.pi) if use_gps else y
+        # self._att = CubicSpline(t, np.array([r, p, yy]).T)
+        self._att = CubicSpline(pos_mat[6], pos_mat[3:6].T)
+        r, p, y = pos_mat[3:6]
+
+        # Take into account the gimbal
+        gom = getRotationOffsetMatrix(*gimbal_rotations)
+        # Matrix to rotate from body to inertial frame for each INS point
+        offset = offset if offset is not None else np.array([0., 0., 0.])
+
+        # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
+        corrs = np.array(
+            [getPhaseCenterInertialCorrection(gom, gimbal[n, 0], gimbal[n, 1], y[n],
+                                              p[n], r[n], offset, gimbal_offset)
+             for n in range(gimbal.shape[0])])
+        tpos = pos + corrs
+
+        # Rotate antenna into inertial frame in the same way as above
+        bai = np.array([getBoresightVector(gom, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
+                        for n in range(gimbal.shape[0])])
+        bai = bai.reshape((bai.shape[0], bai.shape[1])).T
+
+        # Calculate antenna azimuth/elevation for beampattern
+        gtheta = np.arcsin(-bai[2, :])
+        gphi = np.arctan2(bai[0, :], bai[1, :])
+
+        # Build the position splines
+        self._pos = CubicSpline(pos_mat[6], tpos)
+
+        # Build a velocity spline
+        self._vel = CubicSpline(pos_mat[6], median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *
+                                INS_REFRESH_HZ)
+
+        # heading check
+        self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
+
+        # Beampattern stuff
+        self.pan = CubicSpline(pos_mat[6], gphi)
+        self.tilt = CubicSpline(pos_mat[6], gtheta)
+
+    @singledispatch
+    def boresight(self, t):
+        return np.vstack([np.sin(self.pan(t)) * np.cos(self.tilt(t)), np.cos(self.pan(t)) * np.cos(self.tilt(t)), -np.sin(self.tilt(t))])
+
+    @boresight.register
+    def _(self, t: float):
+        return np.array([np.sin(self.pan(t)) * np.cos(self.tilt(t)), np.cos(self.pan(t)) * np.cos(self.tilt(t)), -np.sin(self.tilt(t))])
+
+    @property
+    def pos(self):
+        # Return the position lambda
+        return self._pos
+
+    @property
+    def heading(self):
+        # Return the heading lambda
+        return self._heading
+
+    @property
+    def att(self):
+        # Return the attitude lambda
+        return self._att
+
+    @property
+    def vel(self):
+        # Return velocity lambda
+        return self._vel
 
 
 def bodyToInertial(yaw, pitch, roll, x, y, z):
