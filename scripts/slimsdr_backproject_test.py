@@ -10,8 +10,9 @@ from simulib.grid_helper import SDREnvironment
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, getRadarCoeff, \
     azelToVec
-from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getRangeProfileFromScene, \
     getMeshFig, getSceneFig, drawOctreeBox, loadTarget, loadMesh
+from simulib.utils import _float, c0, _complex_float
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -26,10 +27,6 @@ from simulib.mesh_objects import Mesh, Scene
 
 pio.renderers.default = 'browser'
 
-c0 = 299792458.0
-TAC = 125e6
-DTR = np.pi / 180
-
 
 def addNoise(range_profile, a_chirp, npower, mf, a_fft_len):
     data = a_chirp * np.fft.fft(range_profile, a_fft_len)
@@ -41,11 +38,11 @@ if __name__ == '__main__':
     fc = 9.6e9
     rx_gain = 32  # dB
     tx_gain = 32  # dB
-    rec_gain = 80  # dB
-    ant_transmit_power = 50  # watts
+    rec_gain = 100  # dB
+    up_gain = 140  # dB
+    ant_transmit_power = 220  # watts
     noise_figure = 20
     operating_temperature = 290  # degrees Kelvin
-    noise_power_db = -120
     npulses = 32
     plp = 0.
     upsample = 8
@@ -62,15 +59,14 @@ if __name__ == '__main__':
     # fnme = '/data6/SAR_DATA/2024/08222024/SAR_08222024_121824.sar'
     triangle_colors = None
     supersamples = 0
-    nbpj_pts = (1024, 1024)
+    nbpj_pts = (512, 512)
 
     # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 
     sdr_f = load(fnme, import_pickle=True)
     bg, rp = getRadarAndEnvironment(sdr_f)
-    rp1 = SDRPlatform(sdr_f, origin=rp.origin, tx_offset=np.array([1., 0., 1.]), rx_offset=np.array([-1., 0., -1.]))
-    rp.el_half_bw *= 2
-    rp.az_half_bw *= 2
+    # rp.el_half_bw *= 2
+    # rp.az_half_bw *= 2
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
         rp.getRadarParams(0., plp, upsample))
     idx_t = sdr_f[0].frame_num[sdr_f[0].nframes // 2: sdr_f[0].nframes // 2 + npulses]
@@ -83,31 +79,19 @@ if __name__ == '__main__':
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
-    gx, gy, gz = bg.getGrid(grid_origin, 300, 300, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
+    gx, gy, gz = bg.getGrid(grid_origin, 250, 250, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
     grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
     grid_ranges = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - grid_pts, axis=1)
 
     print('Loading mesh...', end='')
     # mesh = o3d.geometry.TriangleMesh()
-    scene = Scene()
+    # scene = Scene()
     # mesh_ids = []
 
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
-    mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(
-        Mesh(
-            mesh,
-            max_tris_per_split=max_tris_per_split,
-            material_sigma=[0.17 for _ in mesh.triangle_material_ids],
-            material_emissivity=[2. for _ in mesh.triangle_material_ids],
-        )
-    )'''
+    with open('/home/jeff/repo/apache/data/target_meshes/Seahawk.model', 'rb') as f:
+        scene = pickle.load(f)
 
-    # with open('/home/jeff/repo/apache/data/target_meshes/Humvee.model', 'rb') as f:
-    #     scene = pickle.load(f)
-
-    mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
+    '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     # mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
@@ -119,175 +103,8 @@ if __name__ == '__main__':
             material_emissivity=[mesh_materials[mtid][1] for mtid in
                                  range(np.asarray(mesh.triangle_material_ids).max() + 1)],
         )
-    )
+    )'''
     scene.shift(llh2enu(*grid_origin, bg.ref))
-    # scene.rotate(np.array([np.pi / 2, 0, 0]))
-    # scene.recalcKDTree(max_tris_per_split)
-
-
-
-    '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/target_meshes/air_balloon.targ')
-    mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(
-        Mesh(
-            mesh,
-            max_tris_per_split=max_tris_per_split,
-            material_sigma=[mesh_materials[mtid][0] for mtid in range(np.asarray(mesh.triangle_material_ids).max() + 1)],
-            material_emissivity=[mesh_materials[mtid][1] for mtid in range(np.asarray(mesh.triangle_material_ids).max() + 1)],
-        )
-    )'''
-
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/eze_france/scene.gltf', 1e9, scale=1 / 100)
-    mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
-    mesh = mesh.crop(o3d.geometry.AxisAlignedBoundingBox().create_from_points(o3d.utility.Vector3dVector(np.array([[-400, -400, -400],[400, 400, 400]]))))
-    mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh_ids = np.asarray(mesh.triangle_material_ids)'''
-
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/house_detail/source/1409 knoll lane.obj', 1e6, scale=4)
-    mesh = mesh.translate(np.array([0, 0, 0]), relative=False)
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(Mesh(mesh, num_box_levels=nbox_levels))'''
-
-    '''mesh = readCombineMeshFile('/home/jeff/Documents/plot.obj', points=300000)
-    # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    scene.add(Mesh(mesh, max_tris_per_split=max_tris_per_split,
-            material_sigma=[0.017 for _ in mesh.triangle_material_ids]))
-    triangle_colors = np.mean(np.asarray(mesh.vertex_colors)[np.asarray(mesh.triangles)], axis=1)'''
-
-    '''fnme = '/home/jeff/Documents/WM_UtahDesert_Test_01_Mesh_Output.obj'
-    obj_fnme = '/home/jeff/Documents/target_meshes/farmhouse_obj.obj'
-    plane_fnme = '/home/jeff/Documents/target_meshes/piper_pa18.obj'
-    ground = readCombineMeshFile(fnme, points=150000, scale=100)
-    ground = ground.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    ground = ground.simplify_vertex_clustering(1.)
-    ground.remove_duplicated_vertices()
-    ground.remove_unreferenced_vertices()
-    ground.compute_vertex_normals()
-    ground.compute_triangle_normals()
-    ground.normalize_normals()
-    ground.triangle_material_ids = o3d.utility.IntVector(
-        [0 for _ in range(len(ground.triangles))])
-    scene.add(
-        Mesh(
-            ground,
-            max_tris_per_split=max_tris_per_split,
-            material_sigma=[0.17],
-            material_emissivity=[2.]
-        )
-    )
-
-    farmhouse = readCombineMeshFile(obj_fnme, points=3000000, scale=1 / 3.2818)
-    farmhouse = farmhouse.rotate(farmhouse.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    farmhouse = farmhouse.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    farmhouse = farmhouse.translate(np.array([0, 0, -2.5]), relative=True)
-    farmhouse.triangle_material_ids = o3d.utility.IntVector(
-        [0 for _ in range(len(farmhouse.triangles))])
-    scene.add(
-        Mesh(
-            farmhouse,
-            max_tris_per_split=max_tris_per_split,
-            material_sigma=[.05],
-            material_emissivity=[1e6]
-        )
-    )
-    plane = readCombineMeshFile(plane_fnme, points=50000, scale=1)
-    plane = plane.rotate(plane.get_rotation_matrix_from_xyz(np.array([1.35, 0, 0])))
-    plane = plane.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    plane = plane.translate(np.array([-50, 50, -2.7]), relative=True)
-    plane.triangle_material_ids = o3d.utility.IntVector(
-        [0 for _ in range(len(plane.triangles))])
-    scene.add(
-        Mesh(
-            plane,
-            max_tris_per_split=max_tris_per_split,
-            material_sigma=[0.01],
-            material_emissivity=[1e6]
-        )
-    )
-
-    plane0 = readCombineMeshFile(plane_fnme, points=50000, scale=1)
-    plane0 = plane0.rotate(plane0.get_rotation_matrix_from_xyz(np.array([1.35, 0, 0])))
-    plane0 = plane0.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    plane0.triangle_material_ids = o3d.utility.IntVector(
-        [0 for _ in range(len(plane0.triangles))])
-    plane0 = plane0.translate(np.array([-75, 100, -2.7]), relative=True)
-    scene.add(
-        Mesh(
-            plane0,
-            max_tris_per_split=max_tris_per_split,
-            material_sigma=[0.01],
-            material_emissivity=[1e6]
-        )
-    )'''
-
-    '''mesh = o3d.geometry.TriangleMesh()
-    mesh.vertices = o3d.utility.Vector3dVector(
-        np.concatenate((np.asarray(ground.vertices), np.asarray(farmhouse.vertices), np.asarray(plane.vertices))))
-    mesh.triangles = o3d.utility.Vector3iVector(np.concatenate((np.asarray(ground.triangles),
-                                                                np.asarray(farmhouse.triangles) + len(ground.vertices),
-                                                                np.asarray(plane.triangles) + len(
-                                                                    ground.vertices) + len(farmhouse.vertices))))
-    mesh.triangle_material_ids = o3d.utility.IntVector(
-        [n for n in np.concatenate((np.zeros(len(ground.triangles)).astype(int),
-                                    np.ones(len(farmhouse.triangles)).astype(int),
-                                    np.ones(len(plane.triangles)).astype(int) * 2))])
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-    mesh.compute_vertex_normals()
-    mesh.compute_triangle_normals()
-    mesh.normalize_normals()'''
-
-
-    '''car = readCombineMeshFile('/home/jeff/Documents/nissan_sky/NissanSkylineGT-R(R32).obj',
-                               points=num_mesh_triangles)  # Has just over 500000 points in the file
-    car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    car = car.rotate(car.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
-    mesh_extent = car.get_max_bound() - car.get_min_bound()
-    car = car.translate(np.array([gx.mean() - 50, gy.mean() - 1.5, gz.mean() + mesh_extent[2] / 2 - 11.5]), relative=False)
-    m_emissivity = [1e6 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
-    m_emissivity[0] = m_emissivity[15] = 5.24  # seats
-    m_emissivity[6] = m_emissivity[13] = m_emissivity[17] = 1e6  # body
-    m_emissivity[12] = m_emissivity[4] = 2.  # windshield
-    m_sigma = [.0017 for _ in range(np.asarray(car.triangle_material_ids).max() + 1)]
-    m_sigma[0] = m_sigma[15] = .017  # seats
-    m_sigma[6] = m_sigma[13] = m_sigma[17] = .0017  # body
-    m_sigma[12] = m_sigma[4] = .017  # windshield
-    scene.add(Mesh(car, max_tris_per_split=128, material_emissivity=m_emissivity, material_sigma=m_sigma))'''
-
-    '''building = readCombineMeshFile('/home/jeff/Documents/target_meshes/long_hangar.obj', points=1e9, scale=.033)
-    building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    stretch = np.eye(4)
-    stretch[2, 2] = 2.8
-    building = building.transform(stretch)
-    building = building.translate(llh2enu(40.139642, -111.663817, 1380, bg.ref) + np.array([-30, -50, -12.]),
-                                  relative=False)
-    building = building.rotate(building.get_rotation_matrix_from_xyz(np.array([0, 0, -42.51 * DTR])))
-    building = building.compute_triangle_normals()
-    scene.add(Mesh(building, num_box_levels=3))'''
-
-    '''gpx, gpy, gpz = bg.getGrid(grid_origin, 1500, 1500, nrows=256, ncols=256)
-    # Shift position
-    gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
-    gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, rp.origin)
-    gpz = gpz * 0 -17.
-    gnd_points = np.array([gpx, gpy, gpz]).T[::100]
-    # gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
-    # gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
-    #                                        gnd_range < grid_ranges.max() + grid_ranges.std() * 3)]
-    tri_ = Delaunay(gnd_points[:, :2])
-    ground = o3d.geometry.TriangleMesh()
-    ground.vertices = o3d.utility.Vector3dVector(gnd_points)
-    ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
-    ground = ground.simplify_vertex_clustering(5.)
-    ground.remove_duplicated_vertices()
-    ground.remove_unreferenced_vertices()
-    ground.compute_vertex_normals()
-    ground.compute_triangle_normals()
-    ground.normalize_normals()
-    ground.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(ground.triangles)).astype(np.int32))
-    scene.add(Mesh(ground, material_sigma=[.17], material_emissivity=[1.5], num_box_levels=4))'''
 
     print('Done.')
 
@@ -296,20 +113,17 @@ if __name__ == '__main__':
     noise_power = 10**(noise_figure / 10) * operating_temperature * 1.38e-23
 
     # Generate a chirp
-    # fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
+    fft_chirp = np.fft.fft(sdr_f[0].cal_chirp, fft_len)
     # mf_chirp = sdr_f.genMatchedFilter(0, fft_len=fft_len)
     chirp_bandwidth = sdr_f[0].bw
-    chirp = genChirp(nr, fs, fc, chirp_bandwidth)
-    phase = fc - chirp_bandwidth // 2 + chirp_bandwidth * np.interp(np.linspace(0, 1, nr), np.linspace(0, 1, 10), np.linspace(1, 0, 10))
-    sec_chirp = np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / fs))
+    # chirp = genChirp(nr, fs, fc, chirp_bandwidth)
 
-    fft_chirp = np.fft.fft(chirp, fft_len)
-    sec_fft_chirp = np.fft.fft(sec_chirp, fft_len)
-    taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
+    # fft_chirp = np.fft.fft(chirp, fft_len)
+    # taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
+    taytay = genTaylorWindow(sdr_f[0].baseband_fc, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
-    secmf_chirp = taytay / sec_fft_chirp
-    fft_chirps = [fft_chirp, sec_fft_chirp]
-    mf_chirps = [mf_chirp, secmf_chirp]
+    fft_chirps = [fft_chirp]
+    mf_chirps = [mf_chirp]
 
 
     # Load in boxes and meshes for speedup of ray tracing
@@ -339,10 +153,9 @@ if __name__ == '__main__':
     vecs = np.array([pmin[0] - flight_path[:, 0], pmin[1] - flight_path[:, 1], pmin[2] - flight_path[:, 2]]).T
     pt_az = np.arctan2(vecs[:, 0], vecs[:, 1])
     min_pts = sdr_f[0].frame_num[abs(pt_az - pointing_az) < rp.az_half_bw * 2]
-    pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000,
-                                                                      sdr_f[0].frame_num[-1])]
+    pulse_lims = [0, sdr_f[0].frame_num[-1]]
     streams = [cuda.stream() for _ in range(nstreams)]
-    datasets = [rp, rp1]
+    datasets = [rp]
 
     # Single pulse for debugging
     print('Generating single pulse...')
@@ -356,10 +169,24 @@ if __name__ == '__main__':
                                                                                   num_bounces=num_bounces,
                                                                                   debug=True, streams=streams,
                                                                                   supersamples=supersamples)
-    single_pulse = [
+    _, spdata = sdr_f.getPulses(idx_t, 0)
+    '''single_pulse = [
         sum(
             upsamplePulse(
                 f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, f.shape) + 1j * np.random.normal(0, noise_power * chirp_bandwidth, f.shape),
+                fft_len,
+                upsample,
+                is_freq=True,
+                time_len=nsam,
+            )
+            for s, f in zip(srp, fft_chirps)
+        )
+        for srp in single_rp
+    ]'''
+    single_pulse = [
+        sum(
+            upsamplePulse(
+                10**(up_gain / 20) * (f * np.fft.fft(s, fft_len)) + np.fft.fft(spdata, fft_len, axis=0).T,
                 fft_len,
                 upsample,
                 is_freq=True,
@@ -376,17 +203,13 @@ if __name__ == '__main__':
         ]
         for srp in single_rp
     ]
-    bpj_grid = np.zeros_like(gx).astype(np.complex64)
-    bpj2 = np.zeros_like(gx).astype(np.complex64)
+    bpj_grid = np.zeros_like(gx).astype(_complex_float)
 
     print('Running main loop...')
     # Get the data into CPU memory for later
     # MAIN LOOP
-    '''torch_data = []
-    torch_pos = []
-    torch_pans = []
-    torch_tilts = []'''
     for frame in tqdm(list(zip(*(iter(range(pulse_lims[0], pulse_lims[1] - npulses, npulses)),)))):
+        pt, sdr_data = sdr_f.getPulses(sdr_f[0].frame_num[frame[0]:frame[0] + npulses], 0)
         txposes = [r.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
         rxposes = [r.rxpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
         pans = [r.pan(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
@@ -396,17 +219,18 @@ if __name__ == '__main__':
                                         num_bounces=num_bounces, streams=streams, supersamples=supersamples)
         rx_pulse = [
             sum(
-                    f * np.fft.fft(s, fft_len)
+                    10**(up_gain / 20) * f * np.fft.fft(s, fft_len)
                 for s, f in zip(srp, fft_chirps)
             )
             for srp in trp
         ]
-        mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
-            time_len=nsam).T, dtype=np.complex64) for rpulse in rx_pulse] for mf in mf_chirps]
+        # mf_pulses = [[np.ascontiguousarray(upsamplePulse((np.fft.fft(sdr_data.T, fft_len, axis=1) * mf), fft_len, upsample, is_freq=True,
+        #     time_len=nsam).T, dtype=_complex_float) for rpulse in datasets] for mf in mf_chirps]
+        mf_pulses = [[np.ascontiguousarray(upsamplePulse((rpulse + np.fft.fft(sdr_data.T, fft_len, axis=1)) * mf, fft_len, upsample, is_freq=True,
+            time_len=nsam).T, dtype=_complex_float) for rpulse in rx_pulse] for mf in mf_chirps]
+        # mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
+        #     time_len=nsam).T, dtype=_complex_float) for rpulse in rx_pulse] for mf in mf_chirps]
         bpj_grid += backprojectPulseStream(mf_pulses[0], [pans[0]], [rxposes[0]], [txposes[0]], gz.astype(_float),
-                                            c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
-                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
-        bpj2 += backprojectPulseStream(mf_pulses[1], [pans[1]], [rxposes[0]], [txposes[1]], gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
         '''torch_data.append(trp[0])
@@ -437,10 +261,6 @@ if __name__ == '__main__':
 
     px.imshow(db_bpj, origin='lower', color_continuous_scale='gray',
               range_color=[np.mean(db_bpj), np.mean(db_bpj) + np.std(db_bpj) * 3]).show()
-    px.imshow(db(bpj2), origin='lower', color_continuous_scale='gray',
-              range_color=[np.mean(db(bpj2)), np.mean(db(bpj2)) + np.std(db(bpj2)) * 3]).show()
-    px.imshow(db(bpj2 + bpj_grid), origin='lower', color_continuous_scale='gray',
-              range_color=[np.mean(db(bpj2 + bpj_grid)), np.mean(db(bpj2 + bpj_grid)) + np.std(db(bpj2 + bpj_grid)) * 3]).show()
 
     scaling = min(r.min() for r in ray_powers), max(r.max() for r in ray_powers)
     sc_min = scaling[0] - 1e-3

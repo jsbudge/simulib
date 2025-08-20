@@ -5,18 +5,14 @@ from numba.cuda.random import xoroshiro128p_uniform_float64
 from .cuda_functions import make_float3, length
 from .simulation_functions import findPowerOf2
 import numpy as np
-
-c0 = np.float32(299792458.0)
-TAC = 125e6
-fs = 2e9
-DTR = np.pi / 180
+from .utils import c0, c0_inv, c0_half, _float
 
 
 @cuda.jit(device=True)
 def diff(x, y):
-    return x - y
-    # a = y - x
-    # return (a + np.pi) - math.floor((a + np.pi) / (2 * np.pi)) * 2 * np.pi - np.pi
+    # return x - y
+    a = y - x
+    return (a + np.pi) - math.floor((a + np.pi) / (2 * np.pi)) * 2 * np.pi - np.pi
 
 
 def cpudiff(x, y):
@@ -33,7 +29,7 @@ def raisedCosine(x, bw):
     :param a0: float. Factor for raised cosine window generation.
     :return: float. Window value.
     """
-    return np.float32(.5) - np.float32(.5) * math.cos(np.float32(2.) * np.float32(np.pi) * (x / bw + np.float32(.5)))
+    return _float(.5) - _float(.5) * math.cos(_float(2.) * _float(np.pi) * (x / bw + _float(.5)))
 
 
 @cuda.jit(device=True, fastmath=True)
@@ -85,14 +81,14 @@ def applyOneWayRadiationPattern(el_c, az_c, az_rx, el_rx, bw_az, bw_el):
     :param bw_el: float. elevation beamwidth of antenna in radians.
     :return: float. Value by which a point should be scaled.
     """
-    a = np.float32(np.pi) / bw_az
-    b = np.float32(np.pi) / bw_el
+    a = _float(np.pi) / bw_az
+    b = _float(np.pi) / bw_el
     # Abs shouldn't be a problem since the pattern is symmetrical about zero
     # eldiff = (el_c - el_rx)
     # azdiff = (az_c - az_rx)
     # rx_pat = math.sin(a * azdiff) * math.sin(b * eldiff) / (cuda.fma(a, azdiff, 1e-9) + cuda.fma(b, eldiff, 1e-9))
-    rx_pat = (math.sin(a * (az_c - az_rx)) / cuda.fma(a, (az_c - az_rx), np.float32(1e-9)) *
-              math.sin(b * (el_c - el_rx)) / cuda.fma(b, (el_c - el_rx), np.float32(1e-9)))
+    rx_pat = (math.sin(a * (az_c - az_rx)) / cuda.fma(a, (az_c - az_rx), _float(1e-9)) *
+              math.sin(b * (el_c - el_rx)) / cuda.fma(b, (el_c - el_rx), _float(1e-9)))
     # rx_pat = math.sin(a * azdiff) / (a * azdiff) * math.sin(b * eldiff) / (b * eldiff)
     return rx_pat * rx_pat
 
@@ -208,7 +204,7 @@ def genRangeProfile(gx, gy, vgz, vert_reflectivity,
                 calc_angs[1, px, py] = r_az
 
             two_way_rng = rng + r_rng
-            rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+            rng_bin = (two_way_rng * c0_inv - 2 * near_range_s) * source_fs
             but = int(rng_bin)  # if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
             if but > pd_r.shape[0] or but < 0:
                 continue
@@ -280,20 +276,20 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, pulse_data, final_gr
                 # _, rx_rng, r_az, r_el = getRangeAndAngles(gl, make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2]))
 
                 # Get index into range compressed data
-                bi1 = int(((tx_rng + rx_rng) / c0 - np.float32(2.) * near_range_s) * source_fs) + 1
+                bi1 = int(((tx_rng + rx_rng) * c0_inv - _float(2.) * near_range_s) * source_fs) + 1
                 if bi1 >= pulse_data.shape[0] or bi1 < 0:
                     continue
 
                 if poly == 0:
                     # This is how APS does it (for reference, I guess)
-                    acc_val += pulse_data[bi1, tt] * cmath.exp(1j * (np.float32(2.) * np.pi / wavelength) * (tx_rng + rx_rng)) * raisedCosine((r_az - panrx[tt]), bw_az)
+                    acc_val += pulse_data[bi1, tt] * cmath.exp(1j * (_float(2.) * np.pi / wavelength) * (tx_rng + rx_rng)) * raisedCosine((r_az - panrx[tt]), bw_az)
                 elif poly == 1:
                     bi0 = bi1 - 1
                     # Linear interpolation between bins (slower but more accurate)
-                    bi1_rng = c0 / np.float32(2.) * (bi1 / source_fs + np.float32(2.) * near_range_s)
-                    bi0_rng = c0 / np.float32(2.) * (bi0 / source_fs + np.float32(2.) * near_range_s)
+                    bi1_rng = c0_half * (bi1 / source_fs + _float(2.) * near_range_s)
+                    bi0_rng = c0_half * (bi0 / source_fs + _float(2.) * near_range_s)
                     acc_val += (pulse_data[bi0, tt] * (bi1_rng - tx_rng) + pulse_data[bi1, tt] * (tx_rng - bi0_rng)) \
-                        / (bi1_rng - bi0_rng) * cmath.exp(1j * (np.float32(2.) * np.pi / wavelength) * (tx_rng + rx_rng)) * raisedCosine((r_az - panrx[tt]), bw_az)
+                        / (bi1_rng - bi0_rng) * cmath.exp(1j * (_float(2.) * np.pi / wavelength) * (tx_rng + rx_rng)) * raisedCosine((r_az - panrx[tt]), bw_az)
 
             final_grid[pcol, prow] = acc_val
 
@@ -361,7 +357,7 @@ def backprojectRegularGrid(source_xyz, receive_xyz, transform, gz, panrx, elrx, 
 
             # Get index into range compressed data
             two_way_rng = tx_rng + rx_rng
-            rng_bin = (two_way_rng / c0 - 2 * near_range_s) * source_fs
+            rng_bin = (two_way_rng * c0_inv - 2 * near_range_s) * source_fs
             bi0 = int(rng_bin)
             bi1 = bi0 + 1
             if bi1 >= n_samples or bi1 < 0:
@@ -383,8 +379,8 @@ def backprojectRegularGrid(source_xyz, receive_xyz, transform, gz, panrx, elrx, 
                 a = cp[bi1]
             elif poly == 1:
                 # Linear interpolation between bins (slower but more accurate)
-                bi1_rng = c0 / 2 * (bi1 / source_fs + 2 * near_range_s)
-                bi0_rng = c0 / 2 * (bi0 / source_fs + 2 * near_range_s)
+                bi1_rng = c0_half * (bi1 / source_fs + 2 * near_range_s)
+                bi0_rng = c0_half * (bi0 / source_fs + 2 * near_range_s)
                 a = (cp[bi0] * (bi1_rng - tx_rng) + cp[bi1] * (tx_rng - bi0_rng)) \
                     / (bi1_rng - bi0_rng)
 
@@ -432,7 +428,7 @@ def backproject_gmti(source_hght, source_vel, grange, gvel, pantx, pulse_data, f
                           source_vel[1, tt] * math.cos(graze) * math.cos(pantx[tt]) + \
                           source_vel[2, tt] * -math.sin(graze)
             eff_rng = grange[px, py] - (clutter_vel + gvel[px, py]) * delta_t
-            rng_bin = (2 * grange[px, py] / c0 - 2 * near_range_s) * source_fs
+            rng_bin = (2 * grange[px, py] * c0_inv - 2 * near_range_s) * source_fs
             but = int(rng_bin) if rng_bin - int(rng_bin) < .5 else int(rng_bin) + 1
             if but > n_samples:
                 continue
@@ -453,7 +449,7 @@ def calcRangeProfile(vertices, source_xyz, pan, tilt, pd_r, pd_i, near_range_s, 
         tz = vertices[pt, 2] - source_xyz[tt, 2]
         tx_rng = math.sqrt(abs(tx * tx) + abs(ty * ty) + abs(tz * tz))
 
-        rng_bin = (tx_rng * 2 / c0 - 2 * near_range_s) * source_fs
+        rng_bin = (tx_rng * 2 * c0_inv - 2 * near_range_s) * source_fs
         but = int(rng_bin)
 
         if but < 0 or but > pd_r.shape[1]:

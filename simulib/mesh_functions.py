@@ -1,28 +1,19 @@
 import itertools
-import multiprocessing as mp
 from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
     assignBoxPoints, determineSceneRayIntersections, calcReturnPower
-from .cuda_triangle_kernels import calcBinTotalSurfaceArea, calcViewSamples
-from .simulation_functions import azelToVec, factors
-from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
+from .cuda_triangle_kernels import calcBinTotalSurfaceArea
+from .simulation_functions import azelToVec
 from numba.cuda import float32x3
 import numpy as np
 import open3d as o3d
-from .cuda_functions import float3
 from .cuda_kernels import optimizeStridedThreadBlocks2d
 import plotly.graph_objects as go
-from tqdm import tqdm
 from pathlib import Path
+from .utils import c0, _float
 import pickle
 
-c0 = 299792458.0
-_float = np.float32
-
 MULTIPROCESSORS = cuda.get_current_device().MULTIPROCESSOR_COUNT
-THREADS_PER_BLOCK = 512
-BLOCK_MULTIPLIER = 64
-
 
 def loadTarget(fnme):
     with open(fnme, 'r') as f:

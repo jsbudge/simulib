@@ -1,20 +1,17 @@
-import torch
-import trimesh
-import os
 # os.environ['NUMBA_ENABLE_CUDASIM'] = '1'
 from numba import cuda
 import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
-from simulib.platform_helper import SDRPlatform, RadarPlatform
+from simulib.platform_helper import RadarPlatform
 from simulib.grid_helper import MapEnvironment
-from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, getRadarCoeff, \
     azelToVec
+from scipy.signal import sawtooth
 from simulib.mimo_functions import genChannels
-from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
-    getMeshFig, getSceneFig, drawOctreeBox, loadTarget, loadMesh
+from simulib.mesh_functions import _float, getRangeProfileFromScene, \
+    getMeshFig, getSceneFig, drawOctreeBox, loadTarget
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -47,6 +44,7 @@ if __name__ == '__main__':
     rx_gain = 60  # dB
     tx_gain = 60  # dB
     rec_gain = 120  # dB
+    up_gain = 150  # dB
     ant_transmit_power = 220  # watts
     noise_figure = 5
     operating_temperature = 290  # degrees Kelvin
@@ -56,12 +54,12 @@ if __name__ == '__main__':
     dopp_upsample = 2
     num_bounces = 1
     max_tris_per_split = 64
-    points_to_sample = 2**16
+    points_to_sample = 2**18
     num_mesh_triangles = 1000000
-    max_pts_per_run = 2**17
+    max_pts_per_run = 2**18
     prf = 3236.
-    bw_az = 40
-    bw_el = 45
+    bw_az = 10
+    bw_el = 10
     chirp_bandwidth = 245e6
     # grid_origin = (40.139343, -111.663541, 1360.10812)
     # fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
@@ -101,8 +99,9 @@ if __name__ == '__main__':
 
     # Point at the target the whoooole way
     pt_vec = poses / np.linalg.norm(poses, axis=1)[:, None]
-    gimbal = np.array([-np.arctan2(pt_vec[:, 0], pt_vec[:, 1]) * 0., np.arcsin(pt_vec[:, 2]) * 0.]).T
-    # gimbal = np.array([-(y - np.arctan2(pt_vec[:, 0], pt_vec[:, 1])), p - np.arcsin(pt_vec[:, 2])]).T
+    # gimbal = np.array([-np.arctan2(pt_vec[:, 0], pt_vec[:, 1]) * 0., np.arcsin(pt_vec[:, 2]) * 0.]).T
+    gimbal = np.array([sawtooth(np.pi * (45 / 45) *
+                        np.arange(ngps) / 100, .5) * 45 / 2 * DTR, p - np.arcsin(pt_vec[:, 2])]).T
 
 
     # Get the transmit channels going
@@ -118,12 +117,12 @@ if __name__ == '__main__':
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
         rp.getRadarParams(launch_height, plp, upsample, a_ranges=(14000, 15000.)))
 
-    '''pulse_times = pulse_times[
+    pulse_times = pulse_times[
         np.logical_and(
             np.linalg.norm(rp.pos(pulse_times), axis=1) > 14000.0,
             np.linalg.norm(rp.pos(pulse_times), axis=1) < 15000,
         )
-    ]'''
+    ]
 
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .2, 199 * .2, nrows=256, ncols=256, az=-68.5715881976 * DTR)
     # gx, gy, gz = bg.getGrid(grid_origin, 201 * .3, 199 * .3, nrows=256, ncols=256)
@@ -137,15 +136,36 @@ if __name__ == '__main__':
 
     mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    # mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
+
+    gpx, gpy, gpz = bg.getGrid(grid_origin, 10000, 10000, nrows=256, ncols=256)
+    # Shift position
+    gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
+    gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, bg.ref)
+    gpz = gpz * 0 - 17.
+    gnd_points = np.array([gpx, gpy, gpz]).T[::100]
+    # gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
+    # gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
+    #                                        gnd_range < grid_ranges.max() + grid_ranges.std() * 3)]
+    tri_ = Delaunay(gnd_points[:, :2])
+    ground = o3d.geometry.TriangleMesh()
+    ground.vertices = o3d.utility.Vector3dVector(gnd_points)
+    ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
+    ground = ground.simplify_vertex_clustering(5.)
+    ground.remove_duplicated_vertices()
+    ground.remove_unreferenced_vertices()
+    ground.compute_vertex_normals()
+    ground.compute_triangle_normals()
+    ground.normalize_normals()
+    # ground.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(ground.triangles)).astype(np.int32))
+    mesh += ground
+    mesh.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(mesh.triangles)).astype(np.int32))
     scene.add(
         Mesh(
             mesh,
             max_tris_per_split=max_tris_per_split,
-            material_sigma=[mesh_materials[mtid][0] for mtid in
-                            range(np.asarray(mesh.triangle_material_ids).max() + 1)],
-            material_emissivity=[mesh_materials[mtid][1] for mtid in
-                                 range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+            material_sigma=[.0017],
+            material_emissivity=[1e6],
         )
     )
 
@@ -203,7 +223,7 @@ if __name__ == '__main__':
     single_pulse = [
         sum(
             upsamplePulse(
-                f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, f.shape) + 1j * np.random.normal(0, noise_power * chirp_bandwidth, f.shape),
+                10**(up_gain / 20) * f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, f.shape) + 1j * np.random.normal(0, noise_power * chirp_bandwidth, f.shape),
                 fft_len,
                 upsample,
                 is_freq=True,
@@ -224,6 +244,32 @@ if __name__ == '__main__':
 
     dopp_freq = np.fft.fftshift(np.fft.fftfreq(npulses * dopp_upsample, 1 / prf))
 
+    pfig = go.Figure(
+        data=[go.Scatter3d(x=[rp.txpos(0)[0]], y=[rp.txpos(0)[1]], z=[rp.txpos(0)[2]], mode='markers')],
+        layout=go.Layout(
+            scene=dict(
+                xaxis=dict(range=[-3000, 3000]),
+                yaxis=dict(range=[-1000, 17000]),
+                zaxis=dict(range=[-1, launch_height + 10])
+            ),
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    buttons=[dict(label="Play",
+                                  method="animate",
+                                  args=[None, {"frame": {"duration": 500, "redraw": True},
+                                               "fromcurrent": True,
+                                               "transition": {"duration": 300, "easing": "quadratic-in-out"}}]),
+                             dict(label="Pause",
+                                  method="animate",
+                                  args=[[None], {"frame": {"duration": 0, "redraw": False},
+                                                 "mode": "immediate",
+                                                 "transition": {"duration": 0}}])]
+                )
+            ]
+        )
+    )
+
     print('Running main loop...')
     # Get the data into CPU memory for later
     # MAIN LOOP
@@ -238,12 +284,10 @@ if __name__ == '__main__':
         trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                         radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
                                         num_bounces=num_bounces, streams=streams, supersamples=supersamples)
-        rx_pulse = [sum(f * np.fft.fft(s, fft_len) for s, f in zip(srp, fft_chirps)) for srp in trp]
+        rx_pulse = [sum(10**(up_gain / 20) * (f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, rpulse.shape) +
+                      1j * np.random.normal(0, noise_power * chirp_bandwidth, rpulse.shape)) for s, f in zip(srp, fft_chirps)) for srp in trp]
         mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
             time_len=nsam).T, dtype=np.complex64) for rpulse in rx_pulse] for mf in mf_chirps]
-        mf_pulses = [[rpulse + np.random.normal(0, noise_power * chirp_bandwidth, rpulse.shape) +
-                      1j * np.random.normal(0, noise_power * chirp_bandwidth, rpulse.shape) for rpulse in mf] for
-                     mf in mf_pulses]
         '''bpj_grid += backprojectPulseStream(mf_pulses[0], [pans[0]], [rxposes[0]], [txposes[0]], gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)'''
@@ -260,20 +304,25 @@ if __name__ == '__main__':
 
         # Calculate out beampattern points
         az_beamlines = [min(rp.pan(ptimes) - rp.az_half_bw), max(rp.pan(ptimes) + rp.az_half_bw)]
-        el_beamlines = [min(rp.tilt(ptimes) - rp.az_half_bw), max(rp.tilt(ptimes) + rp.az_half_bw)]
+        el_beamlines = [max(rp.tilt(ptimes) - rp.az_half_bw), min(rp.tilt(ptimes) + rp.az_half_bw)]
+        ground_ranges = [ranges[0] * np.sin(rp.tilt(ptimes[0]) + rp.el_half_bw), ranges[-1] * np.sin(rp.tilt(ptimes[0]) - rp.el_half_bw)]
         beamlines = azelToVec(az_beamlines, el_beamlines).T
-        beampoints = np.concatenate((beamlines * ranges[0] + txposes[0][0, 0], beamlines * ranges[-1] + txposes[0][0, 0]))
+        beampoints = np.roll(np.concatenate((beamlines * ground_ranges[0] + txposes[0][0, 0], beamlines * ground_ranges[-1] + txposes[0][0, 0])), axis=0, shift=1)
+        bsights = rp._tx.boresight(ptimes).T
         plt.clf()
         plt.title(f'CPI {frame}')
         plt.subplot(1, 2, 1)
         plt.imshow(db(dopp_image), extent=(dopp_freq[0], dopp_freq[-1], ranges[-1], ranges[0]))
         plt.axis('tight')
         plt.subplot(1, 2, 2)
+        plt.xlim([-2000, 2000.])
+        plt.ylim([-1000, 14000.])
         plt.scatter(txposes[0][:, 0], txposes[0][:, 1])
         plt.scatter([0], [0])
         plt.plot(beampoints[:, 0], beampoints[:, 1])
         plt.draw()
         plt.pause(.1)
+
 
     ani = anim.ArtistAnimation(fig, ims, interval=50, blit=True)
     ani.save('test.gif', fps=60)

@@ -4,9 +4,7 @@ from .cuda_functions import make_float3, cross, dot, length, normalize, make_uin
 from numba import cuda, prange
 import numpy as np
 from .cuda_kernels import applyOneWayRadiationPattern
-
-c0_inv = np.float32(1. / 299792458.0)
-MAX_REGISTERS = 128
+from .utils import c0_inv, MAX_REGISTERS, _float
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -23,30 +21,30 @@ def calcSingleIntersection(rd, ro, v0, v1, v2, vn, get_bounce):
     rcrosse = cross(rd, v2 - v0)
     det = dot(v1 - v0, rcrosse)
     # Check to see if ray is parallel to triangle
-    if abs(det) < np.float32(1e-9):
+    if abs(det) < _float(1e-9):
         return False, None, None
 
-    inv_det = np.float32(1.) / det
+    inv_det = _float(1.) / det
 
     u = inv_det * dot(ro - v0, rcrosse)
-    if u < np.float32(0.) or u > np.float32(1.):
+    if u < _float(0.) or u > _float(1.):
         return False, None, None
 
     # Recompute cross for s and edge 1
     rcrosse = cross(ro - v0, v1 - v0)
     det = inv_det * dot(rd, rcrosse)
-    if det < np.float32(0.) or u + det > np.float32(1.):
+    if det < _float(0.) or u + det > _float(1.):
         return False, None, None
 
     # Compute intersection point
     det = inv_det * dot(v2 - v0, rcrosse)
-    if det < np.float32(1e-9):
+    if det < _float(1e-9):
         return False, None, None
 
     if not get_bounce:
         return True, None, None
 
-    return True, normalize(det * rd - vn * dot(det * rd, vn) * np.float32(2.)), ro + det * rd
+    return True, normalize(det * rd - vn * dot(det * rd, vn) * _float(2.)), ro + det * rd
 
 
 @cuda.jit(device=True, fast_math=True)
@@ -54,7 +52,7 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
                      pan, tilt, bw_az, bw_el, wavenumber, rho):
     t = inter - re
     r_rng = length(t)
-    rng_bin = int(((rng + r_rng) * c0_inv - np.float32(2.) * near_range_s) * source_fs)
+    rng_bin = int(((rng + r_rng) * c0_inv - _float(2.) * near_range_s) * source_fs)
 
     if n_samples > rng_bin > 0:
         # acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
@@ -98,7 +96,7 @@ def findBoxIntersection(ro, ray, bounds):
 
 @cuda.jit(device=True, fast_math=True)
 def testIntersection(ro, rd, bounds):
-    ray = np.float32(1.) / rd
+    ray = _float(1.) / rd
     boxmin = make_float3(bounds[0, 0], bounds[0, 1], bounds[0, 2])
     boxmax = make_float3(bounds[1, 0], bounds[1, 1], bounds[1, 2])
     if ray.x >= 0:
@@ -257,8 +255,8 @@ def recurseReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_vert, tri_n
                 ti = leaf_list[t_idx]
                 curr_intersect = tri_vert[ti, 0, 0] > 7
                 if curr_intersect:
-                    int_rng = np.float32(7.)
-                    nrho = np.float32(14.)
+                    int_rng = _float(7.)
+                    nrho = _float(14.)
                     b = ro
                     inter = rd
                     did_intersect = True
@@ -324,28 +322,28 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_v
                                                tn, True))
                     if curr_intersect:
                         tmp_rng = length(ro - tinter)
-                        if np.float32(1.) < tmp_rng < int_rng:
+                        if _float(1.) < tmp_rng < int_rng:
                             int_rng = tmp_rng
-                            inv_rng = np.float32(1.) / (tmp_rng + rng)
-                            b = tb + np.float32(0.)
+                            inv_rng = _float(1.) / (tmp_rng + rng)
+                            b = tb + _float(0.)
                             # Some parts of the Fresnel coefficient calculation
                             cosa = abs(dot(rd, tn))
                             sina = tri_material[ti, 0] * math.sqrt(
-                                max(np.float32(0.), np.float32(1.) - (np.float32(1.) / tri_material[ti, 0] * length(cross(rd, tn))) ** 2))
+                                max(_float(0.), _float(1.) - (_float(1.) / tri_material[ti, 0] * length(cross(rd, tn))) ** 2))
                             # Rs = abs((cosa - sina) / (
                             #         cosa + sina)) ** 2  # Reflectance using Fresnel coefficient
-                            roughness = math.exp(-np.float32(.5) * (np.float32(2.) * wavenumber * tri_material[ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
-                            # spec = math.exp(-(np.float32(1.) - cosa) ** 2 / np.float32(.0000007442))  # This should drop the specular component to zero by 2 degrees
-                            Lsq = ((np.float32(.7) * ((np.float32(1.) + abs(dot(b, rd))) * np.float32(.5)) + np.float32(.3)) *
-                                   (np.float32(.7) * ((np.float32(1.) + abs(dot(b, rd))) * np.float32(.5)) + np.float32(.3)))
+                            roughness = math.exp(-_float(.5) * (_float(2.) * wavenumber * tri_material[ti, 1] * cosa) ** 2)  # Roughness calculations to get specular/scattering split
+                            # spec = math.exp(-(_float(1.) - cosa) ** 2 / _float(.0000007442))  # This should drop the specular component to zero by 2 degrees
+                            Lsq = ((_float(.7) * ((_float(1.) + abs(dot(b, rd))) * _float(.5)) + _float(.3)) *
+                                   (_float(.7) * ((_float(1.) + abs(dot(b, rd))) * _float(.5)) + _float(.3)))
                             # nrho = rho * inv_rng * inv_rng * cosa * Rs * (
                             #         roughness * spec + (
-                            #         np.float32(1.) - roughness) * Lsq)  # Final reflected power
+                            #         _float(1.) - roughness) * Lsq)  # Final reflected power
                             nrho = rho * inv_rng * inv_rng * cosa * (abs((cosa - sina) / (
                                     cosa + sina)) ** 2) * (
-                                    roughness * math.exp(-(np.float32(1.) - cosa) ** 2 / np.float32(.0000007442)) + (
-                                    np.float32(1.) - roughness) * Lsq)  # Final reflected power
-                            inter = tinter + np.float32(0.)
+                                    roughness * math.exp(-(_float(1.) - cosa) ** 2 / _float(.0000007442)) + (
+                                    _float(1.) - roughness) * Lsq)  # Final reflected power
+                            inter = tinter + _float(0.)
                             did_intersect = True
             else:
                 # Move down into the box
@@ -391,8 +389,8 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                     acc, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                                pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
                     if but >= 0:
-                        cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
-                        cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
+                        cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else _float(0.))
+                        cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else _float(0.))
                         cuda.atomic.add(counts, (tt, but), 1)
 
                 ray_origin[tt, ray_idx, 0] = inter.x
@@ -407,9 +405,7 @@ def calcBounceLoop(ray_origin, ray_dir, ray_distance, ray_power, kd_tree,
                 ray_power[tt, ray_idx] = 0.
 
 
-@cuda.jit('void(float32[:, :, :], float32[:, :, :], float32[:, :], float32[:, :], float32[:, :], float32[:, :, :], int32[:], '
-          'int32[:, :], float32[:, :, :], float32[:, :], float32[:, :], float32[:, :], float32[:, :], int32[:, :], '
-          'float32[:, :], float32[:, :], float32[:], float32[:], float32[:], float32[:, :])', max_registers=MAX_REGISTERS)
+@cuda.jit(max_registers=MAX_REGISTERS)
 def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, sample_points, kd_tree, leaf_list, leaf_key, tri_vert, tri_norm,
                    tri_material, pd_r, pd_i, counts, transmit_xyz, receive_xyz, pan, tilt, params, conical_sampling):
     t, r = cuda.grid(ndim=2)
@@ -433,8 +429,8 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, sample_points, 
                 acc, but = calcReturnAndBin(inter, rec_xyz, rng, params[1], params[2], pd_r.shape[1],
                                                            pan[tt], tilt[tt], params[3], params[4], params[0], nrho)
                 if pd_r.shape[1] > but >= 0:
-                    cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
-                    cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
+                    cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else _float(0.))
+                    cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else _float(0.))
                     ray_origin[tt, ray_idx, 0] = inter.x
                     ray_origin[tt, ray_idx, 1] = inter.y
                     ray_origin[tt, ray_idx, 2] = inter.z
@@ -447,8 +443,8 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, sample_points, 
                 # Apply supersampling if wanted
                 if params[6]:
                     for n in prange(conical_sampling.shape[0]):
-                        if abs(rd.y) > np.float32(1e-9):
-                            sc = normalize(make_float3(np.float32(2.) * rd.y * rd.z, np.float32(0.), -2 * rd.x * rd.y))
+                        if abs(rd.y) > _float(1e-9):
+                            sc = normalize(make_float3(_float(2.) * rd.y * rd.z, _float(0.), -2 * rd.x * rd.y))
                         else:
                             sc = normalize(make_float3(-2 * rd.y * rd.z, 2 * rd.x * rd.z, 0.))
                         rd = normalize(inter + rotate(rd, sc, conical_sampling[n, 0]) * conical_sampling[n, 1] - trans_xyz)
@@ -456,15 +452,15 @@ def calcBounceInit(ray_origin, ray_dir, ray_distance, ray_power, sample_points, 
                                                                                          ray_power[tt, ray_idx],
                                                                                          leaf_list, leaf_key,
                                                                                          tri_vert, tri_norm,
-                                                                                         tri_material, np.float32(0.), params[0])
+                                                                                         tri_material, _float(0.), params[0])
                         if did_intersect:
                             acc, but = calcReturnAndBin(cone_inter, rec_xyz, rng, params[1], params[2],
                                                                        pd_r.shape[1],
                                                                        pan[tt], tilt[tt], params[3], params[4],
                                                                        params[0], nrho)
                             if pd_r.shape[1] > but >= 0:
-                                cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
-                                cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
+                                cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else _float(0.))
+                                cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else _float(0.))
                                 cuda.atomic.add(counts, (tt, but), 1)
             else:
                 ray_power[tt, ray_idx] = 0.
@@ -541,8 +537,8 @@ def calcReturnPower(ray_intersect, ray_distance, ray_power, pd_r, pd_i, counts, 
                                         rec_xyz, ray_distance[tt, ray_idx], params[1], params[2], pd_r.shape[1],
                                         pan[tt], tilt[tt], params[3], params[4], params[0], ray_power[tt, ray_idx])
             if pd_r.shape[1] > but >= 0:
-                cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else np.float32(0.))
-                cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else np.float32(0.))
+                cuda.atomic.add(pd_r, (tt, but), acc.real if abs(acc) < np.inf else _float(0.))
+                cuda.atomic.add(pd_i, (tt, but), acc.imag if abs(acc) < np.inf else _float(0.))
                 cuda.atomic.add(counts, (tt, but), 1)
 
 
