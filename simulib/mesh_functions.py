@@ -1,7 +1,7 @@
 import itertools
 from numba import cuda
 from .cuda_mesh_kernels import calcBounceLoop, calcBounceInit, calcOriginDirAtt, calcIntersectionPoints, \
-    assignBoxPoints, determineSceneRayIntersections, calcReturnPower
+    assignBoxPoints, determineSceneRayIntersections, calcReturnPower, dynamicSceneRayIntersections
 from .cuda_triangle_kernels import calcBinTotalSurfaceArea
 from .simulation_functions import azelToVec
 from numba.cuda import float32x3
@@ -10,7 +10,9 @@ import open3d as o3d
 from .cuda_kernels import optimizeStridedThreadBlocks2d
 import plotly.graph_objects as go
 from pathlib import Path
-from .utils import c0, _float
+from .utils import c0, _float, GRAVITIC_CONSTANT
+from scipy.special import gamma as gam_func
+from scipy.interpolate import interpn, griddata
 import pickle
 
 MULTIPROCESSORS = cuda.get_current_device().MULTIPROCESSOR_COUNT
@@ -38,7 +40,6 @@ def loadTarget(fnme):
 
 def _loadGLTF(obj_fnme):
     return o3d.io.read_triangle_mesh(obj_fnme)
-
 
 
 def _loadOBJ(obj_fnme, material_key):
@@ -94,10 +95,9 @@ def _loadOBJ(obj_fnme, material_key):
     mat_nums = []
     triangles = []
     tri_norms = []
-    for i, (key, val) in enumerate(o.items()):
+    for val in o.values():
         mat_nums.append(val[2])
         triangles.append(val[0])
-        # tri_norms.append(vertex_normals[val[1]].mean(axis=1))
     # tri_norms = np.concatenate(tri_norms)
     # tri_norms = tri_norms / np.linalg.norm(tri_norms, axis=1)[:, None]
     build_mesh = o3d.geometry.TriangleMesh()
@@ -170,7 +170,7 @@ def readVTC(filepath: str):
 def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
-                            debug: bool=False, streams: list[cuda.stream]=None, supersamples: int = 4) -> tuple[list, list, list, list] | list:
+                            debug: bool=False, supersamples: int = 4) -> tuple[list, list, list, list] | list:
     # This is here because the single mesh function is more highly optimized for a single mesh and should therefore
     # be used.
     if len(scene.meshes) == 1:
@@ -179,18 +179,14 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
                                        debug, supersamples)
 
     npulses = tx_pos[0].shape[0]
-    npoints = sampled_points.shape[0]
 
     debug_rays = []
     debug_raydirs = []
     debug_raypower = []
 
-    threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
+    streams = [cuda.stream() for _ in sampled_points]
 
     # These are the mesh constants that don't change with intersection points
-
-    sample_points_gpu = cuda.to_device(sampled_points.astype(_float))
-
     params_gpu = cuda.to_device(np.array([2 * np.pi / (c0 / fc), near_range_s, fs, bw_az, bw_el,
                                           radar_equation_constant, supersamples > 0]).astype(_float))
     if supersamples > 0:
@@ -200,79 +196,93 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
     else:
         conical_sampling_gpu = cuda.to_device(np.zeros((1, 2)).astype(_float))
 
-    pd_r = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
-    pd_i = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
+    pd_r = [[np.zeros((npulses, nsam), dtype=_float) for _ in tx_pos] for _ in rx_pos]
+    pd_i = [[np.zeros((npulses, nsam), dtype=_float) for _ in tx_pos] for _ in rx_pos]
     sa_bins = [np.zeros((npulses, nsam), dtype=_float) for _ in pan]
     counts = [np.zeros((npulses, nsam), dtype=np.int32) for _ in pan]
 
     # Use defer_cleanup to make sure things run asynchronously
     with cuda.defer_cleanup():
-        for stream, tx, rx, az, el, pdr_tmp, pdi_tmp, sa, count in zip(streams, tx_pos, rx_pos, pan, tilt, pd_r, pd_i, sa_bins, counts):
-            with cuda.pinned(tx, rx, az, el, pdr_tmp, pdi_tmp, sa, count):
-                receive_xyz_gpu = cuda.to_device(rx, stream=stream)
-                transmit_xyz_gpu = cuda.to_device(tx, stream=stream)
-                # ray_origin_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
-                ray_dir_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
-                # ray_power_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
-                ray_distance_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
-                az_gpu = cuda.to_device(az, stream=stream)
-                el_gpu = cuda.to_device(el, stream=stream)
-                pd_r_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
-                pd_i_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
+        for rx, count, sa, prtx, pitx in zip(rx_pos, counts, sa_bins, pd_r, pd_i):
+            receive_xyz_gpu = cuda.to_device(rx)
+            sa_bins_gpu = cuda.device_array((npulses, nsam), dtype=_float)
+            count_bins_gpu = cuda.device_array((npulses, nsam), dtype=np.int32)
+            for mesh in scene.meshes:
+                if mesh.is_dynamic:
+                    continue
+                threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d(
+                    (mesh.tri_idx.shape[0], nsam))
+                tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
+                calcBinTotalSurfaceArea[blocks_strided_sa, threads_strided_sa](receive_xyz_gpu, tri_verts_gpu,
+                                                                               sa_bins_gpu, params_gpu)
+            sa_bins_gpu.copy_to_host(sa)
+            del sa_bins_gpu
+            for tx, az, el, pdr_tmp, pdi_tmp in zip(tx_pos, pan, tilt, prtx, pitx):
+                pd_r_gpu = cuda.device_array((npulses, nsam), dtype=_float)
+                pd_i_gpu = cuda.device_array((npulses, nsam), dtype=_float)
+                transmit_xyz_gpu = cuda.to_device(tx)
+                az_gpu = cuda.to_device(az)
+                el_gpu = cuda.to_device(el)
+                for stream, pts in zip(streams, sampled_points):
+                    npoints = pts.shape[0]
+                    threads_strided, blocks_strided = optimizeStridedThreadBlocks2d((npulses, npoints))
+                    with cuda.pinned(pts):
+                        sample_points_gpu = cuda.to_device(pts, stream=stream)
+                        ray_dir_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
+                        ray_distance_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
+                        ray_intersect_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
+                        ray_bounce_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
+                        ray_bounce_power_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
+                        for mesh in scene.meshes:
+                            tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
+                            tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
+                            tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
+                            tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
+                            tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
-                sa_bins_gpu = cuda.device_array((npulses, nsam), dtype=_float, stream=stream)
-                count_bins_gpu = cuda.device_array((npulses, nsam), dtype=np.int32, stream=stream)
+                            # This is for optimization purposes
+                            kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
+                            if mesh.is_dynamic:
+                                dynamicSceneRayIntersections[blocks_strided, threads_strided, stream](
+                                    transmit_xyz_gpu, ray_intersect_gpu, sample_points_gpu, ray_dir_gpu,
+                                    ray_distance_gpu, ray_bounce_gpu,
+                                    ray_bounce_power_gpu, az_gpu, el_gpu, kd_tree_gpu, tri_box_gpu, tri_box_key_gpu,
+                                    tri_verts_gpu, tri_norm_gpu, tri_material_gpu, params_gpu)
+                            else:
+                                determineSceneRayIntersections[blocks_strided, threads_strided, stream](
+                                    transmit_xyz_gpu, ray_intersect_gpu, sample_points_gpu, ray_dir_gpu,
+                                    ray_distance_gpu, ray_bounce_gpu,
+                                    ray_bounce_power_gpu, az_gpu, el_gpu, kd_tree_gpu, tri_box_gpu, tri_box_key_gpu,
+                                    tri_verts_gpu, tri_norm_gpu, tri_material_gpu, params_gpu)
+                            del tri_material_gpu, tri_box_key_gpu, tri_verts_gpu, tri_box_gpu, kd_tree_gpu, tri_norm_gpu
+                        calcReturnPower[blocks_strided, threads_strided, stream](ray_intersect_gpu,
+                                                                                 ray_distance_gpu,
+                                                                                 ray_bounce_power_gpu, pd_r_gpu,
+                                                                                 pd_i_gpu,
+                                                                                 count_bins_gpu, receive_xyz_gpu,
+                                                                                 az_gpu, el_gpu, params_gpu)
+                        if debug:
+                            debug_rays.append(ray_intersect_gpu.copy_to_host(stream=stream))
+                            debug_raydirs.append(ray_dir_gpu.copy_to_host(stream=stream))
+                            debug_raypower.append(ray_bounce_power_gpu.copy_to_host(stream=stream))
+                pd_r_gpu.copy_to_host(pdr_tmp)
+                pd_i_gpu.copy_to_host(pdi_tmp)
+                del az_gpu, el_gpu, transmit_xyz_gpu, pd_r_gpu, pd_i_gpu
+            count_bins_gpu.copy_to_host(count)
+            del receive_xyz_gpu, count_bins_gpu
 
-                ray_intersect_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
-                ray_bounce_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
-                ray_bounce_power_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
-                for mesh in scene.meshes:
-                    threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d(
-                        (mesh.tri_idx.shape[0], nsam))
-                    tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
-                    tri_verts_gpu = cuda.to_device(mesh.vertices[mesh.tri_idx].astype(_float))
-                    tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
-                    tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
-                    tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
+        del params_gpu
 
-                    # This is for optimization purposes
-                    kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
-                    calcBinTotalSurfaceArea[blocks_strided_sa, threads_strided_sa](transmit_xyz_gpu, tri_verts_gpu,
-                                                                                   sa_bins_gpu, params_gpu)
-
-                    determineSceneRayIntersections[blocks_strided, threads_strided, stream](
-                        receive_xyz_gpu, ray_intersect_gpu, sample_points_gpu, ray_dir_gpu, ray_distance_gpu, ray_bounce_gpu,
-                        ray_bounce_power_gpu, az_gpu, el_gpu, kd_tree_gpu, tri_box_gpu, tri_box_key_gpu,
-                        tri_verts_gpu, tri_norm_gpu, tri_material_gpu, params_gpu)
-                    del tri_material_gpu, tri_box_key_gpu, tri_verts_gpu, tri_box_gpu, kd_tree_gpu, tri_norm_gpu
-                calcReturnPower[blocks_strided, threads_strided, stream](ray_intersect_gpu, ray_distance_gpu,
-                                                                 ray_bounce_power_gpu, pd_r_gpu,
-                                                                 pd_i_gpu,
-                                                                 count_bins_gpu, receive_xyz_gpu,
-                                                                 az_gpu, el_gpu, params_gpu)
-                if debug:
-                    debug_rays.append(ray_intersect_gpu.copy_to_host(stream=stream))
-                    debug_raydirs.append(ray_dir_gpu.copy_to_host(stream=stream))
-                    debug_raypower.append(ray_bounce_power_gpu.copy_to_host(stream=stream))
-
-
-                # We need to copy to host this way so we don't accidentally sync the streams
-                pd_r_gpu.copy_to_host(pdr_tmp, stream=stream)
-                pd_i_gpu.copy_to_host(pdi_tmp, stream=stream)
-                sa_bins_gpu.copy_to_host(sa, stream=stream)
-                count_bins_gpu.copy_to_host(count, stream=stream)
-
-    # cuda.synchronize()
-
-    # Combine chunks in comprehension
-    for c in counts:
-        c[c == 0.] += 1
-    # final_rp = [pr + 1j * pi for pr, pi in zip(pd_r, pd_i)]
-    final_rp = [s * (pr + 1j * pi) / n for pr, pi, s, n in zip(pd_r, pd_i, sa_bins, counts)]
-    if debug:
-        return final_rp, debug_rays, debug_raydirs, debug_raypower
-    else:
-        return final_rp
+        # Combine chunks in comprehension
+        for c in counts:
+            c[c == 0.] += 1
+        final_rp = [[s * (i + 1j * j) / n for i, j in zip(pr, pi)] for pr, pi, s, n in zip(pd_r, pd_i, sa_bins, counts)]
+        # final_rp = [sa_bins[0] * (sum(pd_r) + 1j * sum(pd_i)) / final_count]
+        # final_rp = [pr + 1j * pi for pr, pi in zip(pd_r, pd_i)]
+        if debug:
+            return final_rp, debug_rays, debug_raydirs, debug_raypower
+        else:
+            return final_rp
 
 
 
@@ -575,7 +585,7 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
         volume_share[volume_share == volume_share.min()] += 1
     for pts_alloc, mesh in zip(volume_share, scene.meshes):
         # Calculate out box volumes
-        tverts = mesh.vertices[mesh.tri_idx]
+        tverts = mesh.vertices[0, mesh.tri_idx] if mesh.is_dynamic else mesh.vertices[mesh.tri_idx]
         tri_areas = np.linalg.norm(np.cross(tverts[:, 0] - tverts[:, 2], tverts[:, 1] - tverts[:, 2]), axis=1) / 2
         bvh = mesh.bvh[mesh.bvh.shape[0] // 2:]
         volumes = np.prod(bvh[:, 1, :] - bvh[:, 0, :], axis=1)
@@ -596,7 +606,7 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
             q = abs(uv_select[:, 0] - uv_select[:, 1])
             bary_coords = np.array([q, .5 * (uv_select[:, 0] + uv_select[:, 1] - q), 1 - .5 * (q + uv_select[:, 0] + uv_select[:, 1])]).T
 
-            tri_verts = mesh.vertices[mesh.tri_idx[tris]]
+            tri_verts = mesh.vertices[0, mesh.tri_idx[tris]] if mesh.is_dynamic else mesh.vertices[mesh.tri_idx[tris]]
             points.append(np.sum(tri_verts[tri_select] * bary_coords[:, :, None], axis=1))
     points = np.concatenate(points)[:npoints]
     rd = points[None, :, :] - a_obs_pt[:, None, :]
@@ -609,9 +619,13 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
     rd_gpu = cuda.to_device(rd.astype(_float))
     ri_gpu = cuda.to_device(ray_intersects.astype(_float))
     # tn_test = np.array([tuple(t) for t in mesh.normals], dtype=float32x3_dtype)
-    tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
+    if mesh.is_dynamic:
+        tri_verts_gpu = cuda.to_device(mesh.vertices[0].astype(_float))
+        tri_norm_gpu = cuda.to_device(mesh.normals[0].astype(_float))
+    else:
+        tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
+        tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
     tri_idxes_gpu = cuda.to_device(mesh.tri_idx.astype(np.int32))
-    tri_verts_gpu = cuda.to_device(mesh.vertices.astype(_float))
     tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
     tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
     kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
@@ -861,3 +875,156 @@ def drawOctreeBox(box):
         )
     vertices = np.array(vertices)
     return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
+
+
+def genOceanBackground(bg_ext: tuple[float, float], a_times: np.ndarray, fft_grid_sz: tuple[int, int] = (32, 32),
+                       S: float = 2., u10: float = 5., repetition_T: float = 10., numsides: int = 6,
+                       interp_method: str = 'linear', rect_grid: bool = False):
+    """Generates a time-varying ocean surface background over a hexagonal or rectangular grid.
+
+    This function simulates the evolution of an ocean surface using spectral methods and returns the surface at multiple time points.
+
+    Args:
+        bg_ext (tuple): Physical extent of the background (length, width).
+        a_times (array-like): Array of time points at which to generate the ocean surface.
+        fft_grid_sz (tuple, optional): Size of the FFT grid. Defaults to (32, 32).
+        S (float, optional): Spectral sharpness parameter. Defaults to 2.
+        u10 (float, optional): Wind speed at 10 meters above the surface. Defaults to 5.
+        repetition_T (float, optional): Repetition period of the ocean surface. Defaults to 10.
+        numsides (int, optional): Number of sides for the hexagonal grid. Defaults to 6.
+        rect_grid (bool, optional): If True, returns the surface on a rectangular grid. Defaults to False.
+
+    Returns:
+        tuple: If rect_grid is True, returns (ostack, xx, yy) where ostack is the stack of ocean surfaces and xx, yy are meshgrids.
+               If rect_grid is False, returns (ostack, xhex, yhex) where xhex and yhex are the hexagonal grid coordinates.
+    """
+
+    ''' GRID GENERATION '''
+    center = [bg_ext[0] / 2, bg_ext[1] / 2]
+    xhex = [center[0]]
+    yhex = [center[1]]
+    extent = bg_ext[0] / 2 * numsides * .99
+    for idx, perimeter in enumerate(np.linspace(0, extent, 5)[1:]):
+
+        n = (idx + 1) * numsides  # number of perimeter-interpolated points
+
+        # Main polygon
+        radius = perimeter / (2 * numsides * np.sin(np.pi / numsides))
+        start = 0.5 / numsides  # or just 0
+        z = radius * np.exp(2j * np.pi * (np.linspace(0, 1, numsides, endpoint=False) + start))
+        # x, y = z.real, z.imag
+
+        # Added interpolated points
+        zp = np.zeros(n, dtype=complex)
+        for p in range(n):
+            r = p * numsides / n  # rescaled index
+            i = int(r)
+            f = r - i  # integer and fractional part
+            iplus1 = i + 1 if i < numsides - 1 else 0  # end point
+            zp[p] = z[i] + f * (z[iplus1] - z[i])  # interpolate from vertices
+        xp, yp = zp.real, zp.imag
+        xhex = np.concatenate((xhex, xp + center[0]))
+        yhex = np.concatenate((yhex, yp + center[1]))
+
+    if rect_grid:
+        xi = np.linspace(xhex.min(), xhex.max(), 100)
+        yi = np.linspace(yhex.min(), yhex.max(), 100)
+        xx, yy = np.meshgrid(xi, yi)
+
+    bgpts = np.array([xhex, yhex]).T
+
+    # Get random points for the surface spatial frequency representation
+    rand_vec = (np.random.randn(*fft_grid_sz), np.random.randn(*fft_grid_sz))
+
+    ostack = []
+    for t in a_times:
+        bg = wavefunction(bg_ext, npts=rand_vec[0].shape, rand_vecs=rand_vec, T=repetition_T, S=S, u10=u10)
+        zo = 1 / np.sqrt(2) * bg[0] * np.exp(-1j * bg[1] * t)
+        bg = np.real(np.fft.ifft2(np.fft.fftshift(zo))) * rand_vec[0].shape[0] * rand_vec[0].shape[1] / 10
+        o = interpn((np.linspace(0, bg_ext[0], rand_vec[0].shape[0]), np.linspace(0, bg_ext[1], rand_vec[0].shape[1])),
+                    bg, bgpts,
+                    method=interp_method)
+        if rect_grid:
+            ostack.append(griddata((xhex, yhex), o, (xi[None, :], yi[:, None]), method=interp_method))
+        else:
+            ostack.append(o)
+
+    ostack = np.stack(ostack)
+    ostack = ostack / abs(ostack).max() * u10**2 / GRAVITIC_CONSTANT
+
+    if rect_grid:
+        return ostack, xx, yy
+    else:
+        return ostack, xhex, yhex
+
+
+def wavefunction(sz, npts=(64, 64), rand_vecs=None, T=10., S=2., u10=10.):
+    """Generates a complex wavefunction and its corresponding angular frequencies for a given grid size.
+
+    This function simulates a random ocean surface using the Elfouhaily spectrum and returns the wavefunction and frequency grid.
+
+    Args:
+        sz (tuple): Physical size of the grid (length, width).
+        npts (tuple, optional): Number of points in each dimension. Defaults to (64, 64).
+        rand_vecs (tuple of np.ndarray, optional): Precomputed random vectors for reproducibility. Defaults to None.
+        T (float, optional): Repetition period of the wave. Defaults to 10.
+        S (float, optional): Spectral sharpness parameter. Defaults to 2.
+        u10 (float, optional): Wind speed at 10 meters above the surface. Defaults to 10.
+
+    Returns:
+        tuple: A tuple (zhat, omega) where zhat is the complex wavefunction and omega is the angular frequency grid.
+    """
+    kx = np.arange(-(npts[0] // 2 - 1), npts[0] / 2 + 1) * 2 * np.pi / sz[0]
+    ky = np.arange(-(npts[1] // 2 - 1), npts[1] / 2 + 1) * 2 * np.pi / sz[1]
+    kkx, kky = np.meshgrid(kx, ky)
+    if rand_vecs is None:
+        rho = np.random.randn(*kkx.shape)
+        sig = np.random.randn(*kkx.shape)
+    else:
+        rho, sig = rand_vecs
+    omega = np.floor(np.sqrt(GRAVITIC_CONSTANT * np.sqrt(kkx ** 2 + kky ** 2)) / (2 * np.pi / T)) * (2 * np.pi / T)
+    phi = var_phi(kkx, kky, S, u10)
+    zhat = (rho * phi + rho.T * phi.T - (sig * phi + sig.T * phi.T)) + 1j * (
+                rho * phi - rho.T * phi.T + (sig * phi - sig.T * phi.T))
+    return zhat, omega
+
+
+def var_phi(kx, ky, S=2., u10=10.):
+    # Wave spectrum variance
+    phi = np.cos(np.arctan2(ky, kx) / 2) ** (2 * S)
+    k = np.sqrt(kx ** 2 + ky ** 2)
+    k[k == 0] = 1e-9
+    gamma = Sk(k, u10) * phi * gam_func(S + 1) / gam_func(S + .5) / k
+    # gamma[gamma < 1e-10] = 0.
+    gamma[np.logical_and(kx == 0, ky == 0)] = 0
+    return np.sqrt(gamma)
+
+
+def Sk(k, u10=1.):
+    # Elfouhaily Omnidirectional spectrum
+    # Handles DC case
+    k[k == 0] = 1e-9
+
+    # Parameters for the spectrum function
+    om_c = .84  # Sea State - mature ocean
+    Cd10 = .00144
+    ust = np.sqrt(Cd10) * u10  # wind speed
+    km = 370
+    cm = .23
+    lemma = 1.7 if om_c <= 1 else 1.7 + 6 * np.log10(om_c)
+    sigma = .08 * (1 + 4 * om_c ** -3)
+    alph_p = .006 * om_c ** .55
+    alph_m = .01 * (1 + np.log(ust / cm)) if ust <= cm else .01 * (1 + 3 * np.log(ust / cm))
+    ko = GRAVITIC_CONSTANT / u10 ** 2
+    kp = ko * om_c ** 2
+    cp = np.sqrt(GRAVITIC_CONSTANT / kp)
+    cc = np.sqrt((GRAVITIC_CONSTANT / kp) * (1 + (k / km) ** 2))
+    Lpm = np.exp(-1.25 * (kp / k) ** 2)
+    gamma = np.exp(-1 / (2 * sigma ** 2) * (np.sqrt(k / kp) - 1) ** 2)
+    Jp = lemma ** gamma
+    Fp = Lpm * Jp * np.exp(-.3162 * om_c * (np.sqrt(k / kp) - 1))
+    Fm = Lpm * Jp * np.exp(-.25 * (k / km - 1) ** 2)
+    Bl = .5 * alph_p * (cp / cc) * Fp
+    Bh = .5 * alph_m * (cm / cc) * Fm
+
+    return (Bl + Bh) / (k ** 3)

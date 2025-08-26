@@ -23,7 +23,8 @@ import matplotlib as mplib
 import matplotlib.animation as anim
 import pickle
 mplib.use('TkAgg')
-from simulib.mesh_objects import Mesh, Scene
+from simulib.mesh_objects import TriangleMesh, Scene, OceanMesh
+from simulib.mesh_functions import genOceanBackground
 
 pio.renderers.default = 'browser'
 
@@ -54,7 +55,7 @@ if __name__ == '__main__':
     dopp_upsample = 2
     num_bounces = 1
     max_tris_per_split = 64
-    points_to_sample = 2**18
+    points_to_sample = 2**14
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**18
     prf = 3236.
@@ -135,39 +136,24 @@ if __name__ == '__main__':
     # mesh_ids = []
 
     mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
-    # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
-    mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
-
-    gpx, gpy, gpz = bg.getGrid(grid_origin, 10000, 10000, nrows=256, ncols=256)
-    # Shift position
-    gplat, gplon, gpalt = enu2llh(gpx.flatten(), gpy.flatten(), gpz.flatten(), bg.ref)
-    gpx, gpy, gpz = llh2enu(gplat, gplon, gpalt - 15, bg.ref)
-    gpz = gpz * 0 - 17.
-    gnd_points = np.array([gpx, gpy, gpz]).T[::100]
-    # gnd_range = np.linalg.norm(rp.txpos(data_t).mean(axis=0) - gnd_points, axis=1)
-    # gnd_points = gnd_points[np.logical_and(gnd_range > grid_ranges.min() - grid_ranges.std() * 3,
-    #                                        gnd_range < grid_ranges.max() + grid_ranges.std() * 3)]
-    tri_ = Delaunay(gnd_points[:, :2])
-    ground = o3d.geometry.TriangleMesh()
-    ground.vertices = o3d.utility.Vector3dVector(gnd_points)
-    ground.triangles = o3d.utility.Vector3iVector(tri_.simplices)
-    ground = ground.simplify_vertex_clustering(5.)
-    ground.remove_duplicated_vertices()
-    ground.remove_unreferenced_vertices()
-    ground.compute_vertex_normals()
-    ground.compute_triangle_normals()
-    ground.normalize_normals()
-    # ground.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(ground.triangles)).astype(np.int32))
-    mesh += ground
-    mesh.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(mesh.triangles)).astype(np.int32))
     scene.add(
-        Mesh(
+        TriangleMesh(
             mesh,
             max_tris_per_split=max_tris_per_split,
-            material_sigma=[.0017],
-            material_emissivity=[1e6],
+            material_sigma=[mesh_materials[mtid][0] for mtid in
+                            range(np.asarray(mesh.triangle_material_ids).max() + 1)],
+            material_emissivity=[mesh_materials[mtid][1] for mtid in
+                                 range(np.asarray(mesh.triangle_material_ids).max() + 1)],
         )
     )
+
+    ostack, x, y = genOceanBackground((10000, 10000), pulse_times, fft_grid_sz=(128, 128))
+
+    # Reshape the background into something we can use
+    tri_ = Delaunay(np.array([x, y]).T)
+    ocean = OceanMesh(np.array([5000., 5000., 0]), tri_.simplices, ostack, x, y)
+    # ocean.shift(np.array([0, 0, 0.]))
+    scene.add(ocean)
 
     '''with open('/home/jeff/repo/apache/data/target_meshes/air_balloon.model', 'rb') as f:
         scene = pickle.load(f)'''
@@ -218,8 +204,7 @@ if __name__ == '__main__':
                                                                                   radar_coeff, rp.az_half_bw, rp.el_half_bw,
                                                                                   nsam, fc, near_range_s, fs,
                                                                                   num_bounces=num_bounces,
-                                                                                  debug=True, streams=streams,
-                                                                                  supersamples=supersamples)
+                                                                                  debug=True, supersamples=supersamples)
     single_pulse = [
         sum(
             upsamplePulse(
@@ -283,9 +268,9 @@ if __name__ == '__main__':
         tilts = [r.tilt(ptimes).astype(_float) for r in datasets]
         trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                         radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
-                                        num_bounces=num_bounces, streams=streams, supersamples=supersamples)
-        rx_pulse = [sum(10**(up_gain / 20) * (f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, rpulse.shape) +
-                      1j * np.random.normal(0, noise_power * chirp_bandwidth, rpulse.shape)) for s, f in zip(srp, fft_chirps)) for srp in trp]
+                                        num_bounces=num_bounces, supersamples=supersamples)
+        rx_pulse = [sum(10**(up_gain / 20) * (f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, f.shape) +
+                      1j * np.random.normal(0, noise_power * chirp_bandwidth, f.shape)) for s, f in zip(srp, fft_chirps)) for srp in trp]
         mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
             time_len=nsam).T, dtype=np.complex64) for rpulse in rx_pulse] for mf in mf_chirps]
         '''bpj_grid += backprojectPulseStream(mf_pulses[0], [pans[0]], [rxposes[0]], [txposes[0]], gz.astype(_float),
@@ -414,6 +399,30 @@ if __name__ == '__main__':
                          mode='markers'))
     fig.show()
 
+    fig = go.Figure(data=[
+        go.Mesh3d(
+            x=ocean.vertices[0, :, 0],
+            y=ocean.vertices[0, :, 1],
+            z=ocean.vertices[0, :, 2],
+            # i, j and k give the vertices of triangles
+            i=ocean.tri_idx[:, 0],
+            j=ocean.tri_idx[:, 1],
+            k=ocean.tri_idx[:, 2],
+            facecolor=ocean.normals[0],
+            showscale=True
+        )
+    ])
+    tri_centers = ocean.vertices[0][ocean.tri_idx].mean(axis=1)
+    fig.add_trace(go.Cone(x=tri_centers[:, 0],
+            y=tri_centers[:, 1],
+            z=tri_centers[:, 2],
+            # i, j and k give the vertices of triangles
+            u=ocean.normals[0, :, 0],
+            v=ocean.normals[0, :, 1],
+            w=ocean.normals[0, :, 2],))
+
+    fig.show()
+
     '''tri_pcd = o3d.geometry.PointCloud()
     tri_pcd.points = o3d.utility.Vector3dVector(mesh.vertices[mesh.tri_idx].mean(axis=1))
     tri_pcd.normals = o3d.utility.Vector3dVector(mesh.normals)
@@ -445,3 +454,17 @@ if __name__ == '__main__':
     plt.figure()
     plt.imshow(db(single_rp[0][0]))
     plt.axis('tight')
+
+    ocean_stack, xx, yy = genOceanBackground((10000, 10000), np.linspace(0, 100, 1000), repetition_T=1000, S=20., u10=100.,
+                                             rect_grid=True)
+
+    fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
+
+    for o in ocean_stack:
+        ax.clear()
+        ax.set_zlim(-2., 40.)
+        ax.plot_surface(xx, yy, o, cmap=mplib.cm.ocean)
+        # plt.clf()
+        # plt.imshow(test.reshape(xx.shape))
+        plt.draw()
+        plt.pause(.1)

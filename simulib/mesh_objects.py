@@ -5,38 +5,39 @@ from .mesh_functions import detectPointsScene, genKDTree, _float, readVTC
 from sklearn.cluster import AgglomerativeClustering
 
 
-class Mesh(object):
+class BaseMesh(object):
     bvh: np.ndarray
     bvh_levels: int
     leaf_key: np.ndarray
     leaf_list: np.ndarray
     bounding_box: np.ndarray
+    tri_idx: np.ndarray
+    vertices: np.ndarray
+    normals: np.ndarray
+    vertex_normals: np.ndarray
+    materials: np.ndarray
+    center: np.ndarray
+    ntri: int
+    is_dynamic: bool = False
 
-    def __init__(self, a_mesh: o3d.geometry.TriangleMesh, material_emissivity: list=None,
-                 material_sigma: list=None, max_tris_per_split: int = 64):
+    def __init__(self, center, mesh_tri_idx, mesh_vertices, mesh_normals, vertex_normals, triangle_material_ids=None,
+                 material_emissivity=None, material_sigma=None):
 
-        # Generate bounding box tree
-        mesh_tri_idx = np.asarray(a_mesh.triangles)
-        mesh_vertices = np.asarray(a_mesh.vertices)
-        a_mesh = a_mesh.compute_vertex_normals()
-        mesh_normals = np.asarray(a_mesh.triangle_normals)
-        vertex_normals = np.asarray(a_mesh.vertex_normals)
-
-        assert mesh_tri_idx.shape[0] != 0, 'No triangle indexes found.'
-        assert mesh_vertices.shape[0] != 0, 'No vertices found.'
-        assert mesh_normals.shape[0] != 0, 'No triangle normals found.'
+        assert mesh_tri_idx.shape[-2] != 0, 'No triangle indexes found.'
+        assert mesh_vertices.shape[-2] != 0, 'No vertices found.'
+        assert mesh_normals.shape[-2] != 0, 'No triangle normals found.'
 
         # Material triangle stuff
         if material_emissivity is None:
             print('Could not extrapolate sigmas, setting everything to one.')
-            mesh_sigmas = np.ones(len(a_mesh.triangles)) * 1e6
+            mesh_sigmas = np.ones(mesh_tri_idx.shape[-2]) * 1e6
         else:
-            mesh_sigmas = np.array([material_emissivity[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+            mesh_sigmas = np.array([material_emissivity[i] for i in triangle_material_ids])
 
         if material_sigma is None:
-            mesh_kd = np.ones(len(a_mesh.triangles)) * .0017
+            mesh_kd = np.ones(mesh_tri_idx.shape[-2]) * .0017
         else:
-            mesh_kd = np.array([material_sigma[i] for i in np.asarray(a_mesh.triangle_material_ids)])
+            mesh_kd = np.array([material_sigma[i] for i in triangle_material_ids])
 
         tri_material = np.concatenate([mesh_sigmas.reshape((-1, 1)),
                                        mesh_kd.reshape((-1, 1))], axis=1)
@@ -48,15 +49,54 @@ class Mesh(object):
         self.normals = mesh_normals.astype(_float)
         self.vertex_normals = vertex_normals.astype(_float)
         self.materials = tri_material.astype(_float)
-        self.center = a_mesh.get_center().astype(_float)
+        self.center = center.astype(_float)
         self.ntri = mesh_tri_idx.shape[0]
+
+    def set_bounding_box(self, a_box_source, max_tris_per_split):
+        pass
+
+    def sample(self, sample_points: int):
+        sm = o3d.geometry.TriangleMesh()
+        sm.triangles = o3d.utility.Vector3iVector(self.tri_idx)
+        sm.vertices = o3d.utility.Vector3dVector(self.vertices)
+        sm.triangle_normals = o3d.utility.Vector3dVector(self.normals)
+        pc = sm.sample_points_poisson_disk(sample_points)
+        return np.asarray(pc.points)
+
+    def shift(self, new_center, relative=False):
+        _shift = new_center if relative else new_center - self.center
+        self.vertices += _shift
+        self.center += _shift
+        self.bounding_box += _shift
+        self.bvh += _shift
+
+    def rotate(self, rot_mat):
+        self.vertices = self.vertices @ rot_mat
+        self.center = self.center @ rot_mat
+        self.normals = self.normals @ rot_mat
+
+class TriangleMesh(BaseMesh):
+
+    def __init__(self, a_mesh: o3d.geometry.TriangleMesh, material_emissivity: list = None, material_sigma: list = None,
+                 max_tris_per_split: int = 64):
+
+        # Generate bounding box tree
+
+        mesh_tri_idx = np.asarray(a_mesh.triangles)
+        mesh_vertices = np.asarray(a_mesh.vertices)
+        a_mesh = a_mesh.compute_vertex_normals()
+        mesh_normals = np.asarray(a_mesh.triangle_normals)
+        vertex_normals = np.asarray(a_mesh.vertex_normals)
+
+        super().__init__(a_mesh.get_center(), mesh_tri_idx, mesh_vertices, mesh_normals, vertex_normals,
+                         np.asarray(a_mesh.triangle_material_ids), material_emissivity, material_sigma)
 
         self.set_bounding_box(a_mesh, max_tris_per_split)
 
-    def set_bounding_box(self, a_mesh, max_tris_per_split):
+    def set_bounding_box(self, a_box_source, max_tris_per_split):
         mesh_tri_vertices = self.vertices[self.tri_idx]
         # Generate octree and associate triangles with boxes
-        aabb = a_mesh.get_axis_aligned_bounding_box()
+        aabb = a_box_source.get_axis_aligned_bounding_box()
         max_bound = aabb.get_max_bound()
         min_bound = aabb.get_min_bound()
         root_box = np.array([min_bound, max_bound])
@@ -80,28 +120,7 @@ class Mesh(object):
         self.bvh_levels = num_box_levels
 
 
-    def sample(self, sample_points: int):
-        sm = o3d.geometry.TriangleMesh()
-        sm.triangles = o3d.utility.Vector3iVector(self.tri_idx)
-        sm.vertices = o3d.utility.Vector3dVector(self.vertices)
-        sm.triangle_normals = o3d.utility.Vector3dVector(self.normals)
-        pc = sm.sample_points_poisson_disk(sample_points)
-        return np.asarray(pc.points)
-
-    def shift(self, new_center, relative=False):
-        _shift = new_center if relative else new_center - self.center
-        self.vertices += _shift
-        self.center += _shift
-        self.bounding_box += _shift
-        self.bvh += _shift
-
-    def rotate(self, rot_mat):
-        self.vertices = self.vertices @ rot_mat
-        self.center = self.center @ rot_mat
-        self.normals = self.normals @ rot_mat
-
-
-class VTCMesh(Mesh):
+class VTCMesh(BaseMesh):
 
     def __init__(self, a_filepath: str):
         scat_data, angles = readVTC(a_filepath)
@@ -115,11 +134,48 @@ class VTCMesh(Mesh):
         super().__init__(mesh, material_emissivity=[1e6], material_sigma=[.0017])
 
 
+class OceanMesh(BaseMesh):
+
+    def __init__(self, center, mesh_tri_idx, mesh_heights, mesh_x, mesh_y):
+        # Get the sampled ocean points into something we can use
+        mesh_vertices = np.stack([np.array([mesh_x, mesh_y, m]).T for m in mesh_heights])
+
+        # Run through all the time triangles and get normals for the vertices
+        mesh_tri_vertices = mesh_vertices[:, mesh_tri_idx]
+        e0 = mesh_tri_vertices[:, :, 1] - mesh_tri_vertices[:, :, 0]
+        e1 = mesh_tri_vertices[:, :, 2] - mesh_tri_vertices[:, :, 0]
+        mesh_normals = np.cross(e0, e1)
+        mesh_normals = mesh_normals / np.linalg.norm(mesh_normals, axis=2)[..., None]
+
+        # Make sure all normals point upwards, since the simulated ocean never has breaking waves
+        mesh_normals[mesh_normals[:, :, 2] < 0.] = -mesh_normals[mesh_normals[:, :, 2] < 0.]
+
+        vertex_normals = np.zeros_like(mesh_vertices)
+        for vidx in range(vertex_normals.shape[1]):
+            # Get all triangles associated with this vertex
+            vertex_normals[:, vidx, :] = mesh_normals[:, np.any(mesh_tri_idx == vidx, axis=1)].mean(axis=1)
+
+        super().__init__(center, mesh_tri_idx, mesh_vertices, mesh_normals, vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int),
+                 [1e6], [.0001])
+
+        self.set_bounding_box(np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices]), 0)
+        self.is_dynamic = True
+
+    def set_bounding_box(self, a_box_source, max_tris_per_split):
+        bbox = np.stack([np.min(a_box_source, axis=(0, 1)), np.max(a_box_source, axis=(0, 1))])
+        self.bvh = bbox.reshape((1, 2, 3)).astype(_float)
+        self.bounding_box = bbox.astype(_float)
+        self.leaf_list = np.arange(self.tri_idx.shape[0]).astype(np.int32)
+        self.leaf_key = np.array([[0, self.tri_idx.shape[0], 0]]).astype(np.int32)
+        self.bvh_levels = 1
+
+
+
 
 class Scene(object):
     tree = list()
     
-    def __init__(self, meshes: list[Mesh] = None):
+    def __init__(self, meshes: list[BaseMesh] = None):
         self.meshes = [] if meshes is None else meshes
         if meshes is not None:
             self.tree = np.zeros((len(meshes), 2, 3))

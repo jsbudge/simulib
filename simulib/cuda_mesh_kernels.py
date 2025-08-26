@@ -603,6 +603,41 @@ def determineSceneRayIntersections(receive_xyz, ray_intersect, sample_points, ra
 
 
 @cuda.jit()
+def dynamicSceneRayIntersections(receive_xyz, ray_intersect, sample_points, ray_dir, ray_distance, ray_bounce,
+                                   ray_bounce_power, pan, tilt, kd_tree, leaf_list, leaf_key, tri_vert, tri_norm, tri_material,
+                                   params):
+    t, r = cuda.grid(ndim=2)
+    tt_stride, ray_stride = cuda.gridsize(2)
+    for tt in prange(t, ray_dir.shape[0], tt_stride):
+        rec_xyz = make_float3(receive_xyz[tt, 0], receive_xyz[tt, 1], receive_xyz[tt, 2])
+        for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
+            rd = normalize(
+                make_float3(sample_points[ray_idx, 0], sample_points[ray_idx, 1], sample_points[ray_idx, 2]) - rec_xyz)
+            rho = (params[5] *
+                   applyOneWayRadiationPattern(pan[tt], tilt[tt],
+                                               math.atan2(rd.x, rd.y), -math.asin(rd.z),
+                                               params[3], params[4]))
+            # rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
+            did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd,
+                                                                             kd_tree, rho,
+                                                                             leaf_list, leaf_key,
+                                                                             tri_vert[tt], tri_norm[tt], tri_material, 0,
+                                                                             params[0])
+            if did_intersect:
+                ray_intersect[tt, ray_idx, 0] = inter.x
+                ray_intersect[tt, ray_idx, 1] = inter.y
+                ray_intersect[tt, ray_idx, 2] = inter.z
+                ray_dir[tt, ray_idx, 0] = rd.x
+                ray_dir[tt, ray_idx, 1] = rd.y
+                ray_dir[tt, ray_idx, 2] = rd.z
+                ray_bounce[tt, ray_idx, 0] = b.x
+                ray_bounce[tt, ray_idx, 1] = b.y
+                ray_bounce[tt, ray_idx, 2] = b.z
+                ray_bounce_power[tt, ray_idx] = nrho
+                ray_distance[tt, ray_idx] = rng
+
+
+@cuda.jit()
 def calcIntersectionPoints(receive_xyz, ray_intersect, ray_dir, kd_tree, leaf_list, leaf_key, tri_vert,
                            tri_idx, tri_norm):
     t, r = cuda.grid(ndim=2)
