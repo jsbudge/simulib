@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
+from scipy.signal.windows import taylor
 from simulib.platform_helper import RadarPlatform
 from simulib.grid_helper import MapEnvironment
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, getRadarCoeff, \
@@ -11,7 +12,7 @@ from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, g
 from scipy.signal import sawtooth
 from simulib.mimo_functions import genChannels
 from simulib.mesh_functions import _float, getRangeProfileFromScene, \
-    getMeshFig, getSceneFig, drawOctreeBox, loadTarget
+    getMeshFig, getSceneFig, drawOctreeBox, loadTarget, drawAntennaBox
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
@@ -41,7 +42,7 @@ def addNoise(range_profile, a_chirp, npower, mf, a_fft_len):
 
 if __name__ == '__main__':
     fc = 16700e6
-    fs = 500e6
+    fs = 250e6
     rx_gain = 60  # dB
     tx_gain = 60  # dB
     rec_gain = 120  # dB
@@ -50,18 +51,18 @@ if __name__ == '__main__':
     noise_figure = 5
     operating_temperature = 290  # degrees Kelvin
     npulses = 64
-    plp = .35
-    upsample = 1
-    dopp_upsample = 2
+    plp = .85
+    upsample = 4
+    dopp_upsample = 1
     num_bounces = 1
     max_tris_per_split = 64
-    points_to_sample = 2**14
+    points_to_sample = 2**18
     num_mesh_triangles = 1000000
     max_pts_per_run = 2**18
     prf = 3236.
     bw_az = 10
-    bw_el = 10
-    chirp_bandwidth = 245e6
+    bw_el = 3
+    chirp_bandwidth = 123e6
     # grid_origin = (40.139343, -111.663541, 1360.10812)
     # fnme = '/data6/SAR_DATA/2024/08072024/SAR_08072024_111617.sar'
     # fnme = '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_113146.sar'
@@ -71,6 +72,7 @@ if __name__ == '__main__':
     triangle_colors = None
     supersamples = 0
     nbpj_pts = (256, 256)
+    cons_ranges = (10000, 15000.)
 
     bg = MapEnvironment(grid_origin, nbpj_pts, ref=grid_origin, background=np.ones(nbpj_pts))
 
@@ -87,28 +89,31 @@ if __name__ == '__main__':
     # grid_origin = llh2enu(*bg.origin, bg.ref)
 
     u = np.ones(ngps) * launch_height
-    u = u * np.sqrt(np.linspace(1, 1e-9, ngps))
-    e = np.cos(np.ones(ngps) * 1 * np.pi * pulse_times[:ngps]) * 200 + 1600.
-    n = np.linspace(launch_speed * launch_time, 0, ngps)
+    # u = u * np.sqrt(np.linspace(1, 1e-9, ngps))
+    # e = np.cos(np.ones(ngps) * 1 * np.pi * pulse_times[:ngps]) * 200 + 1600.
+    # e = np.ones(ngps)
+    # n = np.linspace(launch_speed * launch_time, 0, ngps)
+    n = np.ones(ngps) * -13700.
+    e = np.linspace(-7000., 7000, ngps)
     gpst = np.linspace(0, launch_time, ngps)
     poses = -np.array([e, n, u]).T
     vel = CubicSpline(gpst, median_filter(np.gradient(np.array([e, n, u]).T, axis=0), 15, axes=(0,)) * 100)
     missile_vels = vel(gpst)
     r = np.zeros(ngps)
     p = np.arcsin(missile_vels[:, 2] / np.linalg.norm(missile_vels, axis=1))
-    y = -np.arctan2(missile_vels[:, 0], missile_vels[:, 1])
+    y = np.arctan2(missile_vels[:, 0], missile_vels[:, 1])
 
     # Point at the target the whoooole way
     pt_vec = poses / np.linalg.norm(poses, axis=1)[:, None]
-    # gimbal = np.array([-np.arctan2(pt_vec[:, 0], pt_vec[:, 1]) * 0., np.arcsin(pt_vec[:, 2]) * 0.]).T
-    gimbal = np.array([sawtooth(np.pi * (45 / 45) *
-                        np.arange(ngps) / 100, .5) * 45 / 2 * DTR, p - np.arcsin(pt_vec[:, 2])]).T
+    gimbal = np.array([np.arctan2(pt_vec[:, 0], pt_vec[:, 1]) - y + np.pi / 2, np.pi / 2+np.arcsin(pt_vec[:, 2]) - p]).T
+    # gimbal = np.array([sawtooth(np.pi * (45 / 45) *
+    #                     np.arange(ngps) / 100, .5) * 45 / 2 * DTR + .001, p - np.arcsin(pt_vec[:, 2])]).T
 
 
     # Get the transmit channels going
     rp = RadarPlatform(e=e, n=n, u=u, r=r, p=p, y=y, t=np.linspace(0, launch_time, ngps), tx_offset=np.zeros(3),
              rx_offset=np.zeros(3), gimbal=gimbal, gimbal_offset=np.array([0., 0, 0]),
-                       gimbal_rotations=np.array([0, np.pi / 2, 0]), dep_angle=0,
+                       gimbal_rotations=np.array([0, 0, np.pi/2]), dep_angle=0,
              squint_angle=0., az_bw=bw_az, el_bw=bw_el, fs=fs, tx_num=0, rx_num=0)
 
     '''test = azelToVec(rp.pan(rp.gpst), rp.tilt(rp.gpst)).T
@@ -116,12 +121,12 @@ if __name__ == '__main__':
         1 / (bw_el * DTR) * (-np.arcsin(pt_vec[:, 2]) - rp.tilt(rp.gpst)))**2)'''
 
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (
-        rp.getRadarParams(launch_height, plp, upsample, a_ranges=(14000, 15000.)))
+        rp.getRadarParams(launch_height, plp, upsample, a_ranges=cons_ranges))
 
     pulse_times = pulse_times[
         np.logical_and(
-            np.linalg.norm(rp.pos(pulse_times), axis=1) > 14000.0,
-            np.linalg.norm(rp.pos(pulse_times), axis=1) < 15000,
+            np.linalg.norm(rp.pos(pulse_times), axis=1) > cons_ranges[0],
+            np.linalg.norm(rp.pos(pulse_times), axis=1) < cons_ranges[1],
         )
     ]
 
@@ -132,10 +137,13 @@ if __name__ == '__main__':
 
     print('Loading mesh...', end='')
 
-    scene = Scene()
-    # mesh_ids = []
+    # scene = Scene()
+    with open('/home/jeff/repo/apache/data/target_meshes/frigate.model', 'rb') as f:
+        scene = pickle.load(f)
 
-    mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
+    scene.shift(np.array([0., 0., 10.]))
+
+    '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
     scene.add(
         TriangleMesh(
             mesh,
@@ -145,19 +153,20 @@ if __name__ == '__main__':
             material_emissivity=[mesh_materials[mtid][1] for mtid in
                                  range(np.asarray(mesh.triangle_material_ids).max() + 1)],
         )
-    )
+    )'''
 
-    ostack, x, y = genOceanBackground((10000, 10000), pulse_times, fft_grid_sz=(128, 128))
+    print('Loading ocean...', end='')
+
+    ostack, x, y = genOceanBackground((10000, 10000), pulse_times, repetition_T=1000., fft_grid_sz=(128, 128), u10=10., numrings=30)
 
     # Reshape the background into something we can use
     tri_ = Delaunay(np.array([x, y]).T)
-    ocean = OceanMesh(np.array([5000., 5000., 0]), tri_.simplices, ostack, x, y)
-    # ocean.shift(np.array([0, 0, 0.]))
+    ocean = OceanMesh(np.array([x[0], y[0], 0]), tri_.simplices, ostack, x, y)
+    ocean.shift(np.array([0, 0, 0.]))
     scene.add(ocean)
 
-    '''with open('/home/jeff/repo/apache/data/target_meshes/air_balloon.model', 'rb') as f:
-        scene = pickle.load(f)'''
-    scene.shift(llh2enu(*grid_origin, bg.ref))
+
+    scene.shift(llh2enu(*grid_origin, bg.ref), relative=True)
 
     print('Done.')
 
@@ -175,6 +184,8 @@ if __name__ == '__main__':
     mf_chirp = taytay / fft_chirp
     fft_chirps = [fft_chirp]
     mf_chirps = [mf_chirp]
+
+    doppwin = taylor(npulses * dopp_upsample)
 
 
     # Load in boxes and meshes for speedup of ray tracing
@@ -194,7 +205,8 @@ if __name__ == '__main__':
     datasets = [rp]
 
     # Single pulse block for debugging
-    data_t = pulse_times[len(pulse_times) // 2:len(pulse_times) // 2 + npulses]
+    idx_t = np.arange(len(pulse_times) // 2, len(pulse_times) // 2 + npulses)
+    data_t = pulse_times[idx_t]
     print('Generating single pulse...')
     single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
                                                                                   [r.txpos(data_t).astype(_float) for r in datasets],
@@ -204,7 +216,7 @@ if __name__ == '__main__':
                                                                                   radar_coeff, rp.az_half_bw, rp.el_half_bw,
                                                                                   nsam, fc, near_range_s, fs,
                                                                                   num_bounces=num_bounces,
-                                                                                  debug=True, supersamples=supersamples)
+                                                                                  debug=True, supersamples=supersamples, frames=idx_t)
     single_pulse = [
         sum(
             upsamplePulse(
@@ -229,31 +241,7 @@ if __name__ == '__main__':
 
     dopp_freq = np.fft.fftshift(np.fft.fftfreq(npulses * dopp_upsample, 1 / prf))
 
-    pfig = go.Figure(
-        data=[go.Scatter3d(x=[rp.txpos(0)[0]], y=[rp.txpos(0)[1]], z=[rp.txpos(0)[2]], mode='markers')],
-        layout=go.Layout(
-            scene=dict(
-                xaxis=dict(range=[-3000, 3000]),
-                yaxis=dict(range=[-1000, 17000]),
-                zaxis=dict(range=[-1, launch_height + 10])
-            ),
-            updatemenus=[
-                dict(
-                    type="buttons",
-                    buttons=[dict(label="Play",
-                                  method="animate",
-                                  args=[None, {"frame": {"duration": 500, "redraw": True},
-                                               "fromcurrent": True,
-                                               "transition": {"duration": 300, "easing": "quadratic-in-out"}}]),
-                             dict(label="Pause",
-                                  method="animate",
-                                  args=[[None], {"frame": {"duration": 0, "redraw": False},
-                                                 "mode": "immediate",
-                                                 "transition": {"duration": 0}}])]
-                )
-            ]
-        )
-    )
+
 
     print('Running main loop...')
     # Get the data into CPU memory for later
@@ -261,6 +249,8 @@ if __name__ == '__main__':
     fig, ax = plt.subplots()
     ims = []
     for frame in tqdm(list(zip(*(iter(range(0, len(pulse_times), npulses)),)))):
+        if frame[0] + npulses > ocean.normals.shape[0]:
+            break
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         txposes = [r.txpos(ptimes).astype(_float) for r in datasets]
         rxposes = [r.rxpos(ptimes).astype(_float) for r in datasets]
@@ -268,7 +258,7 @@ if __name__ == '__main__':
         tilts = [r.tilt(ptimes).astype(_float) for r in datasets]
         trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                         radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
-                                        num_bounces=num_bounces, supersamples=supersamples)
+                                        num_bounces=num_bounces, supersamples=supersamples, frames=np.arange(frame[0], frame[0] + npulses))
         rx_pulse = [sum(10**(up_gain / 20) * (f * np.fft.fft(s, fft_len) + np.random.normal(0, noise_power * chirp_bandwidth, f.shape) +
                       1j * np.random.normal(0, noise_power * chirp_bandwidth, f.shape)) for s, f in zip(srp, fft_chirps)) for srp in trp]
         mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
@@ -277,15 +267,17 @@ if __name__ == '__main__':
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)'''
 
-        dopp_image = np.fft.fftshift(np.fft.fft(mf_pulses[0][0], npulses * dopp_upsample, axis=1), axes=1)
-        '''exp_ranges = np.linalg.norm(txposes[0], axis=1)
+        dopp_image = np.fft.fftshift(np.fft.fft(mf_pulses[0][0], npulses * dopp_upsample, axis=1), axes=1) * doppwin[None, :]
+        exp_ranges = np.linalg.norm(txposes[0], axis=1)
         bins = [int((2 * exp_ranges[0] / c0 - 2. * near_range_s) * fs), int((2 * exp_ranges[-1] / c0 - 2. * near_range_s) * fs)]
-        plot_image = dopp_image[min(bins)-12:max(bins)+12, :]'''
+        plot_image = dopp_image[min(bins)-12:max(bins)+12, :]
         # print(f'{frame}: {np.mean(abs(dopp_image))}')
         # dopp_image = np.fft.fftshift(np.fft.fft2(single_mf_pulse[0][0].T, (up_fft_len, 256)), axes=1)
-        '''plt.axis('tight')
-        im = ax.imshow(db(dopp_image), origin='lower', extent=(dopp_freq[0], dopp_freq[-1], ranges[-1], ranges[0]))
-        ims.append([im])'''
+        ax.set_title(f'Pulse {frame[0]}')
+        plt.axis('tight')
+        im = ax.imshow(db(dopp_image), origin='lower', extent=(dopp_freq[0], dopp_freq[-1], ranges[0], ranges[-1]))
+        title_text = ax.text(.5, 1.05, f'Pulse {frame[0]}', transform=ax.transAxes, ha='center', va='top')
+        ims.append([im, title_text])
 
         # Calculate out beampattern points
         az_beamlines = [min(rp.pan(ptimes) - rp.az_half_bw), max(rp.pan(ptimes) + rp.az_half_bw)]
@@ -294,19 +286,9 @@ if __name__ == '__main__':
         beamlines = azelToVec(az_beamlines, el_beamlines).T
         beampoints = np.roll(np.concatenate((beamlines * ground_ranges[0] + txposes[0][0, 0], beamlines * ground_ranges[-1] + txposes[0][0, 0])), axis=0, shift=1)
         bsights = rp._tx.boresight(ptimes).T
-        plt.clf()
-        plt.title(f'CPI {frame}')
-        plt.subplot(1, 2, 1)
-        plt.imshow(db(dopp_image), extent=(dopp_freq[0], dopp_freq[-1], ranges[-1], ranges[0]))
-        plt.axis('tight')
-        plt.subplot(1, 2, 2)
-        plt.xlim([-2000, 2000.])
-        plt.ylim([-1000, 14000.])
-        plt.scatter(txposes[0][:, 0], txposes[0][:, 1])
-        plt.scatter([0], [0])
-        plt.plot(beampoints[:, 0], beampoints[:, 1])
-        plt.draw()
-        plt.pause(.1)
+        # plt.title(f'CPI {frame}')
+        # plt.draw()
+        # plt.pause(.1)
 
 
     ani = anim.ArtistAnimation(fig, ims, interval=50, blit=True)
@@ -450,21 +432,96 @@ if __name__ == '__main__':
     kml.save('/home/jeff/repo/test.kml')'''
 
     px.scatter(x=np.fft.fftfreq(fft_len, 1 / fs), y=db(mf_chirp)).show()
+    omax = ocean.vertices.max(axis=(0, 1))
+    omin = ocean.vertices.min(axis=(0, 1))
+    txposes = rp.txpos(pulse_times[:32]).astype(_float)
+    bores = rp._tx.boresight(pulse_times[:32]).T
+    '''xrange = [min(omin[0], txposes[:, 0].min()) - 100, max(omax[0], txposes[:, 0].max()) + 100]
+    yrange = [min(omin[1], txposes[:, 1].min()) - 100, max(omax[1], txposes[:, 1].max()) + 100]
+    zrange = [min(omin[2], -10), txposes[:, 2].max() + 10]'''
+    xrange = [min(omin[0], txposes[:, 0].min()) - 15000, max(omax[0], txposes[:, 0].max()) + 15000]
+    yrange = [min(omin[1], txposes[:, 1].min()) - 15000, max(omax[1], txposes[:, 1].max()) + 15000]
+    zrange = [min(omin[2], -10) - 15000, txposes[:, 2].max() + 10]
+    scene_layout = dict(
+        xaxis=dict(range=xrange),
+        yaxis=dict(range=yrange),
+        zaxis=dict(range=zrange),
+        aspectratio=dict(x=(xrange[1] - xrange[0]) / (zrange[1] - zrange[0]),y=(yrange[1] - yrange[0]) / (zrange[1] - zrange[0]),z=1),
+    )
 
+    pfig = go.Figure(
+        data=[go.Cone(x=txposes[:, 0], y=txposes[:, 1], z=txposes[:, 2], u=bores[:, 0], v=bores[:, 1], w=bores[:, 2], showscale=False),
+              drawAntennaBox(txposes[0], rp.pan(pulse_times[0]) - rp.az_half_bw, rp.pan(pulse_times[0]) + rp.az_half_bw,
+                             rp.tilt(pulse_times[0]) - rp.el_half_bw, rp.tilt(pulse_times[0]) + rp.el_half_bw, 14000, 15000),
+              go.Mesh3d(
+            x=ocean.vertices[0, :, 0],
+            y=ocean.vertices[0, :, 1],
+            z=ocean.vertices[0, :, 2],
+            # i, j and k give the vertices of triangles
+            i=ocean.tri_idx[:, 0],
+            j=ocean.tri_idx[:, 1],
+            k=ocean.tri_idx[:, 2],
+                  facecolor=ocean.normals[0, :], showscale=False
+        )],
+        layout=go.Layout(
+            scene=scene_layout,
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    buttons=[dict(label="Play",
+                                  method="animate",
+                                  args=[None, {"frame": {"duration": 10, "redraw": True},
+                                               "fromcurrent": True,
+                                               "transition": {"duration": 6, "easing": "quadratic-in-out"}}]),
+                             dict(label="Pause",
+                                  method="animate",
+                                  args=[[None], {"frame": {"duration": 0, "redraw": False},
+                                                 "mode": "immediate",
+                                                 "transition": {"duration": 0}}])]
+                )
+            ],
+        )
+    )
+    pframes = []
+
+    # go.Cone(x=txposes[:, 0], y=txposes[:, 1], z=txposes[:, 2], u=bores[:, 0], v=bores[:, 1], w=bores[:, 2], showscale=False),
+
+    for frame in tqdm(list(zip(*(iter(range(0, len(pulse_times), npulses)),)))):
+        ptimes = pulse_times[frame[0]:frame[0] + npulses]
+        txposes = rp.txpos(ptimes).astype(_float)
+        bores = rp._tx.boresight(ptimes).T
+        heights = ocean.vertices[frame[0], ocean.tri_idx].mean(axis=1)[:, 2]
+        height_color = mplib.cm.ocean((heights - omin[2]) / (omax[2] - omin[2]))
+        pframes.append(go.Frame(data=[go.Cone(x=txposes[:, 0], y=txposes[:, 1], z=txposes[:, 2], u=bores[:, 0],
+                                              v=bores[:, 1], w=bores[:, 2], sizeref=1000, sizemode='raw', showscale=False),
+                                      drawAntennaBox(txposes[0], rp.pan(ptimes[0]) - rp.az_half_bw,
+                                                     rp.pan(ptimes[0]) + rp.az_half_bw,
+                                                     rp.tilt(ptimes[0]) - rp.el_half_bw,
+                                                     rp.tilt(ptimes[0]) + rp.el_half_bw, 14000, 15000),
+                                      go.Mesh3d(
+                                          x=ocean.vertices[frame[0], :, 0],
+                                          y=ocean.vertices[frame[0], :, 1],
+                                          z=ocean.vertices[frame[0], :, 2],
+                                          # i, j and k give the vertices of triangles
+                                          i=ocean.tri_idx[:, 0],
+                                          j=ocean.tri_idx[:, 1],
+                                          k=ocean.tri_idx[:, 2],
+                                          facecolor=height_color[:, :3], showscale=False
+                                      )
+                                      ], traces=[0, 1, 2],
+                                ))
+    pfig.update(frames=pframes)
+    pfig.show()
+
+    '''fig, ax = plt.subplots()
+    ocean_stack, xx, yy = genOceanBackground((100, 100), pulse_times, repetition_T=1000, S=2., u10=100.)
     plt.figure()
-    plt.imshow(db(single_rp[0][0]))
-    plt.axis('tight')
-
-    ocean_stack, xx, yy = genOceanBackground((10000, 10000), np.linspace(0, 100, 1000), repetition_T=1000, S=20., u10=100.,
-                                             rect_grid=True)
-
-    fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
 
     for o in ocean_stack:
-        ax.clear()
-        ax.set_zlim(-2., 40.)
-        ax.plot_surface(xx, yy, o, cmap=mplib.cm.ocean)
+        plt.clf()
+        plt.tricontourf(xx, yy, o)
+        plt.colorbar()
         # plt.clf()
         # plt.imshow(test.reshape(xx.shape))
         plt.draw()
-        plt.pause(.1)
+        plt.pause(.1)'''

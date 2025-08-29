@@ -120,7 +120,8 @@ def loadOBJ(fnme):
     return build_mesh, o, np.array(vertices), material_key
 
 
-target_meshes = glob('/home/jeff/Documents/target_meshes/*')
+# target_meshes = glob('/home/jeff/Documents/target_meshes/*')
+target_meshes = ['/home/jeff/Documents/target_meshes/frigate.obj']
 for f in tqdm(target_meshes):
     if f.endswith('.obj'):
         check = loadOBJ(f)

@@ -22,7 +22,7 @@ from sdrparse import load
 import matplotlib as mplib
 mplib.use('TkAgg')
 import pandas as pd
-from simulib.mesh_objects import Mesh, Scene, VTCMesh
+from simulib.mesh_objects import TriangleMesh, Scene, VTCMesh
 from simulib.mesh_functions import loadTarget
 from itertools import product
 from glob import glob
@@ -49,7 +49,8 @@ if __name__ == '__main__':
     upsample = 8
     exp_range = 500
     n_samples = 2**12
-    single_target = '/home/jeff/Documents/target_meshes/tacoma_VTC.dat'
+    # single_target = '/home/jeff/Documents/target_meshes/tacoma_VTC.dat'
+    single_target = '/home/jeff/Documents/target_meshes/frigate.targ'
 
     nposes = 8
     azes, eles = np.meshgrid(np.linspace(0, 2 * np.pi, nposes), np.linspace(-np.pi / 2, np.pi / 2, nposes))
@@ -87,8 +88,8 @@ if __name__ == '__main__':
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
     for target_fnme in targets:
-        # if target_fnme != single_target:
-        #     continue
+        if target_fnme != single_target:
+            continue
         print(target_fnme)
         scene = Scene()
         # Check if this is some VTC data and load the mesh data accordingly
@@ -110,7 +111,7 @@ if __name__ == '__main__':
             source_mesh = source_mesh.rotate(source_mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0]))).scale(target_scaling,
                                                                                                      center=source_mesh.get_center())
             source_mesh = source_mesh.translate(np.array([0, 0, 0.]), relative=False)
-            mesh = Mesh(
+            mesh = TriangleMesh(
                 source_mesh,
                 max_tris_per_split=64,
                 material_sigma=[mesh_materials[mtid][1] if mtid in mesh_materials.keys() else mesh_materials[0][1] for mtid in

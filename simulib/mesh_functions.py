@@ -170,7 +170,7 @@ def readVTC(filepath: str):
 def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: list[np.ndarray], rx_pos: list[np.ndarray],
                             pan: list[np.ndarray], tilt: list[np.ndarray], radar_equation_constant: float, bw_az: float,
                             bw_el: float, nsam: int, fc: float, near_range_s: float, fs: float = 2e9, num_bounces: int=3,
-                            debug: bool=False, supersamples: int = 4) -> tuple[list, list, list, list] | list:
+                            debug: bool=False, supersamples: int = 4, frames: np.ndarray = None) -> tuple[list, list, list, list] | list:
     # This is here because the single mesh function is more highly optimized for a single mesh and should therefore
     # be used.
     if len(scene.meshes) == 1:
@@ -208,11 +208,12 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
             sa_bins_gpu = cuda.device_array((npulses, nsam), dtype=_float)
             count_bins_gpu = cuda.device_array((npulses, nsam), dtype=np.int32)
             for mesh in scene.meshes:
-                if mesh.is_dynamic:
-                    continue
                 threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d(
-                    (mesh.tri_idx.shape[0], nsam))
-                tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
+                    (mesh.tri_idx.shape[-2], nsam))
+                if mesh.is_dynamic:
+                    tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[frames[0]][mesh.tri_idx]).astype(_float))
+                else:
+                    tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
                 calcBinTotalSurfaceArea[blocks_strided_sa, threads_strided_sa](receive_xyz_gpu, tri_verts_gpu,
                                                                                sa_bins_gpu, params_gpu)
             sa_bins_gpu.copy_to_host(sa)
@@ -234,21 +235,25 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
                         ray_bounce_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
                         ray_bounce_power_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
                         for mesh in scene.meshes:
-                            tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
-                            tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
-                            tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
-                            tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
-                            tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
 
                             # This is for optimization purposes
                             kd_tree_gpu = cuda.to_device(mesh.bvh.astype(_float))
+                            tri_material_gpu = cuda.to_device(mesh.materials.astype(_float))
+                            tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
+                            tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
                             if mesh.is_dynamic:
+                                tri_norm_gpu = cuda.to_device(mesh.normals[frames].astype(_float))
+                                tri_verts_gpu = cuda.to_device(
+                                    np.ascontiguousarray(mesh.vertices[frames][:, mesh.tri_idx]).astype(_float))
                                 dynamicSceneRayIntersections[blocks_strided, threads_strided, stream](
                                     transmit_xyz_gpu, ray_intersect_gpu, sample_points_gpu, ray_dir_gpu,
                                     ray_distance_gpu, ray_bounce_gpu,
                                     ray_bounce_power_gpu, az_gpu, el_gpu, kd_tree_gpu, tri_box_gpu, tri_box_key_gpu,
                                     tri_verts_gpu, tri_norm_gpu, tri_material_gpu, params_gpu)
                             else:
+                                tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
+                                tri_verts_gpu = cuda.to_device(
+                                    np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
                                 determineSceneRayIntersections[blocks_strided, threads_strided, stream](
                                     transmit_xyz_gpu, ray_intersect_gpu, sample_points_gpu, ray_dir_gpu,
                                     ray_distance_gpu, ray_bounce_gpu,
@@ -263,7 +268,7 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
                                                                                  az_gpu, el_gpu, params_gpu)
                         if debug:
                             debug_rays.append(ray_intersect_gpu.copy_to_host(stream=stream))
-                            debug_raydirs.append(ray_dir_gpu.copy_to_host(stream=stream))
+                            debug_raydirs.append(ray_bounce_gpu.copy_to_host(stream=stream))
                             debug_raypower.append(ray_bounce_power_gpu.copy_to_host(stream=stream))
                 pd_r_gpu.copy_to_host(pdr_tmp)
                 pd_i_gpu.copy_to_host(pdi_tmp)
@@ -609,7 +614,7 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
             tri_verts = mesh.vertices[0, mesh.tri_idx[tris]] if mesh.is_dynamic else mesh.vertices[mesh.tri_idx[tris]]
             points.append(np.sum(tri_verts[tri_select] * bary_coords[:, :, None], axis=1))
     points = np.concatenate(points)[:npoints]
-    rd = points[None, :, :] - a_obs_pt[:, None, :]
+    '''rd = points[None, :, :] - a_obs_pt[:, None, :]
     rd = rd / np.linalg.norm(rd, axis=2)[..., None]
     ray_intersects = np.zeros_like(rd)
     mesh = scene.meshes[0]
@@ -634,12 +639,12 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
                                                                     tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu,
                                                                     tri_norm_gpu)
     points = ri_gpu.copy_to_host()[np.random.choice(a_obs_pt.shape[0], npoints), np.arange(npoints), :]
-    del obs_gpu, rd_gpu, ri_gpu, tri_norm_gpu, tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu, tri_box_gpu, kd_tree_gpu
+    del obs_gpu, rd_gpu, ri_gpu, tri_norm_gpu, tri_box_key_gpu, tri_verts_gpu, tri_idxes_gpu, tri_box_gpu, kd_tree_gpu'''
 
     return points
 
 
-def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds: np.ndarray, bounding_box: np.ndarray):
+def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds: np.ndarray, bounding_box: np.ndarray, n_ax_split: int = 3):
     best_score = np.inf
     best_split = (bounding_box[0, 0] + bounding_box[1, 0]) / 2
     best_bounds = [np.stack((np.array([best_split, bounding_box[0, 1], bounding_box[0, 2]]), bounding_box[1]), axis=0),
@@ -654,7 +659,7 @@ def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds
                 np.diff(bounding_box, axis=0)[0], 2
             )
         )
-        for ax in range(3):
+        for ax in range(n_ax_split):
             # 13 chosen based on empirical data from a ray-tracing book
             ax_poss_splits = np.linspace(bounding_box[0, ax], bounding_box[1, ax], 13)[1:-1]
             ax_poss_splits = np.concatenate((ax_poss_splits, [medes[ax]]))
@@ -699,7 +704,7 @@ def surfaceAreaHeuristic(tri_area: np.ndarray, centroids: np.ndarray, tri_bounds
 
 
 
-def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_box: int = 64):
+def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_box: int = 64, n_ax_split: int = 3):
     """
     Builds a KD-tree for a set of triangles within a bounding box, partitioning the space to optimize spatial queries.
 
@@ -711,6 +716,7 @@ def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_b
         bounding_box (np.ndarray): The initial bounding box for the KD-tree, shaped (2, 3).
         points (np.ndarray, optional): An array of triangle vertices, shaped (N, 3, 3).
         min_tri_per_box (int, optional): Minimum number of triangles per box before stopping further splits.
+        n_ax_split (int, optional): Number of axes on which to split. If 2, only splits on x/y axis
 
     Returns:
         tuple: A tuple containing the array of bounding boxes for each node and the assignment of triangles to boxes.
@@ -762,7 +768,7 @@ def genKDTree(bounding_box: np.ndarray, points: np.ndarray = None, min_tri_per_b
         for idx in range(level, next_level):
             act_pts = vidx == idx
             ntree_bounds[(idx - level) * 2], ntree_bounds[(idx - level) * 2 + 1], sp_pt, sp_axis = (
-                surfaceAreaHeuristic(tri_area[act_pts], centroids[act_pts], tri_bounds[act_pts], tree_bounds[idx]))
+                surfaceAreaHeuristic(tri_area[act_pts], centroids[act_pts], tri_bounds[act_pts], tree_bounds[idx], n_ax_split=n_ax_split))
             lefties = np.logical_and(sp_pt < verts[:, sp_axis], vidx == idx)
             righties = np.logical_and(sp_pt >= verts[:, sp_axis], vidx == idx)
             vidx[lefties] = idx * 2 + 1
@@ -813,40 +819,42 @@ def getSceneFig(scene, triangle_colors=None, title='Title Goes Here', zrange=Non
     # Get for first mesh
     if zrange is None:
         zrange = [-30, 100]
+        vertices = scene.meshes[0].vertices[0] if scene.meshes[0].is_dynamic else scene.meshes[0].vertices
     fig = go.Figure(data=[
         go.Mesh3d(
-            x=scene.meshes[0].vertices[:, 0],
-            y=scene.meshes[0].vertices[:, 1],
-            z=scene.meshes[0].vertices[:, 2],
+            x=vertices[:, 0],
+            y=vertices[:, 1],
+            z=vertices[:, 2],
             # i, j and k give the vertices of triangles
             i=scene.meshes[0].tri_idx[:, 0],
             j=scene.meshes[0].tri_idx[:, 1],
             k=scene.meshes[0].tri_idx[:, 2],
-            facecolor=triangle_colors if triangle_colors is not None else scene.meshes[0].normals,
+            facecolor=triangle_colors if triangle_colors is not None else scene.meshes[0].normals[0] if scene.meshes[0].is_dynamic else scene.meshes[0].normals,
             showscale=True
         )
     ])
     for m in scene.meshes[1:]:
+        vertices = m.vertices[0] if m.is_dynamic else m.vertices
         fig.add_trace(go.Mesh3d(
-                x=m.vertices[:, 0],
-                y=m.vertices[:, 1],
-                z=m.vertices[:, 2],
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
                 # i, j and k give the vertices of triangles
                 i=m.tri_idx[:, 0],
                 j=m.tri_idx[:, 1],
                 k=m.tri_idx[:, 2],
-                facecolor=triangle_colors if triangle_colors is not None else m.normals,
+                facecolor=triangle_colors if triangle_colors is not None else m.normals[0] if m.is_dynamic else m.normals,
                 showscale=True
             ))
     maxis = [
-        max(m.vertices[:, 0].max() for m in scene.meshes),
-        max(m.vertices[:, 1].max() for m in scene.meshes),
-        max(m.vertices[:, 2].max() for m in scene.meshes),
+        max(m.vertices[..., 0].max() for m in scene.meshes),
+        max(m.vertices[..., 1].max() for m in scene.meshes),
+        max(m.vertices[..., 2].max() for m in scene.meshes),
     ]
     mixis = [
-        min(m.vertices[:, 0].min() for m in scene.meshes),
-        min(m.vertices[:, 1].min() for m in scene.meshes),
-        min(m.vertices[:, 2].min() for m in scene.meshes),
+        min(m.vertices[..., 0].min() for m in scene.meshes),
+        min(m.vertices[..., 1].min() for m in scene.meshes),
+        min(m.vertices[..., 2].min() for m in scene.meshes),
     ]
     fig.update_layout(
         title=title,
@@ -877,8 +885,52 @@ def drawOctreeBox(box):
     return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
 
 
+def drawLineBox(vertices):
+    '''
+    left bottom lower
+    right bottom lower
+    right bottom upper
+    right bottom lower
+    right top lower
+    right top upper
+    right top lower
+    left top lower
+    left top upper
+    left top lower
+    left bottom lower
+    left bottom upper
+    right bottom upper
+    right bottom lower
+    right bottom upper
+    right top upper
+    right top lower
+    right top upper
+    left top upper
+    left top lower
+    left top upper
+    left bottom upper
+    '''
+    return go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode='lines')
+
+
+def drawAntennaBox(pos, az_min, az_max, el_min, el_max, range_min, range_max):
+    left_bottom_lower = azelToVec(az_min, el_min) * range_min + pos
+    left_bottom_upper = azelToVec(az_min, el_max) * range_min + pos
+    right_bottom_lower = azelToVec(az_max, el_min) * range_min + pos
+    right_bottom_upper = azelToVec(az_max, el_max) * range_min + pos
+    left_top_lower = azelToVec(az_min, el_min) * range_max + pos
+    left_top_upper = azelToVec(az_min, el_max) * range_max + pos
+    right_top_lower = azelToVec(az_max, el_min) * range_max + pos
+    right_top_upper = azelToVec(az_max, el_max) * range_max + pos
+    vertices = np.stack([left_bottom_lower, right_bottom_lower, right_bottom_upper, right_bottom_lower, right_top_lower,
+   right_top_upper, right_top_lower,  left_top_lower,  left_top_upper,  left_top_lower,  left_bottom_lower,
+    left_bottom_upper, right_bottom_upper, right_bottom_lower, right_bottom_upper, right_top_upper, right_top_lower,
+   right_top_upper, left_top_upper, left_top_lower, left_top_upper, left_bottom_upper,])
+    return drawLineBox(vertices)
+
+
 def genOceanBackground(bg_ext: tuple[float, float], a_times: np.ndarray, fft_grid_sz: tuple[int, int] = (32, 32),
-                       S: float = 2., u10: float = 5., repetition_T: float = 10., numsides: int = 6,
+                       S: float = 2., u10: float = 5., repetition_T: float = 10., numsides: int = 6, numrings: int = 5,
                        interp_method: str = 'linear', rect_grid: bool = False):
     """Generates a time-varying ocean surface background over a hexagonal or rectangular grid.
 
@@ -904,7 +956,7 @@ def genOceanBackground(bg_ext: tuple[float, float], a_times: np.ndarray, fft_gri
     xhex = [center[0]]
     yhex = [center[1]]
     extent = bg_ext[0] / 2 * numsides * .99
-    for idx, perimeter in enumerate(np.linspace(0, extent, 5)[1:]):
+    for idx, perimeter in enumerate(np.linspace(0, extent, numrings)[1:]):
 
         n = (idx + 1) * numsides  # number of perimeter-interpolated points
 
@@ -942,8 +994,7 @@ def genOceanBackground(bg_ext: tuple[float, float], a_times: np.ndarray, fft_gri
         zo = 1 / np.sqrt(2) * bg[0] * np.exp(-1j * bg[1] * t)
         bg = np.real(np.fft.ifft2(np.fft.fftshift(zo))) * rand_vec[0].shape[0] * rand_vec[0].shape[1] / 10
         o = interpn((np.linspace(0, bg_ext[0], rand_vec[0].shape[0]), np.linspace(0, bg_ext[1], rand_vec[0].shape[1])),
-                    bg, bgpts,
-                    method=interp_method)
+                    bg, bgpts, method=interp_method)
         if rect_grid:
             ostack.append(griddata((xhex, yhex), o, (xi[None, :], yi[:, None]), method=interp_method))
         else:
@@ -952,10 +1003,7 @@ def genOceanBackground(bg_ext: tuple[float, float], a_times: np.ndarray, fft_gri
     ostack = np.stack(ostack)
     ostack = ostack / abs(ostack).max() * u10**2 / GRAVITIC_CONSTANT
 
-    if rect_grid:
-        return ostack, xx, yy
-    else:
-        return ostack, xhex, yhex
+    return (ostack, xx, yy) if rect_grid else (ostack, xhex, yhex)
 
 
 def wavefunction(sz, npts=(64, 64), rand_vecs=None, T=10., S=2., u10=10.):

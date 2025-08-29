@@ -158,16 +158,38 @@ class OceanMesh(BaseMesh):
         super().__init__(center, mesh_tri_idx, mesh_vertices, mesh_normals, vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int),
                  [1e6], [.0001])
 
-        self.set_bounding_box(np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices]), 0)
+        self.set_bounding_box(np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices]), 64)
         self.is_dynamic = True
 
     def set_bounding_box(self, a_box_source, max_tris_per_split):
-        bbox = np.stack([np.min(a_box_source, axis=(0, 1)), np.max(a_box_source, axis=(0, 1))])
-        self.bvh = bbox.reshape((1, 2, 3)).astype(_float)
+        root_box = np.stack([np.min(a_box_source, axis=(0, 1)), np.max(a_box_source, axis=(0, 1))])
+        mesh_tri_vertices = self.vertices[0, self.tri_idx]
+        # Generate octree and associate triangles with boxes
+        tree_bounds, mesh_box_idx = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split, n_ax_split=2)
+        num_box_levels = int(np.log2(tree_bounds.shape[0]) + 1)
+
+        meshx, meshy = np.where(mesh_box_idx)
+        alltri_idxes = np.array([[a, b] for a, b in zip(meshy, meshx)])
+        sorted_tri_idx = alltri_idxes[np.argsort(alltri_idxes[:, 0])]
+        sorted_tri_idx = sorted_tri_idx[sorted_tri_idx[:, 0] >= sum(2 ** n for n in range(num_box_levels - 1))]
+        box_num, start_idxes = np.unique(sorted_tri_idx[:, 0], return_index=True)
+        mesh_extent = np.diff(start_idxes, append=[sorted_tri_idx.shape[0]])
+        mesh_idx_key = np.zeros((tree_bounds.shape[0], 3)).astype(int)
+        mesh_idx_key[box_num, 0] = start_idxes
+        mesh_idx_key[box_num, 1] = mesh_extent
+
+        self.bvh = tree_bounds.astype(_float)
+        self.bounding_box = root_box.astype(_float)
+        self.leaf_list = sorted_tri_idx[:, 1].astype(np.int32)
+        self.leaf_key = mesh_idx_key.astype(np.int32)
+        self.bvh_levels = num_box_levels
+        '''self.bvh = np.stack([bbox, bbox, bbox]).astype(_float)
         self.bounding_box = bbox.astype(_float)
-        self.leaf_list = np.arange(self.tri_idx.shape[0]).astype(np.int32)
-        self.leaf_key = np.array([[0, self.tri_idx.shape[0], 0]]).astype(np.int32)
-        self.bvh_levels = 1
+        self.leaf_list = np.concatenate((np.arange(self.tri_idx.shape[0]), np.arange(self.tri_idx.shape[0]), np.arange(self.tri_idx.shape[0]))).astype(np.int32)
+        self.leaf_key = np.array([[0, self.tri_idx.shape[0], 0],
+                                  [self.tri_idx.shape[0], self.tri_idx.shape[0], 0],
+                                  [self.tri_idx.shape[0] * 2, self.tri_idx.shape[0], 0]]).astype(np.int32)
+        self.bvh_levels = 2'''
 
 
 
