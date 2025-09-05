@@ -341,7 +341,7 @@ class RadarPlatform(Platform):
             nrange, frange = self.calcRanges(height)
         else:
             nrange = ranges[0]
-        MPP = c0 / self.fs / upsample
+        MPP = c0 / self.fs / upsample / 2
         return nrange + np.arange(self.calcNumSamples(height, plp, ranges) * upsample) * MPP + c0 / self.fs
 
     def getRadarParams(self, fdelay, plp, upsample=1, a_ranges=None):

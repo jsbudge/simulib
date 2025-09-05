@@ -50,7 +50,7 @@ if __name__ == '__main__':
     exp_range = 500
     n_samples = 2**12
     # single_target = '/home/jeff/Documents/target_meshes/tacoma_VTC.dat'
-    single_target = '/home/jeff/Documents/target_meshes/frigate.targ'
+    single_target = '/home/jeff/Documents/target_meshes/hangar.targ'
 
     nposes = 8
     azes, eles = np.meshgrid(np.linspace(0, 2 * np.pi, nposes), np.linspace(-np.pi / 2, np.pi / 2, nposes))
@@ -88,8 +88,8 @@ if __name__ == '__main__':
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
     for target_fnme in targets:
-        if target_fnme != single_target:
-            continue
+        # if target_fnme != single_target:
+        #     continue
         print(target_fnme)
         scene = Scene()
         # Check if this is some VTC data and load the mesh data accordingly
@@ -129,16 +129,15 @@ if __name__ == '__main__':
         with open(model_name, 'rb') as f:
             scene = pickle.load(f)
         print('Sampling mesh...', end='')
-        sample_points = [scene.sample(n_samples, a_obs_pts=poses[::16])]
+        sample_points = [scene.sample(n_samples, a_obs_pts=poses[::16]).astype(_float)]
 
-        streams = [cuda.stream()]
         rpfig = go.Figure()
         mfig = go.Figure()
         pfig = go.Figure()
 
         # Single pulse for debugging
         print('Generating single pulse...', end='')
-        single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points[0].astype(_float),
+        single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
                                                                                       [poses.astype(_float)],
                                                                                       [poses.astype(_float)],
                                                                                       [pans.astype(_float)],
@@ -147,11 +146,11 @@ if __name__ == '__main__':
                                                                                       np.pi / 4, np.pi / 4,
                                                                                       nsam, fc, near_range_s, fs,
                                                                                       num_bounces=1,
-                                                                                      debug=True, streams=streams, use_supersampling=True)
-        single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0], fft_len), fft_len, upsample,
+                                                                                      debug=True, supersamples=0)
+        single_pulse = upsamplePulse(fft_chirp * np.fft.fft(single_rp[0][0], fft_len, axis=1), fft_len, upsample,
                                      is_freq=True, time_len=nsam)
         single_mf_pulse = upsamplePulse(
-            addNoise(single_rp[0], fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample,
+            addNoise(single_rp[0][0], fft_chirp, noise_power, mf_chirp, fft_len), fft_len, upsample,
             is_freq=True, time_len=nsam)
 
         # rpfig.add_scatter(y=db(single_rp[0][0].flatten()), mode='markers')
@@ -167,9 +166,9 @@ if __name__ == '__main__':
             for idx, (ro, rd, nrp) in enumerate(
                     zip(ray_origins[:bounce + 1], ray_directions[:bounce + 1], ray_powers[:bounce + 1])):
                 valids = nrp[pulse_idx] > 0.
-                sc = (1 + nrp[pulse_idx, valids] / nrp[pulse_idx, valids].max()) * 10
+                sc = (.1 + nrp[pulse_idx, valids] / nrp[pulse_idx, valids].max())
                 fig.add_trace(go.Cone(x=ro[pulse_idx, valids, 0], y=ro[pulse_idx, valids, 1], z=ro[pulse_idx, valids, 2], u=rd[pulse_idx, valids, 0] * sc,
-                                      v=rd[pulse_idx, valids, 1] * sc, w=rd[pulse_idx, valids, 2] * sc, anchor='tail', sizeref=80,
+                                      v=rd[pulse_idx, valids, 1] * sc, w=rd[pulse_idx, valids, 2] * sc, anchor='tail', sizemode='raw',
                                       colorscale=[[0, bounce_colors[idx]], [1, bounce_colors[idx]]]))
 
             fig.show()
@@ -188,26 +187,26 @@ if __name__ == '__main__':
         rgba_colors = cmap(norm(tri_materials))
 
 
-        '''fig = getSceneFig(scene, triangle_colors=rgba_colors[:, :3], title='Depth', zrange=zranges)
+        fig = getSceneFig(scene, triangle_colors=rgba_colors[:, :3], title='Depth', zrange=zranges)
 
         for mesh in scene.meshes:
             d = mesh.bvh_levels - 1
             for b in mesh.bvh[sum(2 ** n for n in range(d)):sum(2 ** n for n in range(d + 1))]:
                 if np.sum(b) != 0:
                     fig.add_trace(drawOctreeBox(b))
-        fig.show()'''
-
-        fig = getSceneFig(scene, title='Depth', zrange=zranges)
-        fig.add_scatter3d(x=sample_points[0][:, 0], y=sample_points[0][:, 1], z=sample_points[0][:, 2], mode='markers')
         fig.show()
+
+        # fig = getSceneFig(scene, title='Depth', zrange=zranges)
+        #fig.add_scatter3d(x=sample_points[0][:, 0], y=sample_points[0][:, 1], z=sample_points[0][:, 2], mode='markers')
+        # fig.show()
         # rpfig.show()
-        mfig.show()
+        '''mfig.show()
         # pfig.show()
 
         plt.figure()
         plt.imshow(db(single_mf_pulse))
         plt.axis('tight')
-        print('Done.')
+        print('Done.')'''
 
 
 

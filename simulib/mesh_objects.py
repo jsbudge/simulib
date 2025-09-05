@@ -156,7 +156,7 @@ class OceanMesh(BaseMesh):
             vertex_normals[:, vidx, :] = mesh_normals[:, np.any(mesh_tri_idx == vidx, axis=1)].mean(axis=1)
 
         super().__init__(center, mesh_tri_idx, mesh_vertices, mesh_normals, vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int),
-                 [1e6], [.0001])
+                 [1e2], [.0001])
 
         self.set_bounding_box(np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices]), 64)
         self.is_dynamic = True

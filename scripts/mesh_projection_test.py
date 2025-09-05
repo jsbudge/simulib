@@ -10,7 +10,7 @@ from simulib.grid_helper import SDREnvironment
 from simulib.backproject_functions import getRadarAndEnvironment, backprojectPulseStream
 from simulib.simulation_functions import db, genChirp, upsamplePulse, llh2enu, genTaylorWindow, enu2llh, getRadarCoeff, \
     azelToVec
-from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, _float, getRangeProfileFromScene, \
+from simulib.mesh_functions import readCombineMeshFile, getRangeProfileFromMesh, getRangeProfileFromScene, \
     getMeshFig, getSceneFig, drawOctreeBox, loadTarget, loadMesh
 from tqdm import tqdm
 import numpy as np
@@ -19,17 +19,13 @@ import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
 from sdrparse import load
+from simulib.utils import c0, _float, _complex_float
 import matplotlib as mplib
 import pickle
 mplib.use('TkAgg')
-from simulib.mesh_objects import Mesh, Scene
+from simulib.mesh_objects import TriangleMesh, Scene
 
 pio.renderers.default = 'browser'
-
-c0 = 299792458.0
-TAC = 125e6
-DTR = np.pi / 180
-
 
 def addNoise(range_profile, a_chirp, npower, mf, a_fft_len):
     data = a_chirp * np.fft.fft(range_profile, a_fft_len)
@@ -89,7 +85,7 @@ if __name__ == '__main__':
 
     print('Loading mesh...', end='')
     # mesh = o3d.geometry.TriangleMesh()
-    scene = Scene()
+    # scene = Scene()
     # mesh_ids = []
 
     '''mesh = readCombineMeshFile('/home/jeff/Documents/roman_facade/scene.gltf', points=3000000)
@@ -104,10 +100,10 @@ if __name__ == '__main__':
         )
     )'''
 
-    # with open('/home/jeff/repo/apache/data/target_meshes/Humvee.model', 'rb') as f:
-    #     scene = pickle.load(f)
+    with open('/home/jeff/repo/apache/data/target_meshes/ram1500trx2021.model', 'rb') as f:
+        scene = pickle.load(f)
 
-    mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
+    '''mesh, mesh_materials = loadTarget('/home/jeff/Documents/roman_facade/scene.targ')
     # mesh = mesh.rotate(mesh.get_rotation_matrix_from_xyz(np.array([np.pi / 2, 0, 0])))
     # mesh = mesh.translate(llh2enu(*grid_origin, bg.ref), relative=False)
     scene.add(
@@ -119,7 +115,7 @@ if __name__ == '__main__':
             material_emissivity=[mesh_materials[mtid][1] for mtid in
                                  range(np.asarray(mesh.triangle_material_ids).max() + 1)],
         )
-    )
+    )'''
     scene.shift(llh2enu(*grid_origin, bg.ref))
     # scene.rotate(np.array([np.pi / 2, 0, 0]))
     # scene.recalcKDTree(max_tris_per_split)
@@ -308,8 +304,8 @@ if __name__ == '__main__':
     taytay = genTaylorWindow(fc % fs, chirp_bandwidth / 2, fs, fft_len)
     mf_chirp = taytay / fft_chirp
     secmf_chirp = taytay / sec_fft_chirp
-    fft_chirps = [fft_chirp, sec_fft_chirp]
-    mf_chirps = [mf_chirp, secmf_chirp]
+    fft_chirps = [fft_chirp]
+    mf_chirps = [mf_chirp]
 
 
     # Load in boxes and meshes for speedup of ray tracing
@@ -342,7 +338,7 @@ if __name__ == '__main__':
     pulse_lims = [max(min(min(max_pts), min(min_pts)) - 1000, 0), min(max(max(max_pts), max(min_pts)) + 1000,
                                                                       sdr_f[0].frame_num[-1])]
     streams = [cuda.stream() for _ in range(nstreams)]
-    datasets = [rp, rp1]
+    datasets = [rp]
 
     # Single pulse for debugging
     print('Generating single pulse...')
@@ -354,7 +350,7 @@ if __name__ == '__main__':
                                                                                   radar_coeff, rp.az_half_bw, rp.el_half_bw,
                                                                                   nsam, fc, near_range_s, fs,
                                                                                   num_bounces=num_bounces,
-                                                                                  debug=True, streams=streams,
+                                                                                  debug=True,
                                                                                   supersamples=supersamples)
     single_pulse = [
         sum(
@@ -376,8 +372,8 @@ if __name__ == '__main__':
         ]
         for srp in single_rp
     ]
-    bpj_grid = np.zeros_like(gx).astype(np.complex64)
-    bpj2 = np.zeros_like(gx).astype(np.complex64)
+    bpj_grid = np.zeros_like(gx).astype(_complex_float)
+    bpj2 = np.zeros_like(gx).astype(_complex_float)
 
     print('Running main loop...')
     # Get the data into CPU memory for later
@@ -393,7 +389,7 @@ if __name__ == '__main__':
         tilts = [r.tilt(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
         trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                         radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
-                                        num_bounces=num_bounces, streams=streams, supersamples=supersamples)
+                                        num_bounces=num_bounces, supersamples=supersamples)
         rx_pulse = [
             sum(
                     f * np.fft.fft(s, fft_len)
@@ -402,13 +398,13 @@ if __name__ == '__main__':
             for srp in trp
         ]
         mf_pulses = [[np.ascontiguousarray(upsamplePulse(rpulse * mf, fft_len, upsample, is_freq=True,
-            time_len=nsam).T, dtype=np.complex64) for rpulse in rx_pulse] for mf in mf_chirps]
+            time_len=nsam).T, dtype=_complex_float) for rpulse in rx_pulse] for mf in mf_chirps]
         bpj_grid += backprojectPulseStream(mf_pulses[0], [pans[0]], [rxposes[0]], [txposes[0]], gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
                                             gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
-        bpj2 += backprojectPulseStream(mf_pulses[1], [pans[1]], [rxposes[0]], [txposes[1]], gz.astype(_float),
+        '''bpj2 += backprojectPulseStream(mf_pulses[1], [pans[1]], [rxposes[0]], [txposes[1]], gz.astype(_float),
                                             c0 / fc, near_range_s, fs * upsample, rp.az_half_bw,
-                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)
+                                            gx=gx.astype(_float), gy=gy.astype(_float), streams=streams)'''
         '''torch_data.append(trp[0])
         torch_pos.append(txposes[0])
         torch_pans.append(pans[0])

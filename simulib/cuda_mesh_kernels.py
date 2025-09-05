@@ -55,8 +55,6 @@ def calcReturnAndBin(inter, re, rng, near_range_s, source_fs, n_samples,
     rng_bin = int(((rng + r_rng) * c0_inv - _float(2.) * near_range_s) * source_fs)
 
     if n_samples > rng_bin > 0:
-        # acc_val = (applyOneWayRadiationPattern(r_el, r_az, pan, tilt, bw_az, bw_el) /
-        #            (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng)))
         return (applyOneWayRadiationPattern(-math.asin(t.z / rng), math.atan2(t.x, t.y), pan, tilt, bw_az, bw_el) /
                    (r_rng * r_rng) * rho * cmath.exp(-1j * wavenumber * (rng + r_rng))), rng_bin
 
@@ -613,10 +611,11 @@ def dynamicSceneRayIntersections(receive_xyz, ray_intersect, sample_points, ray_
         for ray_idx in prange(r, ray_dir.shape[1], ray_stride):
             rd = normalize(
                 make_float3(sample_points[ray_idx, 0], sample_points[ray_idx, 1], sample_points[ray_idx, 2]) - rec_xyz)
-            rho = (params[5] *
+            rho = params[5]
+            '''rho = (params[5] *
                    applyOneWayRadiationPattern(pan[tt], tilt[tt],
                                                math.atan2(rd.x, rd.y), -math.asin(rd.z),
-                                               params[3], params[4]))
+                                               params[3], params[4]))'''
             # rd = make_float3(ray_dir[tt, ray_idx, 0], ray_dir[tt, ray_idx, 1], ray_dir[tt, ray_idx, 2])
             did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd,
                                                                              kd_tree, rho,

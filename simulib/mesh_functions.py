@@ -282,8 +282,7 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
         for c in counts:
             c[c == 0.] += 1
         final_rp = [[s * (i + 1j * j) / n for i, j in zip(pr, pi)] for pr, pi, s, n in zip(pd_r, pd_i, sa_bins, counts)]
-        # final_rp = [sa_bins[0] * (sum(pd_r) + 1j * sum(pd_i)) / final_count]
-        # final_rp = [pr + 1j * pi for pr, pi in zip(pd_r, pd_i)]
+        # final_rp = [[i + 1j * j for i, j in zip(pr, pi)] for pr, pi in zip(pd_r, pd_i)]
         if debug:
             return final_rp, debug_rays, debug_raydirs, debug_raypower
         else:
@@ -584,7 +583,7 @@ def detectPointsScene(scene, npoints: int, a_obs_pt: np.ndarray):
         np.ndarray: An array of sampled points from the mesh surface.
     """
     points = []
-    volume_share = [np.prod(np.diff(mesh.bounding_box, axis=0)) for mesh in scene.meshes]
+    volume_share = [np.sqrt(np.prod(np.diff(mesh.bounding_box, axis=0))) for mesh in scene.meshes]
     volume_share = np.array([int(v / sum(volume_share) * npoints) for v in volume_share])
     while sum(volume_share) < npoints:
         volume_share[volume_share == volume_share.min()] += 1
@@ -819,7 +818,7 @@ def getSceneFig(scene, triangle_colors=None, title='Title Goes Here', zrange=Non
     # Get for first mesh
     if zrange is None:
         zrange = [-30, 100]
-        vertices = scene.meshes[0].vertices[0] if scene.meshes[0].is_dynamic else scene.meshes[0].vertices
+    vertices = scene.meshes[0].vertices[0] if scene.meshes[0].is_dynamic else scene.meshes[0].vertices
     fig = go.Figure(data=[
         go.Mesh3d(
             x=vertices[:, 0],
@@ -987,14 +986,17 @@ def genOceanBackground(bg_ext: tuple[float, float], a_times: np.ndarray, fft_gri
 
     # Get random points for the surface spatial frequency representation
     rand_vec = (np.random.randn(*fft_grid_sz), np.random.randn(*fft_grid_sz))
+    zhat, omega = wavefunction(bg_ext, npts=rand_vec[0].shape, rand_vecs=rand_vec, T=repetition_T, S=S, u10=u10)
+    zhat = np.fft.fftshift(1 * zhat / np.sqrt(2))
+    omega = np.fft.fftshift(omega)
+
+    hex_lattice = (np.linspace(0, bg_ext[0], rand_vec[0].shape[0]), np.linspace(0, bg_ext[1], rand_vec[0].shape[1]))
 
     ostack = []
     for t in a_times:
-        bg = wavefunction(bg_ext, npts=rand_vec[0].shape, rand_vecs=rand_vec, T=repetition_T, S=S, u10=u10)
-        zo = 1 / np.sqrt(2) * bg[0] * np.exp(-1j * bg[1] * t)
-        bg = np.real(np.fft.ifft2(np.fft.fftshift(zo))) * rand_vec[0].shape[0] * rand_vec[0].shape[1] / 10
-        o = interpn((np.linspace(0, bg_ext[0], rand_vec[0].shape[0]), np.linspace(0, bg_ext[1], rand_vec[0].shape[1])),
-                    bg, bgpts, method=interp_method)
+        zo = zhat * np.exp(-1j * omega * t)
+        bg = np.real(np.fft.ifft2(zo)) * rand_vec[0].shape[0] * rand_vec[0].shape[1] / repetition_T
+        o = interpn(hex_lattice, bg, bgpts, method=interp_method)
         if rect_grid:
             ostack.append(griddata((xhex, yhex), o, (xi[None, :], yi[:, None]), method=interp_method))
         else:

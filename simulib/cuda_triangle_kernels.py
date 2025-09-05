@@ -201,7 +201,7 @@ def calcTriangleBinSurfaceArea(transmit_xyz, tri_verts, tri_idxes, triangle_rang
                 triangle_bin_surface_area[tri_idx, b] = sa
 
 
-@cuda.jit(max_registers=40)
+@cuda.jit(max_registers=128)
 def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, sa_bins, params):
     tri, pulse = cuda.grid(ndim=2)
     tri_stride, pulse_stride = cuda.gridsize(2)
@@ -212,24 +212,16 @@ def calcBinTotalSurfaceArea(transmit_xyz, tri_verts, sa_bins, params):
         for t in prange(pulse, transmit_xyz.shape[0], pulse_stride):
             tx = make_float3(transmit_xyz[t, 0], transmit_xyz[t, 1], transmit_xyz[t, 2])
             rmin = min(length(tx - p2), length(tx - p0), length(tx - p1))
-            '''rmin = length(tx - p2)
-            rmax = length(tx - p0)
-            if rmin > rmax:
-                rmin = rmax
-                rmax = length(tx - p2)
-            if length(tx - p1) > rmax:
-                rmax = length(tx - p1)
-            elif length(tx - p1) < rmin:
-                rmin = length(tx - p1)'''
             rmax = max(length(tx - p2), length(tx - p0), length(tx - p1))
             if rmin > params[1] * c0:
                 first_bin = int(((_float(2.) * rmin) * c0_inv - _float(2.) * params[1]) * params[2])
-            if _float(0.) <= first_bin < sa_bins.shape[1]:
+            if 0 <= first_bin < sa_bins.shape[1]:
                 nbins = int(((_float(2.) * rmax) * c0_inv - _float(2.) * params[1]) * params[2] + _float(1.)) - first_bin
                 for b in prange(first_bin, first_bin + nbins, 1):
                     if b < sa_bins.shape[1]:
                         R = (b / params[2] + _float(2.) * params[1]) * c0_half
                         sa, _ = calcTriangleSurfaceArea(tx, p0, p1, p2, R, R + (_float(1.) / params[2]) * c0_half)
+                        # sa = R
                         cuda.atomic.add(sa_bins, (t, b), sa if not math.isnan(sa) else 0.)
 
 
