@@ -211,7 +211,7 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
                 threads_strided_sa, blocks_strided_sa = optimizeStridedThreadBlocks2d(
                     (mesh.tri_idx.shape[-2], nsam))
                 if mesh.is_dynamic:
-                    tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[frames[0]][mesh.tri_idx]).astype(_float))
+                    tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[0, mesh.tri_idx]).astype(_float))
                 else:
                     tri_verts_gpu = cuda.to_device(np.ascontiguousarray(mesh.vertices[mesh.tri_idx]).astype(_float))
                 calcBinTotalSurfaceArea[blocks_strided_sa, threads_strided_sa](receive_xyz_gpu, tri_verts_gpu,
@@ -242,9 +242,9 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
                             tri_box_gpu = cuda.to_device(mesh.leaf_list.astype(np.int32))
                             tri_box_key_gpu = cuda.to_device(mesh.leaf_key.astype(np.int32))
                             if mesh.is_dynamic:
-                                tri_norm_gpu = cuda.to_device(mesh.normals[frames].astype(_float))
+                                tri_norm_gpu = cuda.to_device(mesh.normals.astype(_float))
                                 tri_verts_gpu = cuda.to_device(
-                                    np.ascontiguousarray(mesh.vertices[frames][:, mesh.tri_idx]).astype(_float))
+                                    np.ascontiguousarray(mesh.vertices[:, mesh.tri_idx]).astype(_float))
                                 dynamicSceneRayIntersections[blocks_strided, threads_strided, stream](
                                     transmit_xyz_gpu, ray_intersect_gpu, sample_points_gpu, ray_dir_gpu,
                                     ray_distance_gpu, ray_bounce_gpu,

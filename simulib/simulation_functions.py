@@ -229,6 +229,21 @@ def genChirp(nnr, nfs, nfc, bandw):
 def rotate(az, nel, rot_mat):
     return rot.from_euler('zx', [[-az, 0.], [0., nel - np.pi / 2]]).apply(rot_mat)
 
+def rotation_z(r):
+    return np.array([[np.cos(r), -np.sin(r), 0],
+                     [np.sin(r), np.cos(r), 0],
+                     [0, 0, 1.]])
+
+def rotation_y(r):
+    return np.array([[np.cos(r), 0, np.sin(r)],
+                     [0, 1., 0],
+                     [-np.sin(r), 0, np.cos(r)]])
+
+def rotation_x(r):
+    return np.array([[1, 0, 0.],
+                     [0, np.cos(r), -np.sin(r)],
+                     [0, np.sin(r), np.cos(r)]])
+
 
 def azelToVec(az, el):
     return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
@@ -481,6 +496,17 @@ def window_taylor(N, nbar=4, sll=-30):
     scale = W((N - 1) / 2)
     w /= scale
     return w
+
+
+def atmospheric_gamma(f, P, wv, T):
+    from itur.models.itu676 import gammaw_exact, gamma0_exact
+    return gamma0_exact(f, P, wv, T).value, gammaw_exact(f, P, wv, T).value
+
+
+def slant_path_atmospheric_attenuation(gamma0, gammaw, f, el_ang):
+    h0 = 6
+    hw = 1.6 * (1 + 3 / ((f - 22.2)**2 + 5) + 5 / ((f - 183.3)**2 + 6) + 2.5 / ((f - 325.4)**2 + 4))
+    return (h0 * gamma0 + hw * gammaw) / np.sin(el_ang)
 
 
 def antennaGain(N, wN, Nsub, wNsub, Nel, wNel, a, b, d, lamda):

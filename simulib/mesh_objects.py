@@ -1,7 +1,10 @@
 from functools import cached_property, singledispatch
 import open3d as o3d
 import numpy as np
-from .mesh_functions import detectPointsScene, genKDTree, _float, readVTC
+from .mesh_functions import detectPointsScene, genKDTree, _float, readVTC, wavefunction
+from .utils import GRAVITIC_CONSTANT
+from scipy.interpolate import interpn
+from scipy.spatial import Delaunay
 from sklearn.cluster import AgglomerativeClustering
 
 
@@ -136,34 +139,30 @@ class VTCMesh(BaseMesh):
 
 class OceanMesh(BaseMesh):
 
-    def __init__(self, center, mesh_tri_idx, mesh_heights, mesh_x, mesh_y):
+    def __init__(self, bg_ext, fft_grid_sz, S: float = 2., u10: float = 10., repetition_T: float = 1000.,
+                 numsides: int = 6, numrings: int = 30):
+        self.calc_wavefunction(bg_ext, fft_grid_sz, S, u10, repetition_T, numsides, numrings)
+        tri_ = Delaunay(self.bgpts)
+        mesh_tri_idx = tri_.simplices
         # Get the sampled ocean points into something we can use
-        mesh_vertices = np.stack([np.array([mesh_x, mesh_y, m]).T for m in mesh_heights])
-
-        # Run through all the time triangles and get normals for the vertices
-        mesh_tri_vertices = mesh_vertices[:, mesh_tri_idx]
-        e0 = mesh_tri_vertices[:, :, 1] - mesh_tri_vertices[:, :, 0]
-        e1 = mesh_tri_vertices[:, :, 2] - mesh_tri_vertices[:, :, 0]
-        mesh_normals = np.cross(e0, e1)
-        mesh_normals = mesh_normals / np.linalg.norm(mesh_normals, axis=2)[..., None]
-
-        # Make sure all normals point upwards, since the simulated ocean never has breaking waves
-        mesh_normals[mesh_normals[:, :, 2] < 0.] = -mesh_normals[mesh_normals[:, :, 2] < 0.]
-
+        mesh_vertices = np.stack([np.concatenate((self.bgpts, np.zeros((self.bgpts.shape[0], 1))), axis=1) for _ in range(32)])
+        mesh_normals = np.ones((*mesh_tri_idx.shape, 3))
         vertex_normals = np.zeros_like(mesh_vertices)
-        for vidx in range(vertex_normals.shape[1]):
-            # Get all triangles associated with this vertex
-            vertex_normals[:, vidx, :] = mesh_normals[:, np.any(mesh_tri_idx == vidx, axis=1)].mean(axis=1)
 
-        super().__init__(center, mesh_tri_idx, mesh_vertices, mesh_normals, vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int),
-                 [1e2], [.0001])
+        super().__init__(np.array([bg_ext[0] / 2, bg_ext[1] / 2, 0]), mesh_tri_idx, mesh_vertices, mesh_normals,
+                         vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int), [1e2], [.0001])
 
-        self.set_bounding_box(np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices]), 64)
+        bboxes = np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices])
+        bboxes[:, 0, 2] = -u10**2 / GRAVITIC_CONSTANT
+        bboxes[:, 1, 2] = u10 ** 2 / GRAVITIC_CONSTANT
+
+        self.set_bounding_box(bboxes, 64)
         self.is_dynamic = True
 
     def set_bounding_box(self, a_box_source, max_tris_per_split):
         root_box = np.stack([np.min(a_box_source, axis=(0, 1)), np.max(a_box_source, axis=(0, 1))])
         mesh_tri_vertices = self.vertices[0, self.tri_idx]
+
         # Generate octree and associate triangles with boxes
         tree_bounds, mesh_box_idx = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split, n_ax_split=2)
         num_box_levels = int(np.log2(tree_bounds.shape[0]) + 1)
@@ -183,13 +182,70 @@ class OceanMesh(BaseMesh):
         self.leaf_list = sorted_tri_idx[:, 1].astype(np.int32)
         self.leaf_key = mesh_idx_key.astype(np.int32)
         self.bvh_levels = num_box_levels
-        '''self.bvh = np.stack([bbox, bbox, bbox]).astype(_float)
-        self.bounding_box = bbox.astype(_float)
-        self.leaf_list = np.concatenate((np.arange(self.tri_idx.shape[0]), np.arange(self.tri_idx.shape[0]), np.arange(self.tri_idx.shape[0]))).astype(np.int32)
-        self.leaf_key = np.array([[0, self.tri_idx.shape[0], 0],
-                                  [self.tri_idx.shape[0], self.tri_idx.shape[0], 0],
-                                  [self.tri_idx.shape[0] * 2, self.tri_idx.shape[0], 0]]).astype(np.int32)
-        self.bvh_levels = 2'''
+
+    def calc_wavefunction(self, bg_ext: tuple[float, float], fft_grid_sz: tuple[int, int] = (32, 32),
+                       S: float = 2., u10: float = 5., repetition_T: float = 10., numsides: int = 6, numrings: int = 5,
+                       ):
+        center = [bg_ext[0] / 2, bg_ext[1] / 2]
+        xhex = [center[0]]
+        yhex = [center[1]]
+        extent = bg_ext[0] / 2 * numsides * .99
+        for idx, perimeter in enumerate(np.linspace(0, extent, numrings)[1:]):
+
+            n = (idx + 1) * numsides  # number of perimeter-interpolated points
+
+            # Main polygon
+            radius = perimeter / (2 * numsides * np.sin(np.pi / numsides))
+            start = 0.5 / numsides  # or just 0
+            z = radius * np.exp(2j * np.pi * (np.linspace(0, 1, numsides, endpoint=False) + start))
+            # x, y = z.real, z.imag
+
+            # Added interpolated points
+            zp = np.zeros(n, dtype=complex)
+            for p in range(n):
+                r = p * numsides / n  # rescaled index
+                i = int(r)
+                f = r - i  # integer and fractional part
+                iplus1 = i + 1 if i < numsides - 1 else 0  # end point
+                zp[p] = z[i] + f * (z[iplus1] - z[i])  # interpolate from vertices
+            xp, yp = zp.real, zp.imag
+            xhex = np.concatenate((xhex, xp + center[0]))
+            yhex = np.concatenate((yhex, yp + center[1]))
+
+        self.bgpts = np.array([xhex, yhex]).T
+        self.center_bgpts = self.bgpts - np.array([bg_ext[0] / 2, bg_ext[1] / 2])
+
+        # Get random points for the surface spatial frequency representation
+        rand_vec = (np.random.randn(*fft_grid_sz), np.random.randn(*fft_grid_sz))
+        zhat, omega = wavefunction(bg_ext, npts=rand_vec[0].shape, rand_vecs=rand_vec, T=repetition_T, S=S, u10=u10)
+        self.zhat = np.fft.fftshift(1 * zhat / np.sqrt(2))
+        self.omega = np.fft.fftshift(omega)
+        self.hex_lattice = (np.linspace(0, bg_ext[0], rand_vec[0].shape[0]), np.linspace(0, bg_ext[1], rand_vec[0].shape[1]))
+        self.rand_vec = rand_vec
+        self.T = repetition_T
+
+    def gen_waves(self, a_times, interp_method: str = 'linear'):
+        ostack = []
+        for t in a_times:
+            zo = self.zhat * np.exp(-1j * self.omega * t)
+            bg = np.real(np.fft.ifft2(zo)) * self.rand_vec[0].shape[0] * self.rand_vec[0].shape[1] / self.T
+            ostack.append(interpn(self.hex_lattice, bg, self.bgpts, method=interp_method))
+
+        self.vertices = np.stack([np.concatenate((self.center_bgpts + self.center[:2], o.reshape(-1, 1)), axis=1) for o in ostack])  #np.stack(ostack)
+        # Run through all the time triangles and get normals for the vertices
+        mesh_tri_vertices = self.vertices[:, self.tri_idx]
+        e0 = mesh_tri_vertices[:, :, 1] - mesh_tri_vertices[:, :, 0]
+        e1 = mesh_tri_vertices[:, :, 2] - mesh_tri_vertices[:, :, 0]
+        mesh_normals = np.cross(e0, e1)
+        self.normals = mesh_normals / np.linalg.norm(mesh_normals, axis=2)[..., None]
+
+        # Make sure all normals point upwards, since the simulated ocean never has breaking waves
+        self.normals[mesh_normals[:, :, 2] < 0.] = -self.normals[mesh_normals[:, :, 2] < 0.]
+
+        self.vertex_normals = np.zeros_like(self.vertices)
+        for vidx in range(self.vertex_normals.shape[1]):
+            # Get all triangles associated with this vertex
+            self.vertex_normals[:, vidx, :] = self.normals[:, np.any(self.tri_idx == vidx, axis=1)].mean(axis=1)
 
 
 

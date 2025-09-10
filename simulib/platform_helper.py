@@ -5,6 +5,8 @@ from typing import Type
 from .simulation_functions import llh2enu
 from functools import singledispatch
 
+from .utils import GRAVITIC_CONSTANT
+
 c0 = 299792458.0
 TAC = 125e6
 DTR = np.pi / 180
@@ -233,6 +235,8 @@ class RadarPlatform(Platform):
                  az_bw: float = 10.,
                  el_bw: float = 10.,
                  fs: float = 2e9,
+                 fc: float = 9.6e9,
+                 prf: float = 1200.,
                  gps_t: np.ndarray = None,
                  gps_az: np.ndarray = None,
                  gps_rxpos: np.ndarray = None,
@@ -240,6 +244,7 @@ class RadarPlatform(Platform):
                  tx_num: int = 0,
                  rx_num: int = 0,
                  wavenumber: int = 0,
+                 bwidth: float = 0.,
                  *args,
                  **kwargs):
 
@@ -280,6 +285,9 @@ class RadarPlatform(Platform):
         self.az_half_bw = az_bw * DTR / 2
         self.el_half_bw = el_bw * DTR / 2
         self.fs = fs
+        self.prf = prf
+        self.fc = fc
+        self.bwidth = bwidth
         self.near_range_angle = self.dep_ang + self.el_half_bw
         self.far_range_angle = self.dep_ang - self.el_half_bw
         self.rx_num = rx_num
@@ -372,6 +380,34 @@ class RadarPlatform(Platform):
         fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True, nrange=a_ranges[0] if a_ranges is not None else None)))))
         up_fft_len = fft_len * upsample
         return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
+
+    def calcPRF(self, vel, prf_broadening: float = 1.5):
+        return prf_broadening * 2 * vel * np.sin(self.az_half_bw) * (self.fc + self.bwidth / 2) / c0
+
+    def calcRadVelRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        """
+        Calculate the radial velocity resolution for this collect.
+        :param cpi_len: int. Length of CPI in number of pulses.
+        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal value.
+        :return: Radial velocity resolution in meters per second.
+        """
+        return dopplerBroadeningFactor * c0 * self.prf / (self.fc * cpi_len)
+
+    def calcDopRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        """
+        Calculate the Doppler resolution for this collect.
+        :param cpi_len: int. Length of CPI in number of pulses.
+        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal value.
+        :return: Doppler resolution in Hz.
+        """
+        return dopplerBroadeningFactor * self.prf / cpi_len
+
+    def calcWrapVel(self):
+        """
+        Calculate the wrap velocity for this collect.
+        :return: Wrap velocity in meters per second.
+        """
+        return self.prf * (c0 / self.fc) / 4.0
 
 
 """
@@ -515,6 +551,7 @@ class SDRPlatform(RadarPlatform):
         :return: Wrap velocity in meters per second.
         """
         return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
+
 
 
 class Antenna:
@@ -690,3 +727,42 @@ def getPhaseCenterInertialCorrection(rotBtoMG, pan, tilt, yaw, pitch, roll, ant_
     totDelta_b = antDelta_b + gimbal_offset
     # return the inertial correction
     return bodyToInertial(yaw, pitch, roll, totDelta_b[0], totDelta_b[1], totDelta_b[2])
+
+
+def createFlightPath(knot_points, init_pos, init_vel, launch_speed, roll_max, delta_t):
+
+    # Build the gps profile for the missile
+    gps_vel = [init_vel]
+    gps_pos = [init_pos]
+    gps_att = [np.array([0., -np.arcsin(init_vel[2]), np.arctan2(init_vel[0], init_vel[1])])]
+    omega_max = GRAVITIC_CONSTANT * np.sqrt((1 / np.cos(roll_max)**2 - 1)) / launch_speed
+
+    for knot in knot_points:
+        tvec = knot - gps_pos[-1]
+        while np.linalg.norm(tvec) > 10.:
+            uvec = tvec / np.linalg.norm(tvec)
+            turn_axis = np.cross(gps_vel[-1], uvec)
+            turn_angle = np.clip(np.arctan2(np.linalg.norm(np.cross(gps_vel[-1], uvec)), np.dot(gps_vel[-1], uvec)),
+                                 -omega_max * delta_t, omega_max * delta_t)
+
+            skew_sym_cross = np.array([[0, -turn_axis[2], turn_axis[1]],
+                                       [turn_axis[2], 0, -turn_axis[0]],
+                                       [-turn_axis[1], turn_axis[0], 0]])
+            rotation_matrix = np.eye(3) + np.sin(turn_angle) * skew_sym_cross + np.dot(skew_sym_cross, skew_sym_cross) * (
+                    1 - np.cos(turn_angle))
+            gps_vel.append(np.dot(rotation_matrix, gps_vel[-1]))
+            gps_pos.append(gps_vel[-1] * delta_t * launch_speed + gps_pos[-1])
+
+            # Calculate attitude
+            phi_roll = np.arccos(np.sqrt(1 / ((turn_angle * launch_speed / GRAVITIC_CONSTANT)**2 + 1)))
+            alpha_yaw = np.arctan2(gps_vel[-1][0], gps_vel[-1][1])
+            theta_pitch = -np.arcsin(gps_vel[-1][2])
+            gps_att.append(np.array([phi_roll, theta_pitch, alpha_yaw]))
+            tvec = knot - gps_pos[-1]
+    gps_pos = np.array(gps_pos)
+    gps_att = np.array(gps_att)
+    gps_vel = np.array(gps_vel) * launch_speed * delta_t
+
+    r, p, y = gps_att.T
+    e, n, u = gps_pos.T
+    return e, n, u, r, p, y
