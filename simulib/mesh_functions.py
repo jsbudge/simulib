@@ -230,7 +230,7 @@ def getRangeProfileFromScene(scene, sampled_points: list[np.ndarray], tx_pos: li
                     with cuda.pinned(pts):
                         sample_points_gpu = cuda.to_device(pts, stream=stream)
                         ray_dir_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
-                        ray_distance_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)
+                        ray_distance_gpu = cuda.to_device(np.zeros((npulses, npoints)).astype(_float), stream=stream)
                         ray_intersect_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
                         ray_bounce_gpu = cuda.device_array((npulses, npoints, 3), dtype=_float, stream=stream)
                         ray_bounce_power_gpu = cuda.device_array((npulses, npoints), dtype=_float, stream=stream)

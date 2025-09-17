@@ -139,17 +139,17 @@ class VTCMesh(BaseMesh):
 
 class OceanMesh(BaseMesh):
 
-    def __init__(self, bg_ext, fft_grid_sz, S: float = 2., u10: float = 10., repetition_T: float = 1000.,
+    def __init__(self, bg_ext, fft_grid_sz, cpi_len: int = 64, S: float = 2., u10: float = 10., repetition_T: float = 1000.,
                  numsides: int = 6, numrings: int = 30):
-        self.calc_wavefunction(bg_ext, fft_grid_sz, S, u10, repetition_T, numsides, numrings)
-        tri_ = Delaunay(self.bgpts)
+        bgpts = self.calc_wavefunction(bg_ext, fft_grid_sz, S, u10, repetition_T, numsides, numrings)
+        tri_ = Delaunay(bgpts)
         mesh_tri_idx = tri_.simplices
         # Get the sampled ocean points into something we can use
-        mesh_vertices = np.stack([np.concatenate((self.bgpts, np.zeros((self.bgpts.shape[0], 1))), axis=1) for _ in range(32)])
+        mesh_vertices = np.stack([np.concatenate((bgpts, np.zeros((bgpts.shape[0], 1))), axis=1) for _ in range(cpi_len)])
         mesh_normals = np.ones((*mesh_tri_idx.shape, 3))
         vertex_normals = np.zeros_like(mesh_vertices)
 
-        super().__init__(np.array([bg_ext[0] / 2, bg_ext[1] / 2, 0]), mesh_tri_idx, mesh_vertices, mesh_normals,
+        super().__init__(np.array([0, 0., 0]), mesh_tri_idx, mesh_vertices, mesh_normals,
                          vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int), [1e2], [.0001])
 
         bboxes = np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices])
@@ -165,6 +165,10 @@ class OceanMesh(BaseMesh):
 
         # Generate octree and associate triangles with boxes
         tree_bounds, mesh_box_idx = genKDTree(root_box, mesh_tri_vertices, max_tris_per_split, n_ax_split=2)
+
+        # Since the deeper levels all have heights of zero, we have to set these based on the root box
+        tree_bounds[:, 0, 2] = tree_bounds[0, 0, 2]
+        tree_bounds[:, 1, 2] = tree_bounds[0, 1, 2]
         num_box_levels = int(np.log2(tree_bounds.shape[0]) + 1)
 
         meshx, meshy = np.where(mesh_box_idx)
@@ -212,26 +216,27 @@ class OceanMesh(BaseMesh):
             xhex = np.concatenate((xhex, xp + center[0]))
             yhex = np.concatenate((yhex, yp + center[1]))
 
-        self.bgpts = np.array([xhex, yhex]).T
-        self.center_bgpts = self.bgpts - np.array([bg_ext[0] / 2, bg_ext[1] / 2])
-
         # Get random points for the surface spatial frequency representation
         rand_vec = (np.random.randn(*fft_grid_sz), np.random.randn(*fft_grid_sz))
         zhat, omega = wavefunction(bg_ext, npts=rand_vec[0].shape, rand_vecs=rand_vec, T=repetition_T, S=S, u10=u10)
         self.zhat = np.fft.fftshift(1 * zhat / np.sqrt(2))
         self.omega = np.fft.fftshift(omega)
-        self.hex_lattice = (np.linspace(0, bg_ext[0], rand_vec[0].shape[0]), np.linspace(0, bg_ext[1], rand_vec[0].shape[1]))
+        self.hex_lattice = (np.linspace(-bg_ext[0] / 2, bg_ext[0] / 2, rand_vec[0].shape[0]),
+                            np.linspace(-bg_ext[1] / 2, bg_ext[1] / 2, rand_vec[0].shape[1]))
         self.rand_vec = rand_vec
         self.T = repetition_T
+        return np.array([xhex, yhex]).T - np.array([bg_ext[0] / 2, bg_ext[1] / 2])
 
     def gen_waves(self, a_times, interp_method: str = 'linear'):
-        ostack = []
-        for t in a_times:
+        for n, t in enumerate(a_times):
             zo = self.zhat * np.exp(-1j * self.omega * t)
             bg = np.real(np.fft.ifft2(zo)) * self.rand_vec[0].shape[0] * self.rand_vec[0].shape[1] / self.T
-            ostack.append(interpn(self.hex_lattice, bg, self.bgpts, method=interp_method))
+            self.vertices[n, :, 2] = interpn(self.hex_lattice, bg, self.vertices[n, :, :2], method=interp_method)
 
-        self.vertices = np.stack([np.concatenate((self.center_bgpts + self.center[:2], o.reshape(-1, 1)), axis=1) for o in ostack])  #np.stack(ostack)
+        # Since the deeper levels all have heights of zero, we have to set these based on the highest wave
+        self.bvh[:, 0, 2] = self.vertices.min(axis=(0, 1))[2]
+        self.bvh[:, 1, 2] = self.vertices.max(axis=(0, 1))[2]
+
         # Run through all the time triangles and get normals for the vertices
         mesh_tri_vertices = self.vertices[:, self.tri_idx]
         e0 = mesh_tri_vertices[:, :, 1] - mesh_tri_vertices[:, :, 0]

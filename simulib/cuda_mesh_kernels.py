@@ -584,7 +584,7 @@ def determineSceneRayIntersections(receive_xyz, ray_intersect, sample_points, ra
             did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd,
                                                                              kd_tree, rho,
                                                                              leaf_list, leaf_key,
-                                                                             tri_vert, tri_norm, tri_material, 0,
+                                                                             tri_vert, tri_norm, tri_material, ray_distance[tt, ray_idx],
                                                                              params[0])
             if did_intersect:
                 ray_intersect[tt, ray_idx, 0] = inter.x
@@ -620,7 +620,7 @@ def dynamicSceneRayIntersections(receive_xyz, ray_intersect, sample_points, ray_
             did_intersect, nrho, inter, rng, b = traverseOctreeAndReflection(rec_xyz, rd,
                                                                              kd_tree, rho,
                                                                              leaf_list, leaf_key,
-                                                                             tri_vert[tt], tri_norm[tt], tri_material, 0,
+                                                                             tri_vert[tt], tri_norm[tt], tri_material, ray_distance[tt, ray_idx],
                                                                              params[0])
             if did_intersect:
                 ray_intersect[tt, ray_idx, 0] = inter.x

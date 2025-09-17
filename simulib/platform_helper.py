@@ -754,7 +754,7 @@ def createFlightPath(knot_points, init_pos, init_vel, launch_speed, roll_max, de
             gps_pos.append(gps_vel[-1] * delta_t * launch_speed + gps_pos[-1])
 
             # Calculate attitude
-            phi_roll = np.arccos(np.sqrt(1 / ((turn_angle * launch_speed / GRAVITIC_CONSTANT)**2 + 1)))
+            phi_roll = np.arctan2(rotation_matrix[0, 1], rotation_matrix[0, 0])
             alpha_yaw = np.arctan2(gps_vel[-1][0], gps_vel[-1][1])
             theta_pitch = -np.arcsin(gps_vel[-1][2])
             gps_att.append(np.array([phi_roll, theta_pitch, alpha_yaw]))
