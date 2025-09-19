@@ -15,6 +15,7 @@ TAC = 125e6
 fs = 2e9
 DTR = np.pi / 180
 GRAVITIC_CONSTANT = 9.80665
+MAX_DISTANCE = 1e6
 
 
 if __name__ == '__main__':

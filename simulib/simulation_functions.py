@@ -1,6 +1,4 @@
-from io import BytesIO
 import numpy as np
-import requests
 from scipy.interpolate import interpn
 from scipy.spatial.transform import Rotation as rot
 from itertools import product
@@ -11,7 +9,6 @@ import plotly.io as pio
 import os
 from functools import reduce
 from dted import Tile, LatLon
-from PIL import Image
 from importlib import resources as impresources
 from simulib import geoids
 
@@ -800,104 +797,6 @@ def applyPulseCorrections(
         ampBias * np.exp(1j * (omegaK * timeDelayS + residualPhase))
 
     return fixedRef, corrections
-
-
-GECOEFF = 156543.03392
-TILE_SIZE = 256
-
-
-def getGoogleMap(lat, lon, mpp, im_width=10, im_height=10):
-    zoomlevel = int(np.log2(GECOEFF * np.cos(lat * np.pi / 180.) / mpp))
-    gmpp = GECOEFF * np.cos(lat * np.pi / 180.) / (2 ** zoomlevel)
-
-    # Use a left shift to get the power of 2
-    # i.e. a zoom level of 2 will have 2^2 = 4 tiles
-    scale = 1 << zoomlevel
-
-    # Convert the latitude to radians and take the sine
-    sy = np.sin(lat * np.pi / 180.0)
-    world_x = TILE_SIZE * (.5 + lon / 360.)
-    world_y = TILE_SIZE * (.5 - np.log((1 + sy) / (1 - sy)) / (4 * np.pi))
-
-    pixel_x = np.floor(world_x * scale)
-    pixel_y = np.floor(world_y * scale)
-
-    corner_x = np.floor(pixel_x - (im_height / 2) / gmpp)
-    corner_y = np.floor(pixel_y - (im_height / 2) / gmpp)
-
-    tile_x = corner_x // TILE_SIZE
-    tile_y = corner_y // TILE_SIZE
-
-    start_x = int(tile_x)
-    start_y = int(tile_y)
-    pix_shift_x = int((corner_x / TILE_SIZE - start_x) * TILE_SIZE)
-    pix_shift_y = int((corner_y / TILE_SIZE - start_y) * TILE_SIZE)
-
-    tile_width = int(np.ceil((im_width / gmpp) / TILE_SIZE)) + 1
-    tile_height = int(np.ceil((im_height / gmpp) / TILE_SIZE)) + 1
-    im_shift_x = int(im_width / gmpp)
-    im_shift_y = int(im_height / gmpp)
-
-    # Determine the size of the image in pixels
-    width, height = TILE_SIZE * tile_width, TILE_SIZE * tile_height
-
-    # Create a new image of the size require
-    map_img = Image.new('RGB', (width, height))
-
-    for x, y in product(range(tile_width), range(tile_height)):
-        url = f'https://mt1.google.com/vt?lyrs=s&x={start_x + x}&y={start_y + y}&z={zoomlevel}'
-
-        response = requests.get(url=url, headers={'User-Agent': 'Mozilla/5.0'})
-
-        im = Image.open(BytesIO(response.content))
-        map_img.paste(im, (x * TILE_SIZE, y * TILE_SIZE))
-
-    map_img = map_img.crop((pix_shift_x, pix_shift_y, pix_shift_x + im_shift_x, pix_shift_y + im_shift_y))
-
-    return map_img
-
-
-def resampleGoogleMap(lats, lons, mpp):
-    center_lat = (lats.max() + lats.min()) / 2
-    center_lon = (lons.max() + lons.min()) / 2
-    zoomlevel = int(np.log2(GECOEFF * np.cos(center_lat * np.pi / 180.) / mpp))
-    gmpp = GECOEFF * np.cos(center_lat * np.pi / 180.) / (2 ** zoomlevel)
-
-    # Use a left shift to get the power of 2
-    # i.e. a zoom level of 2 will have 2^2 = 4 tiles
-    scale = 1 << zoomlevel
-
-    box_coords = np.array([lats, lons]).T
-    pix_coords = np.zeros_like(box_coords)
-    sy = np.sin(box_coords[:, 0] * np.pi / 180.0)
-    pix_coords[:, 0] = np.floor(TILE_SIZE * (.5 + box_coords[:, 1] / 360.) * scale)
-    pix_coords[:, 1] = np.floor(TILE_SIZE * (.5 - np.log((1 + sy) / (1 - sy)) / (4 * np.pi)) * scale)
-
-    tile_coords = pix_coords // TILE_SIZE
-
-    start_x = int(tile_coords[:, 0].min())
-    start_y = int(tile_coords[:, 1].min())
-
-    tile_width = int(tile_coords[:, 0].max() - tile_coords[:, 0].min()) + 1
-    tile_height = int(tile_coords[:, 1].max() - tile_coords[:, 1].min()) + 1
-
-    # Determine the size of the image in pixels
-    width, height = TILE_SIZE * tile_width, TILE_SIZE * tile_height
-
-    # Create a new image of the size require
-    map_img = Image.new('RGB', (width, height))
-
-    for x, y in product(range(tile_width), range(tile_height)):
-        url = f'https://mt1.google.com/vt?lyrs=s&x={start_x + x}&y={start_y + y}&z={zoomlevel}'
-        response = requests.get(url=url, headers={'User-Agent': 'Mozilla/5.0'})
-
-        im = Image.open(BytesIO(response.content))
-        map_img.paste(im, (x * TILE_SIZE, y * TILE_SIZE))
-
-    # Get interpolated values from image for lat/lons
-    im_x = pix_coords[:, 0] - start_x * TILE_SIZE
-    im_y = pix_coords[:, 1] - start_y * TILE_SIZE
-    return map_img, im_x, im_y
 
 
 def upsamplePulse(p, fft_len, upsample, is_freq=False, out_freq=False, time_len=0):

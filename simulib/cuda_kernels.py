@@ -227,7 +227,7 @@ def genRangeProfile(gx, gy, vgz, vert_reflectivity,
             cuda.syncthreads()
 
 
-@cuda.jit('void(float32[:, :], float32[:, :], float32[:, :], float32[:, :], float32[:, :], float32[:], complex64[:, :], complex64[:, :], float32, float32, float32, float32, int32)')
+@cuda.jit()
 def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, pulse_data, final_grid, wavelength, near_range_s,
                 source_fs, bw_az, poly):
     """
@@ -294,9 +294,7 @@ def backproject(source_xyz, receive_xyz, gx, gy, gz, panrx, pulse_data, final_gr
             final_grid[pcol, prow] = acc_val
 
 
-@cuda.jit('void(float64[:, :], float64[:, :], float64[:, :], float64[:, :], float64[:], '
-          'float64[:], float64[:], float64[:], complex128[:, :], complex128[:, :], float64, float64, float64, float64, '
-          'float64, int32)')
+@cuda.jit()
 def backprojectRegularGrid(source_xyz, receive_xyz, transform, gz, panrx, elrx, pantx, eltx, pulse_data, final_grid,
                 wavelength, near_range_s, source_fs, bw_az, bw_el, poly):
     """

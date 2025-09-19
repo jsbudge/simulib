@@ -291,7 +291,7 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_v
     occlusion_only: bool = set to True to return when the ray intersects something without checking any other triangles
     """
 
-    int_rng = np.inf
+    int_rng = rng + _float(0.0)
     did_intersect = False
     inter = None
     if not testIntersection(ro, rd, kd_tree[0]):
@@ -322,7 +322,7 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_v
                         tmp_rng = length(ro - tinter)
                         if _float(1.) < tmp_rng < int_rng:
                             int_rng = tmp_rng
-                            inv_rng = _float(1.) / (tmp_rng + rng)
+                            inv_rng = _float(1.) / (tmp_rng + tmp_rng)
                             b = tb + _float(0.)
                             # Some parts of the Fresnel coefficient calculation
                             cosa = abs(dot(rd, tn))
@@ -354,7 +354,7 @@ def traverseOctreeAndReflection(ro, rd, kd_tree, rho, leaf_list, leaf_key, tri_v
                 break
             idx -= 1
         skip = False
-    return did_intersect, nrho, inter, int_rng + rng, b
+    return did_intersect, nrho, inter, int_rng, b
 
 
 @cuda.jit(max_registers=MAX_REGISTERS)
