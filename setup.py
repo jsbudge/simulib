@@ -12,7 +12,7 @@ setup(
    author_email='jbudge@artemisinc.net',
    url="http://www.foopackage.example/",
    packages=find_packages(),  #same as name
-   install_requires=['numpy', 'scipy', 'numba', 'open3d', 'tqdm', 'plotly', 'matplotlib', 'sdrparse'], #external packages as dependencies
+   install_requires=['numpy', 'scipy', 'tqdm', 'plotly', 'matplotlib'], #external packages as dependencies
    package_dir={'simulib': 'simulib'},
    package_data={'simulib': ['geoids/*.DAT']},
    include_package_data=True,
