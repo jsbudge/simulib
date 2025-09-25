@@ -9,8 +9,6 @@ import plotly.io as pio
 import os
 from functools import reduce
 from dted import Tile, LatLon
-from importlib import resources as impresources
-from simulib import geoids
 
 pio.renderers.default = 'browser'
 
@@ -61,8 +59,8 @@ def findPowerOf2(x):
 
 
 def undulationEGM96(lat, lon):
-    inp_file = (impresources.files(geoids) / 'EGM96.DAT')
-    with inp_file.open("rb") as f:  # or "rt" as text file with universal newlines
+    inp_file = './simulib/simulib/geoids/EGM96.DAT'
+    with open(inp_file, "rb") as f:  # or "rt" as text file with universal newlines
         egm96 = np.fromfile(f, 'double', 1441 * 721, '')
     eg_n = np.ceil(lat / .25) * .25
     eg_s = np.floor(lat / .25) * .25

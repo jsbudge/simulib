@@ -4,14 +4,7 @@ from scipy.ndimage import median_filter
 from typing import Type
 from .simulation_functions import llh2enu
 from functools import singledispatch
-
-from .utils import GRAVITIC_CONSTANT
-
-c0 = 299792458.0
-TAC = 125e6
-DTR = np.pi / 180
-inch_to_m = .0254
-INS_REFRESH_HZ = 100
+from .utils import GRAVITIC_CONSTANT, c0, TAC, DTR, INS_REFRESH_HZ
 SDRBase = Type
 
 """
@@ -143,12 +136,12 @@ class Platform(object):
         return self._gimbal_offset
 
     @property
-    def pan(self):
-        return self._tx.pan
+    def az_iner(self):
+        return self._tx.az_iner
 
     @property
-    def tilt(self):
-        return self._tx.tilt
+    def el_iner(self):
+        return self._tx.el_iner
 
 
 """
@@ -489,8 +482,7 @@ class SDRPlatform(RadarPlatform):
         :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
         :return: tuple of near and far ranges in meters.
         """
-        nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
-                  self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC) * c0 / 2
         frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
                   self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
         return nrange, frange
@@ -601,16 +593,16 @@ class Antenna:
         self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
 
         # Beampattern stuff
-        self.pan = CubicSpline(pos_mat[6], gphi)
-        self.tilt = CubicSpline(pos_mat[6], gtheta)
+        self.az_iner = CubicSpline(pos_mat[6], gphi)
+        self.el_iner = CubicSpline(pos_mat[6], gtheta)
 
     @singledispatch
     def boresight(self, t):
-        return np.vstack([np.sin(self.pan(t)) * np.cos(self.tilt(t)), np.cos(self.pan(t)) * np.cos(self.tilt(t)), -np.sin(self.tilt(t))])
+        return np.vstack([np.sin(self.az_iner(t)) * np.cos(self.el_iner(t)), np.cos(self.az_iner(t)) * np.cos(self.el_iner(t)), -np.sin(self.el_iner(t))])
 
     @boresight.register
     def _(self, t: float):
-        return np.array([np.sin(self.pan(t)) * np.cos(self.tilt(t)), np.cos(self.pan(t)) * np.cos(self.tilt(t)), -np.sin(self.tilt(t))])
+        return np.array([np.sin(self.az_iner(t)) * np.cos(self.el_iner(t)), np.cos(self.az_iner(t)) * np.cos(self.el_iner(t)), -np.sin(self.el_iner(t))])
 
     @property
     def pos(self):

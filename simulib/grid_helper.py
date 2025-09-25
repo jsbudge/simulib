@@ -1,21 +1,9 @@
-from typing import Tuple, Any
-
 import numpy as np
-from numpy import ndarray, dtype, bool_, unsignedinteger, signedinteger, floating, complexfloating, timedelta64, \
-    datetime64, float_
-from numpy._typing import _64Bit
-
 from .simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
+from .utils import DTR
 from scipy.spatial import Delaunay
 from scipy.interpolate import interpn
 import pickle
-
-fs = 2e9
-c0 = 299792458.0
-TAC = 125e6
-DTR = np.pi / 180
-inch_to_m = .0254
-m_to_ft = 3.2808
 
 '''
 Environment
@@ -53,9 +41,7 @@ class Environment(object):
         return rmat
 
     def getGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
-                ncols: int = 0, az: float = 0, use_elevation: bool = True) -> tuple[
-        ndarray[Any, dtype[bool_]], ndarray[Any, dtype[bool_]], ndarray[Any, dtype[floating[_64Bit] | float_]] |
-                                                                ndarray[Any, dtype[Any]]]:
+                ncols: int = 0, az: float = 0, use_elevation: bool = True) -> tuple:
         # This grid is independent of the refgrid or stored transforms
         npts = self.shape if nrows == 0 else (ncols, nrows)
         if pos is None and width is None and height is None and nrows == 0 and ncols == 0 and az == 0:
@@ -108,7 +94,7 @@ class Environment(object):
                              fill_value=0).reshape(x.shape, order='C'),
                      self.getGridParams(pos, width, height, (nrows, ncols), az))
 
-    def sample(self, x: float, y: float) -> ndarray:
+    def sample(self, x: float, y: float) -> np.ndarray:
         irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2

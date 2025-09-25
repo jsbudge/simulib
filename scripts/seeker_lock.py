@@ -206,8 +206,8 @@ if __name__ == '__main__':
     single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
                                                                                   [r.txpos(data_t).astype(_float) for r in datasets],
                                                                                   [r.rxpos(data_t).astype(_float) for r in datasets],
-                                                                                  [r.pan(data_t).astype(_float) for r in datasets],
-                                                                                  [r.tilt(data_t).astype(_float) for r in datasets],
+                                                                                  [r.az_iner(data_t).astype(_float) for r in datasets],
+                                                                                  [r.el_iner(data_t).astype(_float) for r in datasets],
                                                                                   radar_coeff, rp.az_half_bw, rp.el_half_bw,
                                                                                   nsam, fc, near_range_s, fs,
                                                                                   num_bounces=num_bounces,
@@ -248,8 +248,8 @@ if __name__ == '__main__':
         scene.meshes[1].gen_waves(ptimes)
         txposes = [r.txpos(ptimes).astype(_float) for r in datasets]
         rxposes = [r.rxpos(ptimes).astype(_float) for r in datasets]
-        pans = [r.pan(ptimes).astype(_float) for r in datasets]
-        tilts = [r.tilt(ptimes).astype(_float) for r in datasets]
+        pans = [r.az_iner(ptimes).astype(_float) for r in datasets]
+        tilts = [r.el_iner(ptimes).astype(_float) for r in datasets]
         trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                         radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
                                         num_bounces=num_bounces, supersamples=supersamples, frames=np.arange(frame[0], frame[0] + npulses))
@@ -461,8 +461,8 @@ if __name__ == '__main__':
 
     pfig = go.Figure(
         data=[go.Cone(x=conepoints[:, 0], y=conepoints[:, 1], z=conepoints[:, 2], u=cones[:, 0], v=cones[:, 1], w=cones[:, 2], showscale=False),
-              drawAntennaBox(txposes[0], rp.pan(pulse_times[0]) - rp.az_half_bw, rp.pan(pulse_times[0]) + rp.az_half_bw,
-                             rp.tilt(pulse_times[0]) - rp.el_half_bw, rp.tilt(pulse_times[0]) + rp.el_half_bw, cons_ranges[0], cons_ranges[1]),
+              drawAntennaBox(txposes[0], rp.az_iner(pulse_times[0]) - rp.az_half_bw, rp.az_iner(pulse_times[0]) + rp.az_half_bw,
+                             rp.el_iner(pulse_times[0]) - rp.el_half_bw, rp.el_iner(pulse_times[0]) + rp.el_half_bw, cons_ranges[0], cons_ranges[1]),
               go.Mesh3d(
             x=ocean.vertices[0, :, 0],
             y=ocean.vertices[0, :, 1],
@@ -517,10 +517,10 @@ if __name__ == '__main__':
         height_color = mplib.cm.ocean((heights - omin[2]) / (omax[2] - omin[2]))
         pframes.append(go.Frame(data=[go.Cone(x=conepoints[:, 0], y=conepoints[:, 1], z=conepoints[:, 2], u=cones[:, 0],
                                               v=cones[:, 1], w=cones[:, 2], sizeref=1000, sizemode='raw', showscale=False),
-                                      drawAntennaBox(txposes[0], rp.pan(ptimes[0]) - rp.az_half_bw,
-                                                     rp.pan(ptimes[0]) + rp.az_half_bw,
-                                                     rp.tilt(ptimes[0]) - rp.el_half_bw,
-                                                     rp.tilt(ptimes[0]) + rp.el_half_bw, cons_ranges[0], cons_ranges[1]),
+                                      drawAntennaBox(txposes[0], rp.az_iner(ptimes[0]) - rp.az_half_bw,
+                                                     rp.az_iner(ptimes[0]) + rp.az_half_bw,
+                                                     rp.el_iner(ptimes[0]) - rp.el_half_bw,
+                                                     rp.el_iner(ptimes[0]) + rp.el_half_bw, cons_ranges[0], cons_ranges[1]),
                                       go.Mesh3d(
                                           x=ocean.vertices[0, :, 0],
                                           y=ocean.vertices[0, :, 1],

@@ -162,8 +162,8 @@ if __name__ == '__main__':
     single_rp, ray_origins, ray_directions, ray_powers = getRangeProfileFromScene(scene, sample_points,
                                                                                   [r.txpos(data_t).astype(_float) for r in datasets],
                                                                                   [r.rxpos(data_t).astype(_float) for r in datasets],
-                                                                                  [r.pan(data_t).astype(_float) for r in datasets],
-                                                                                  [r.tilt(data_t).astype(_float) for r in datasets],
+                                                                                  [r.az_iner(data_t).astype(_float) for r in datasets],
+                                                                                  [r.el_iner(data_t).astype(_float) for r in datasets],
                                                                                   radar_coeff, rp.az_half_bw, rp.el_half_bw,
                                                                                   nsam, fc, near_range_s, fs,
                                                                                   num_bounces=num_bounces,
@@ -212,8 +212,8 @@ if __name__ == '__main__':
         pt, sdr_data = sdr_f.getPulses(sdr_f[0].frame_num[frame[0]:frame[0] + npulses], 0)
         txposes = [r.txpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
         rxposes = [r.rxpos(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
-        pans = [r.pan(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
-        tilts = [r.tilt(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
+        pans = [r.az_iner(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
+        tilts = [r.el_iner(sdr_f[0].pulse_time[frame[0]:frame[0] + npulses]).astype(_float) for r in datasets]
         trp = getRangeProfileFromScene(scene, sample_points, txposes, rxposes, pans, tilts,
                                         radar_coeff, rp.az_half_bw, rp.el_half_bw, nsam, fc, near_range_s, fs,
                                         num_bounces=num_bounces, streams=streams, supersamples=supersamples)
