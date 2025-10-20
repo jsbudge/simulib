@@ -613,15 +613,19 @@ def sinc_interp(x, s, u):
     return np.dot(x, np.sinc(sincM / T))
 
 
-def getDopplerLine(effAzI, rangeBins, antVel, antPos, nearRangeGrazeR, azBeamwidthHalf, PRF, wavelength, origin):
+def getDopplerLine(effAzI, rangeBins, antVel, antPos, nearRangeGrazeR, azBeamwidthHalf, PRF, wavelength, origin=None):
     """Compute the expected Doppler vs range for the given platform geometry"""
 
     # compute the grazing angle for the near range to start
-    (nearRangeGrazeR, Rvec, surfaceHeight, numIter) = computeGrazingAngle(
-        effAzI, nearRangeGrazeR, antPos, rangeBins[0], origin)
+    if origin is None:
+        effectiveHeight = antPos[2]
+    else:
+        (nearRangeGrazeR, Rvec, surfaceHeight, numIter) = computeGrazingAngle(
+            effAzI, nearRangeGrazeR, antPos, rangeBins[0], origin)
+        effectiveHeight = antPos[2] + origin[2] - surfaceHeight
 
     # now I need to get the grazing angles across all of the range bins
-    grazeOverRanges = np.arcsin((antPos[2] + origin[2] - surfaceHeight) / rangeBins)
+    grazeOverRanges = np.arcsin(effectiveHeight / rangeBins)
 
     # this is a special version of Rvec (it is not 3x1, it is 3xNrv)
     Rvec = np.array([
@@ -805,9 +809,9 @@ def upsamplePulse(p, fft_len, upsample, is_freq=False, out_freq=False, time_len=
         up[-fft_len // 2:] = op[-fft_len // 2:]
         up = np.fft.ifft(up)[:time_len * upsample] if not out_freq else up
     else:
-        op = p if is_freq else np.fft.fft(p, axis=1)
-        up = np.zeros((op.shape[0], fft_len * upsample), dtype=op.dtype)
-        up[:, :fft_len // 2] = op[:, :fft_len // 2]
-        up[:, -fft_len // 2:] = op[:, -fft_len // 2:]
-        up = np.fft.ifft(up, axis=1)[:, :time_len * upsample] if not out_freq else up
+        op = p if is_freq else np.fft.fft(p, axis=-1)
+        up = np.zeros((*op.shape[:-1], fft_len * upsample), dtype=op.dtype)
+        up[..., :fft_len // 2] = op[..., :fft_len // 2]
+        up[..., -fft_len // 2:] = op[..., -fft_len // 2:]
+        up = np.fft.ifft(up, axis=-1)[..., :time_len * upsample] if not out_freq else up
     return up

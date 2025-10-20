@@ -5,7 +5,270 @@ from typing import Type
 from .simulation_functions import llh2enu
 from functools import singledispatch
 from .utils import GRAVITIC_CONSTANT, c0, TAC, DTR, INS_REFRESH_HZ
+from itertools import product
 SDRBase = Type
+
+
+class DynamicModel(object):
+    _pos = None
+    _vel = None
+    _acc = None
+    _att = None
+    _att_vel = None
+    _att_acc = None
+    _txpos = None
+    _rxpos = None
+    _tx_offset = None
+    _rx_offset = None
+    _gimbal_az = None
+    _gimbal_el = None
+    _gimbal_rot_offset = None
+    _gimbal_offset = None
+    _az_iner = None
+    _el_iner = None
+    _t = None
+    _boresight = None
+    _n_channels = 0
+
+    def __init__(self, init_t, init_pos, init_att, gimbal_az, gimbal_el, gimbal_rotations, gimbal_offset: np.ndarray = None,
+                 tx_offset: np.ndarray = None, rx_offset: np.ndarray = None, init_vel: np.ndarray = None,
+                 init_acc: np.ndarray = None, init_att_vel: np.ndarray = None, init_att_acc: np.ndarray = None,
+                 buffer_size: int = 16384):
+        self._tell = 0
+        self._buffer = buffer_size * 2
+        # Initialize all the buffers for various parameters
+        self._pos = np.zeros((self._buffer, 3))
+        self._vel = np.zeros_like(self._pos)
+        self._acc = np.zeros_like(self._pos)
+        self._att = np.zeros_like(self._pos)
+        self._att_vel = np.zeros_like(self._pos)
+        self._att_acc = np.zeros_like(self._pos)
+        self._boresight = np.zeros_like(self._pos)
+
+        self._t = np.zeros(self._buffer)
+        self._gimbal_el = np.zeros_like(self._t)
+        self._gimbal_az = np.zeros_like(self._t)
+        self._az_iner = np.zeros_like(self._t)
+        self._el_iner = np.zeros_like(self._t)
+
+        self._tx_offset = tx_offset if tx_offset is not None else np.array([[0., 0., 0.]])
+        self._rx_offset = rx_offset if rx_offset is not None else np.array([[0., 0., 0.]])
+
+        self._txpos = np.zeros((self._tx_offset.shape[0], self._buffer, 3))
+        self._rxpos = np.zeros((self._rx_offset.shape[0], self._buffer, 3))
+
+        self._pos[0] = init_pos
+        self._vel[0] = init_vel
+        self._acc[0] = init_acc
+        self._att[0] = init_att
+        self._att_vel[0] = init_att_vel
+        self._att_acc[0] = init_att_acc
+        self._t[0] = init_t
+
+        # Take into account the gimbal/AESA rotations
+        self._gimbal_rot_offset = getRotationOffsetMatrix(*gimbal_rotations)
+        self._gimbal_offset = gimbal_offset
+        self._gimbal_az[0] = gimbal_az
+        self._gimbal_el[0] = gimbal_el
+
+        # Matrix to rotate from body to inertial frame for each INS point
+
+
+        # Get rx/tx channel pairs
+        self.channel_pairs = list(product(self._rx_offset, self._tx_offset))
+        self._n_channels = len(self.channel_pairs)
+        self._txpos[:, 0] = np.stack([init_pos + getPhaseCenterInertialCorrection(self._gimbal_rot_offset, gimbal_az, gimbal_el, init_att[2],
+                                                 init_att[1], init_att[0], tx, gimbal_offset) for tx in self._tx_offset])
+        self._rxpos[:, 0] = np.stack([init_pos + getPhaseCenterInertialCorrection(self._gimbal_rot_offset, gimbal_az, gimbal_el, init_att[2],
+                                                 init_att[1], init_att[0], rx, gimbal_offset) for rx in self._rx_offset])
+
+
+        # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
+        '''corrs = getPhaseCenterInertialCorrection(self._gimbal_rot_offset, gimbal_az, gimbal_el, init_att[2],
+                                                 init_att[1], init_att[0], self._tx_offset, gimbal_offset)
+        self._txpos = (init_pos + corrs).reshape((1, 3))'''
+
+        # Rotate antenna into inertial frame in the same way as above
+        self._boresight[0] = getBoresightVector(self._gimbal_rot_offset, gimbal_az, gimbal_el, init_att[2], init_att[1], init_att[0]).T
+
+        # Calculate antenna azimuth/elevation for beampattern
+        self._el_iner[0] = np.arcsin(-self._boresight[0, 2])
+        self._az_iner[0] = np.arctan2(self._boresight[0, 0], self._boresight[0, 1])
+
+    def update(self, t, new_acc, new_att_acc, gim_az, gim_el):
+        if self.next >= self._buffer:
+            self._flush()
+        self._gimbal_el[self.next] = gim_el
+        self._gimbal_az[self.next] = gim_az
+        self.updatePos(t, new_acc)
+        self.updateAtt(t, new_att_acc)
+        self.updatePhaseCenter(1 if isinstance(t, float) else len(t))
+        self._t[self.next] = t
+        self._tell += 1
+
+    def updatePos(self, t, new_acc):
+        if isinstance(t, float):
+            delta_t = t - self._t[self._tell]
+            self._acc[self.next] = new_acc
+            self._vel[self.next] = (self._vel[self._tell] + new_acc * delta_t).reshape((1, 3))
+            self._pos[self.next] = (self._pos[self._tell] + self._vel[self._tell] * delta_t).reshape((1, 3))
+        else:
+            n_ts = len(t)
+            delta_t = np.array([t[0] - self._t[self._tell], *np.diff(t)])
+            acc = np.zeros((len(t), 3))
+            acc[:new_acc.shape[0]] = new_acc
+            self._acc = np.concatenate((self._acc, acc), axis=0)
+            self._vel = np.concatenate((self._vel, (self._vel[self.prev(n_ts)] + acc * delta_t).reshape((1, 3))), axis=0)
+            self._pos = np.concatenate((self._pos, (self._pos[self.prev(n_ts)] + self._vel[self.prev(n_ts)] * delta_t).reshape((1, 3))),
+                                       axis=0)
+
+    def updateAtt(self, t, new_att):
+        if isinstance(t, float):
+            delta_t = t - self._t[self._tell]
+            self._att_acc[self.next] = new_att
+            self._att_vel[self.next] = (self._att_vel[self._tell] + new_att * delta_t).reshape((1, 3))
+            self._att[self.next] = (self._att[self._tell] + self._att_vel[self._tell] * delta_t).reshape((1, 3))
+        else:
+            n_ts = len(t)
+            delta_t = np.array([t[0] - self._t[self._tell], *np.diff(t)])
+            att = np.zeros((len(t), 3))
+            att[:new_att.shape[0]] = new_att
+            self._att_acc = np.concatenate((self._att_acc, att), axis=0)
+            self._att_vel = np.concatenate((self._att_vel, (self._att_vel[self.prev(n_ts)] + att * delta_t).reshape((1, 3))),
+                                           axis=0)
+            self._att = np.concatenate(
+                (self._att, (self._att[self.prev(n_ts)] + self._att_vel[self.prev(n_ts)] * delta_t).reshape((1, 3))),
+                axis=0)
+
+    def updatePhaseCenter(self, n_ts):
+        tx_update = np.zeros((self._tx_offset.shape[0], 1, 3))
+        rx_update = np.zeros((self._rx_offset.shape[0], 1, 3))
+        for idx, txo in enumerate(self._tx_offset):
+            phase_corrections = [getPhaseCenterInertialCorrection(self._gimbal_rot_offset, ga, ge, a[2], a[1], a[0],
+                                                                  txo, self._gimbal_offset)
+                                 for ga, ge, a in zip(self._gimbal_az[self.prev(n_ts)], self._gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])]
+            tx_update[idx] = self._pos[self.prev(n_ts)] + np.array(phase_corrections)
+        for idx, rxo in enumerate(self._rx_offset):
+            phase_corrections = [getPhaseCenterInertialCorrection(self._gimbal_rot_offset, ga, ge, a[2], a[1], a[0],
+                                                                  rxo, self._gimbal_offset)
+                                 for ga, ge, a in
+                                 zip(self._gimbal_az[self.prev(n_ts)], self._gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])]
+            rx_update[idx] = self._pos[self.prev(n_ts)] + np.array(phase_corrections)
+        self._txpos[:, self.next] = tx_update
+        self._rxpos[:, self.next] = np.squeeze(rx_update, 1)
+        bai = [getBoresightVector(self._gimbal_rot_offset, ga, ge, a[2], a[1], a[0])
+               for ga, ge, a in zip(self._gimbal_az[self.prev(n_ts)], self._gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])][0]
+        self._boresight[self.next] = np.array(bai).T
+
+        # Calculate antenna azimuth/elevation for beampattern
+        self._el_iner[self.next] = np.arcsin(-self._boresight[self.next, 2])
+        self._az_iner[self.next] = np.arctan2(self._boresight[self.next, 0], self._boresight[self.next, 1])
+
+    def getGimbalUpdatesFromBoresight(self, inertial_boresight):
+        return getAzElGimbalFromDesiredBoresight(inertial_boresight, self._gimbal_rot_offset, self._gimbal_az[self._tell],
+                                                 self._gimbal_el[self._tell], self._att[self._tell, 2],
+                                                 self._att[self._tell, 1], self._att[self._tell, 0])
+
+    def turnToHeading(self, t, tvec, des_bore=None):
+        if self.next >= self._buffer:
+            self._flush()
+        omega_max = GRAVITIC_CONSTANT * np.sqrt((1 / np.cos(np.pi / 3) ** 2 - 1)) / np.linalg.norm(self._vel[self._tell])
+        delta_t = t - self._t[self._tell]
+        uvec = tvec / np.linalg.norm(tvec)
+        turn_axis = np.cross(self._vel[self._tell], uvec)
+        turn_angle = np.clip(np.arctan2(np.linalg.norm(np.cross(self._vel[self._tell], uvec)), np.dot(self._vel[self._tell], uvec)),
+                             -omega_max * delta_t, omega_max * delta_t)
+
+        skew_sym_cross = np.array([[0, -turn_axis[2], turn_axis[1]],
+                                   [turn_axis[2], 0, -turn_axis[0]],
+                                   [-turn_axis[1], turn_axis[0], 0]])
+        rotation_matrix = np.eye(3) + np.sin(turn_angle) * skew_sym_cross + np.dot(skew_sym_cross, skew_sym_cross) * (
+                1 - np.cos(turn_angle))
+        self._vel[self.next] = np.dot(rotation_matrix, self._vel[self._tell]).reshape((1, 3))
+        self._pos[self.next] = (self._vel[self._tell] * delta_t + self._pos[self._tell]).reshape((1, 3))
+        self._acc[self.next] = np.zeros((1, 3))
+
+        # Calculate attitude
+        phi_roll = np.arctan2(rotation_matrix[0, 1], rotation_matrix[0, 0])
+        alpha_yaw = np.arctan2(self._vel[self._tell, 0], self._vel[self._tell, 1])
+        theta_pitch = -np.arcsin(self._vel[self._tell, 2] / np.linalg.norm(self._vel[self._tell]))
+        self._att[self.next] = np.array([[phi_roll, theta_pitch, alpha_yaw]])
+        self._att_vel[self.next] = (self._att[self._tell] * delta_t).reshape((1, 3))
+        self._att_acc[self.next] = (self._att_vel[self._tell] * delta_t).reshape((1, 3))
+        gim_az, gim_el = self.getGimbalUpdatesFromBoresight(des_bore) if des_bore is not None else \
+            (self._gimbal_az[self._tell], self._gimbal_el[self._tell])
+        self._gimbal_el[self.next] = gim_el
+        self._gimbal_az[self.next] = gim_az
+        self.updatePhaseCenter(1)
+        self._t[self.next] = t
+        self._tell += 1
+
+    def _flush(self):
+        # shift everything over to make more room
+        self._pos[:self._buffer // 2] = self._pos[self._buffer // 2:]
+        self._vel[:self._buffer // 2] = self._vel[self._buffer // 2:]
+        self._acc[:self._buffer // 2] = self._acc[self._buffer // 2:]
+        self._att[:self._buffer // 2] = self._att[self._buffer // 2:]
+        self._att_vel[:self._buffer // 2] = self._att_vel[self._buffer // 2:]
+        self._att_acc[:self._buffer // 2] = self._att_acc[self._buffer // 2:]
+        self._boresight[:self._buffer // 2] = self._boresight[self._buffer // 2:]
+        self._t[:self._buffer // 2] = self._t[self._buffer // 2:]
+        self._gimbal_az[:self._buffer // 2] = self._gimbal_az[self._buffer // 2:]
+        self._gimbal_el[:self._buffer // 2] = self._gimbal_el[self._buffer // 2:]
+        self._az_iner[:self._buffer // 2] = self._az_iner[self._buffer // 2:]
+        self._el_iner[:self._buffer // 2] = self._el_iner[self._buffer // 2:]
+        self._txpos[:, :self._buffer // 2] = self._txpos[:, self._buffer // 2:]
+        self._rxpos[:, :self._buffer // 2] = self._rxpos[:, self._buffer // 2:]
+        self._tell = self._buffer // 2 - 1
+
+
+    def prev(self, n: int = 1):
+        return slice(1) if self._tell == 0 else slice(max(0, self._tell - n), self._tell)
+
+    @property
+    def boresight(self):
+        return self._boresight
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def txpos(self):
+        return self._txpos
+
+    @property
+    def rxpos(self):
+        return self._rxpos
+
+    @property
+    def az_iner(self):
+        return self._az_iner
+
+    @property
+    def el_iner(self):
+        return self._el_iner
+
+    @property
+    def vel(self):
+        return self._vel
+
+    @property
+    def att(self):
+        return self._att
+
+    @property
+    def t(self):
+        return self._t
+
+    @property
+    def next(self):
+        return self._tell + 1
+
+
+
+
+
 
 """
 Platform class
@@ -654,7 +917,7 @@ def inertialToBody(yaw, pitch, roll, x, y, z):
         [cr * cy + sr * sp * sy, -cr * sy + sr * sp * cy, -sr * cp],
         [cp * sy, cp * cy, sp],
         [sr * cy - cr * sp * sy, -sr * sy - cr * sp * cy, cr * cp]])
-    return np.linalg.pinv(rotItoB).T.dot(np.array([x, y, z]))
+    return rotItoB.dot(np.array([x, y, z]))
 
 
 def gimbalToBody(rotBtoMG, pan, tilt, x, y, z):
@@ -671,6 +934,22 @@ def gimbalToBody(rotBtoMG, pan, tilt, x, y, z):
     # compute the gimbal mounted to gimbal pointing rotation matrix
     rotBtoGP = rotMGtoGP.dot(rotBtoMG)
     return rotBtoGP.T.dot(np.array([x, y, z]))
+
+
+def bodyToGimbal(rotBtoMG, pan, tilt, x, y, z):
+    cp = np.cos(pan)
+    sp = np.sin(pan)
+    ct = np.cos(tilt)
+    st = np.sin(tilt)
+
+    rotMGtoGP = np.array([
+        [cp, -sp, 0],
+        [sp * ct, cp * ct, st],
+        [-sp * st, -cp * st, ct]])
+
+    # compute the gimbal mounted to gimbal pointing rotation matrix
+    rotBtoGP = rotMGtoGP.dot(rotBtoMG)
+    return rotBtoGP.dot(np.array([x, y, z]))
 
 
 def getRotationOffsetMatrix(roll0, pitch0, yaw0):
@@ -704,6 +983,14 @@ def getBoresightVector(ROffset, pan, tilt, yaw, pitch, roll):
         ROffset, pan, tilt, *delta_gp)
     # return the boresight in the inertial frame
     return bodyToInertial(yaw, pitch, roll, *delta_b)
+
+
+def getAzElGimbalFromDesiredBoresight(boresight, ROffset, pan, tilt, yaw, pitch, roll):
+    delta_i = inertialToBody(yaw, pitch, roll, *boresight)
+    delta_b = bodyToGimbal(ROffset, pan, tilt, *delta_i)
+    delta_b /= np.linalg.norm(delta_b)
+    return np.arctan2(delta_b[0], delta_b[2]) + pan, -np.arcsin(delta_b[1]) + tilt
+
 
 
 def getPhaseCenterInertialCorrection(rotBtoMG, pan, tilt, yaw, pitch, roll, ant_offset, gimbal_offset):
