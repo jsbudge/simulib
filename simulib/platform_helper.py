@@ -2,7 +2,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import median_filter
 from typing import Type
-from .simulation_functions import llh2enu
+from .simulation_functions import llh2enu, azelToVec
 from functools import singledispatch
 from .utils import GRAVITIC_CONSTANT, c0, TAC, DTR, INS_REFRESH_HZ
 from itertools import product
@@ -29,6 +29,7 @@ class DynamicModel(object):
     _t = None
     _boresight = None
     _n_channels = 0
+    _history: dict
 
     def __init__(self, init_t, init_pos, init_att, gimbal_az, gimbal_el, gimbal_rotations, gimbal_offset: np.ndarray = None,
                  tx_offset: np.ndarray = None, rx_offset: np.ndarray = None, init_vel: np.ndarray = None,
@@ -71,7 +72,7 @@ class DynamicModel(object):
         self._gimbal_az[0] = gimbal_az
         self._gimbal_el[0] = gimbal_el
 
-        # Matrix to rotate from body to inertial frame for each INS point
+        self._history = {}
 
 
         # Get rx/tx channel pairs
@@ -172,7 +173,7 @@ class DynamicModel(object):
     def turnToHeading(self, t, tvec, des_bore=None):
         if self.next >= self._buffer:
             self._flush()
-        omega_max = GRAVITIC_CONSTANT * np.sqrt((1 / np.cos(np.pi / 3) ** 2 - 1)) / np.linalg.norm(self._vel[self._tell])
+        omega_max = GRAVITIC_CONSTANT * np.sqrt((1 / np.cos(np.pi / 8) ** 2 - 1)) / np.linalg.norm(self._vel[self._tell])
         delta_t = t - self._t[self._tell]
         uvec = tvec / np.linalg.norm(tvec)
         turn_axis = np.cross(self._vel[self._tell], uvec)
@@ -204,6 +205,24 @@ class DynamicModel(object):
         self._tell += 1
 
     def _flush(self):
+        # Save history just in case
+        if 'pos' not in self._history.keys():
+            self._history['pos'] = self._pos + 0.0
+            self._history['vel'] = self._vel + 0.0
+            self._history['txpos'] = self._txpos + 0.0
+            self._history['rxpos'] = self._rxpos + 0.0
+            self._history['boresight'] = self._boresight + 0.0
+            self._history['az'] = self._az_iner + 0.0
+            self._history['el'] = self._el_iner + 0.0
+        else:
+            self._history['pos'] = np.concatenate((self._history['pos'], self._pos), axis=0)
+            self._history['vel'] = np.concatenate((self._history['vel'], self._vel), axis=0)
+            self._history['txpos'] = np.concatenate((self._history['txpos'], self._txpos), axis=1)
+            self._history['rxpos'] = np.concatenate((self._history['rxpos'], self._rxpos), axis=1)
+            self._history['boresight'] = np.concatenate((self._history['boresight'], self._boresight), axis=0)
+            self._history['az'] = np.concatenate((self._history['az'], self._az_iner), axis=0)
+            self._history['el'] = np.concatenate((self._history['el'], self._el_iner), axis=0)
+
         # shift everything over to make more room
         self._pos[:self._buffer // 2] = self._pos[self._buffer // 2:]
         self._vel[:self._buffer // 2] = self._vel[self._buffer // 2:]
@@ -220,6 +239,26 @@ class DynamicModel(object):
         self._txpos[:, :self._buffer // 2] = self._txpos[:, self._buffer // 2:]
         self._rxpos[:, :self._buffer // 2] = self._rxpos[:, self._buffer // 2:]
         self._tell = self._buffer // 2 - 1
+
+    def getHistory(self):
+        h = self._history.copy()
+        if 'pos' not in h.keys():
+            h['pos'] = self._pos[:self._tell]
+            h['vel'] = self._vel[:self._tell]
+            h['txpos'] = self._txpos[:self._tell]
+            h['rxpos'] = self._rxpos[:self._tell]
+            h['boresight'] = self._boresight[:self._tell]
+            h['az'] = self._az_iner[:self._tell]
+            h['el'] = self._el_iner[:self._tell]
+        else:
+            h['pos'] = np.concatenate((h['pos'], self._pos[:self._tell]), axis=0)
+            h['vel'] = np.concatenate((h['vel'], self._vel[:self._tell]), axis=0)
+            h['txpos'] = np.concatenate((h['txpos'], self._txpos[:self._tell]), axis=1)
+            h['rxpos'] = np.concatenate((h['rxpos'], self._rxpos[:self._tell]), axis=1)
+            h['boresight'] = np.concatenate((h['boresight'], self._boresight[:self._tell]), axis=0)
+            h['az'] = np.concatenate((h['az'], self._az_iner[:self._tell]), axis=0)
+            h['el'] = np.concatenate((h['el'], self._el_iner[:self._tell]), axis=0)
+        return h
 
 
     def prev(self, n: int = 1):
@@ -302,6 +341,7 @@ class Platform(object):
                  gps_az: np.ndarray = None,
                  gps_rxpos: np.ndarray = None,
                  gps_txpos: np.ndarray = None,
+                 aesa: np.ndarray = None,
                  *args,
                  **kwargs):
         """
@@ -338,8 +378,8 @@ class Platform(object):
         position_matrix = np.stack([e, n, u, r, p, t, t])
         position_matrix[5] = np.interp(t, gps_t, gps_az + 2 * np.pi) if gps_t is not None else y
 
-        self._tx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset)
-        self._rx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset)
+        self._tx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset, aesa)
+        self._rx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset, aesa)
 
         self._att = self._tx.att
 
@@ -535,7 +575,7 @@ class RadarPlatform(Platform):
         """
 
         super().__init__(e, n, u, r, p, y, t, gimbal, np.array(gimbal_offset), np.array(gimbal_rotations),
-                         tx_offset, rx_offset, gps_t, gps_az, gps_rxpos, gps_txpos)
+                         tx_offset, rx_offset, gps_t, gps_az, gps_rxpos, gps_txpos, **kwargs)
         self.dep_ang = dep_angle * DTR
         self.squint_ang = squint_angle * DTR
         self.az_half_bw = az_bw * DTR / 2
@@ -695,19 +735,25 @@ class SDRPlatform(RadarPlatform):
         :param fs: float. Sampling frequency in Hz.
         :param channel: int. Channel of data for this object to represent in the SAR file.
         """
+
+        # Get times, sampling frequency, and set an origin for the local tangent plane
         t = sdr.gps_data.index.values
         fs = fs if fs is not None else sdr[channel].fs
         origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
+
+        # Load GPS values for location and attitude
         e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
         r = sdr.gps_data['r'].values
         p = sdr.gps_data['p'].values
         y = sdr.gps_data['y'].values
-        try:
+
+        # Get gimbal values, if any
+        if sdr.has_gimbal:
             pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
                             sdr.gimbal['pan'].values.astype(np.float64))
             tilt = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
                              sdr.gimbal['tilt'].values.astype(np.float64))
-        except TypeError:
+        else:
             pan = np.zeros_like(sdr.gps_data['systime'].values)
             tilt = np.zeros_like(sdr.gps_data['systime'].values)
         pan = np.interp(t, sdr.gps_data.index.values, pan)
@@ -717,23 +763,28 @@ class SDRPlatform(RadarPlatform):
         grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
         try:
             channel_dep = (sdr.xml.Channel_0.Near_Range_D + sdr.xml.Channel_0.Far_Range_D) / 2
-        except KeyError:
-            channel_dep = sdr.ant[0].dep_ang / DTR
-        if sdr[channel].is_receive_only:
+        except AttributeError:
+            channel_dep = (sdr.xml.Interval_0.Near_Range_D + sdr.xml.Interval_0.Far_Range_D) / 2
+        if sdr.intervals[channel].is_receive_only:
             tx_num = np.where([n is not None for n in sdr.port])[0][0]
         else:
-            tx_num = sdr[channel].trans_num
+            tx_num = sdr[channel].trans_num if not sdr.is_v2 else sdr[channel].tx_num
             tx_offset = np.array(
                 [sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
-        rx_num = sdr[channel].rec_num
+        rx_num = sdr[channel].rec_num if not sdr.is_v2 else sdr[channel].rx_num
         rx_offset = np.array(
             [sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]) if rx_offset is None else rx_offset
+        try:
+            aesa = sdr.aesa.values
+            aesa[:, 0] = np.interp(aesa[:, 0], sdr.gps_data['systime'].values, sdr.gps_data.index.values)
+        except AttributeError:
+            aesa = None
         super().__init__(e=e, n=n, u=u, r=r, p=p, y=y, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
                          gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
                          dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
                          az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
                          el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, tx_num=tx_num,
-                         rx_num=rx_num)
+                         rx_num=rx_num, aesa=aesa)
         self._sdr = sdr
         self.origin = origin
         self._channel = channel
@@ -745,9 +796,14 @@ class SDRPlatform(RadarPlatform):
         :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
         :return: tuple of near and far ranges in meters.
         """
-        nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC) * c0 / 2
-        frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
-                  self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        try:
+            nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC) * c0 / 2
+            frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
+                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        except AttributeError:
+            nrange = ((self._sdr[0].Receive_On_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC) * c0 / 2
+            frange = ((self._sdr[0].Receive_Off_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC -
+                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
         return nrange, frange
 
     def calcPulseLength(self, height=0, pulse_length_percent=1., use_tac=False, nrange=None, **kwargs):
@@ -807,6 +863,12 @@ class SDRPlatform(RadarPlatform):
         """
         return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
 
+    def calcIlluminationVector(self, t):
+        gps_times = np.interp(t, self._sdr.gps_data.index.values, self._sdr.gps_data['systime'].values.astype(int))
+        phi = np.interp(gps_times, self._sdr.aesa['systime'].values.astype(int), self._sdr.aesa['phi'].values.astype(np.float64))
+        theta = np.interp(gps_times, self._sdr.aesa['systime'].values.astype(int), self._sdr.aesa['theta'].values.astype(np.float64))
+        return azelToVec(phi, theta)
+
 
 
 class Antenna:
@@ -814,7 +876,8 @@ class Antenna:
     bw_el: float
     gain_db: float
 
-    def __init__(self, pos_mat: np.ndarray, gimbal: np.ndarray, gimbal_offset: np.ndarray, gimbal_rotations: np.ndarray, offset: np.ndarray):
+    def __init__(self, pos_mat: np.ndarray, gimbal: np.ndarray, gimbal_offset: np.ndarray, gimbal_rotations: np.ndarray, offset: np.ndarray,
+                 aesa: np.ndarray = None):
 
         pos = pos_mat[:3].T  # np.array([e, n, u]).T
 
@@ -825,25 +888,39 @@ class Antenna:
         r, p, y = pos_mat[3:6]
 
         # Take into account the gimbal
-        gom = getRotationOffsetMatrix(*gimbal_rotations)
+        gom = getRotationOffsetMatrix(*gimbal_rotations, aesa is not None)
         # Matrix to rotate from body to inertial frame for each INS point
-        offset = offset if offset is not None else np.array([0., 0., 0.])
+        offset = np.array([*offset, 1.]) if offset is not None else np.array([0., 0., 0., 1])
 
-        # Add to INS positions. X and Y are flipped since it rotates into NEU instead of ENU
-        corrs = np.array(
-            [getPhaseCenterInertialCorrection(gom, gimbal[n, 0], gimbal[n, 1], y[n],
-                                              p[n], r[n], offset, gimbal_offset)
-             for n in range(gimbal.shape[0])])
-        tpos = pos + corrs
+        i_b = get_body_to_inertial_matrix(y, p, r, *pos.T)
+        is_aesad = aesa is not None
+
+        pos_m_b = mg_b_matrix(gimbal[:, 0], gimbal[:, 1], gom, gimbal_offset, False)
+        # mg_gp = mg_gp_matrix(gimbal[0, 0], gimbal[0, 1])
+        tpos = np.einsum('ijk,ik->ij', i_b, pos_m_b.dot(offset))
+        if is_aesad:
+            aesa_phi = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 1] * DTR)
+            aesa_theta = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 2] * DTR)
+            bore_m_b = mg_b_matrix(aesa_phi, aesa_theta, gom, gimbal_offset, is_aesad)
+            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], bore_m_b[:, :3, :3].dot(np.array([0, 0, 1])))
+        else:
+            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], pos_m_b[:, :3, :3].dot(np.array([0, 0, 1])))
 
         # Rotate antenna into inertial frame in the same way as above
-        bai = np.array([getBoresightVector(gom, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
-                        for n in range(gimbal.shape[0])])
-        bai = bai.reshape((bai.shape[0], bai.shape[1])).T
+        '''if aesa is not None:
+            aesa_phi = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 1] * DTR)
+            aesa_theta = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 2] * DTR)
+            bai = np.array(
+                [get_aesa_boresight_vector(gom, aesa_phi[n], aesa_theta[n], y[n], p[n], r[n]) for
+                 n in range(y.shape[0])])
+        else:
+            bai = np.array([getBoresightVector(gom, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
+                            for n in range(gimbal.shape[0])])
+            bai = bai.reshape((bai.shape[0], bai.shape[1])).T'''
 
         # Calculate antenna azimuth/elevation for beampattern
-        gtheta = np.arcsin(-bai[2, :])
-        gphi = np.arctan2(bai[0, :], bai[1, :])
+        gtheta = np.arcsin(-bai[:, 2])
+        gphi = np.arctan2(bai[:, 0], bai[:, 1])
 
         # Build the position splines
         self._pos = CubicSpline(pos_mat[6], tpos)
@@ -936,6 +1013,80 @@ def gimbalToBody(rotBtoMG, pan, tilt, x, y, z):
     return rotBtoGP.T.dot(np.array([x, y, z]))
 
 
+def m_p_matrix(pan, tilt, aesa=False):
+    # Mounted Gimbal to Gimbal Pointing matrix
+    cp = np.cos(pan)
+    sp = np.sin(pan)
+    ct = np.cos(tilt)
+    st = np.sin(tilt)
+
+    if not aesa:
+        mg_gp = np.array([
+            [cp, -sp, 0. if isinstance(pan, float) else np.zeros(len(cp))],
+            [sp * ct, cp * ct, st],
+            [-sp * st, -cp * st, ct]])
+    else:
+        mg_gp = np.array([
+            [cp * ct, sp * ct, -st],
+            [-sp, cp, 0. if isinstance(pan, float) else np.zeros(len(cp))],
+            [cp * st, sp * st, ct]])
+
+    return mg_gp if isinstance(pan, float) else mg_gp.swapaxes(0, 2)
+
+
+def mg_b_matrix(pan, tilt, offset_rotation, offset_xyz, aesa=False):
+
+    _stack = np.stack([np.eye(4) for _ in range(len(pan))])
+    _stack[:, :3, 3] = offset_xyz
+    _stack[:, :3, :3] = np.einsum('ijk->ikj', m_p_matrix(pan, tilt, aesa).dot(offset_rotation))
+
+    return _stack
+
+
+def get_inertial_to_body_matrix(
+        a_yaw: float, a_pitch: float, a_roll: float, a_x: float, a_y: float, a_z: float) -> np.ndarray:
+    cy = np.cos(a_yaw)
+    sy = np.sin(a_yaw)
+    cp = np.cos(a_pitch)
+    sp = np.sin(a_pitch)
+    cr = np.cos(a_roll)
+    sr = np.sin(a_roll)
+
+    # Compute the inertial to body rotation matrix
+    rot_i_to_b = np.array([
+        [cr * cy + sr * sp * sy, -cr * sy + sr * sp * cy, -sr * cp, a_x],
+        [cp * sy, cp * cy, sp, a_y],
+        [sr * cy - cr * sp * sy, -sr * sy - cr * sp * cy, cr * cp, a_z],
+        [0, 0, 0, 1]])
+    return rot_i_to_b
+
+
+def get_body_to_inertial_matrix(
+        a_yaw: float, a_pitch: float, a_roll: float, a_x: float, a_y: float, a_z: float) -> np.ndarray:
+    cy = np.cos(a_yaw)
+    sy = np.sin(a_yaw)
+    cp = np.cos(a_pitch)
+    sp = np.sin(a_pitch)
+    cr = np.cos(a_roll)
+    sr = np.sin(a_roll)
+
+    # Compute the inertial to body rotation matrix
+    rot_i_to_b = np.array([
+        [cr * cy + sr * sp * sy, -cr * sy + sr * sp * cy, -sr * cp],
+        [cp * sy, cp * cy, sp],
+        [sr * cy - cr * sp * sy, -sr * sy - cr * sp * cy, cr * cp]])
+
+    if isinstance(a_yaw, float):
+        rot_b_to_i = np.eye(4)
+        rot_b_to_i[:3, :3] = rot_i_to_b.T
+        rot_b_to_i[:3, 3] = [a_x, a_y, a_z]
+    else:
+        rot_b_to_i = np.stack([np.eye(4) for _ in range(len(a_yaw))])
+        rot_b_to_i[:, :3, :3] = rot_i_to_b.T
+        rot_b_to_i[:, :3, 3] = np.array([a_x, a_y, a_z]).T
+    return rot_b_to_i
+
+
 def bodyToGimbal(rotBtoMG, pan, tilt, x, y, z):
     cp = np.cos(pan)
     sp = np.sin(pan)
@@ -952,7 +1103,7 @@ def bodyToGimbal(rotBtoMG, pan, tilt, x, y, z):
     return rotBtoGP.dot(np.array([x, y, z]))
 
 
-def getRotationOffsetMatrix(roll0, pitch0, yaw0):
+def getRotationOffsetMatrix(roll0, pitch0, yaw0, aesa = False):
     cps0 = np.cos(yaw0)
     sps0 = np.sin(yaw0)
     cph0 = np.cos(roll0)
@@ -970,14 +1121,17 @@ def getRotationOffsetMatrix(roll0, pitch0, yaw0):
     Delta8 = -sph0 * sps0 - cph0 * sth0 * cps0
     Delta9 = cph0 * cth0
 
-    return np.array([[-Delta1, -Delta2, -Delta3], [Delta4, Delta5, Delta6], [-Delta7, -Delta8, -Delta9]])
+    if aesa:
+        return np.array([[Delta1, Delta2, Delta3], [Delta4, Delta5, Delta6], [Delta7, Delta8, Delta9]])
+    else:
+        return np.array([[-Delta1, -Delta2, -Delta3], [Delta4, Delta5, Delta6], [-Delta7, -Delta8, -Delta9]])
 
 
-def getBoresightVector(ROffset, pan, tilt, yaw, pitch, roll):
+def getBoresightVector(ROffset, pan, tilt, yaw, pitch, roll, shift=None):
     """Returns the a 3x1 numpy array with the normalized boresight vector in 
     the inertial frame"""
     # set the boresight pointing vector in the pointed gimbal frame
-    delta_gp = np.array([[0], [0], [1.0]])
+    delta_gp = np.array([[0], [0], [1.0]]) if shift is None else shift.reshape((3, 1))
     # rotate these into the body frame
     delta_b = gimbalToBody(
         ROffset, pan, tilt, *delta_gp)
@@ -1006,6 +1160,54 @@ def getPhaseCenterInertialCorrection(rotBtoMG, pan, tilt, yaw, pitch, roll, ant_
     totDelta_b = antDelta_b + gimbal_offset
     # return the inertial correction
     return bodyToInertial(yaw, pitch, roll, totDelta_b[0], totDelta_b[1], totDelta_b[2])
+
+
+def get_body_to_aesa_pointing_matrix(
+        a_rot_b_to_a: np.ndarray, a_phi: float | np.ndarray, a_theta: float | np.ndarray) -> np.ndarray:
+    cp = np.cos(a_phi)
+    sp = np.sin(a_phi)
+    ct = np.cos(a_theta)
+    st = np.sin(a_theta)
+
+    rot_a_to_ap = np.array([
+        [cp * ct, sp * ct, -st],
+        [-sp, cp, 0. if isinstance(a_phi, float) else np.zeros(len(a_phi))],
+        [cp * st, sp * st, ct]])
+
+    # Compute the mounted-AESA to AESA-pointing rotation matrix
+    return rot_a_to_ap.dot(a_rot_b_to_a)
+
+def aesa_to_body(
+        a_rot_b_to_a: np.ndarray, a_phi: float, a_theta: float, a_x: float,
+        a_y: float, a_z: float) -> np.ndarray:
+    # Compute the body to AESA-pointing rotation matrix
+    rot_b_to_ap = get_body_to_aesa_pointing_matrix(a_rot_b_to_a, a_phi, a_theta)
+    # Multiply the transpose (ap-to-b) by the vector
+    new_xyz = rot_b_to_ap.T.dot(
+        np.array([
+            [a_x],
+            [a_y],
+            [a_z]]))
+    return new_xyz
+
+def get_aesa_boresight_vector(
+        a_r_offset: np.ndarray, a_phi: float, a_theta: float,
+        a_yaw: float, a_pitch: float, a_roll: float) -> np.ndarray:
+    # Set the boresight pointing vector in the pointed AESA frame
+    delta_gp = np.array([
+        [0],
+        [0],
+        [1.0]])
+    # Rotate this into the body frame
+    delta_b = aesa_to_body(
+        a_r_offset, a_phi, a_theta, delta_gp.item(0), delta_gp.item(1),
+        delta_gp.item(2))
+    # Finish the rotation into the inertial frame
+    delta_i = bodyToInertial(
+        a_yaw, a_pitch, a_roll, delta_b.item(0), delta_b.item(1),
+        delta_b.item(2))
+    # Return the boresight in the inertial frame
+    return delta_i
 
 
 def createFlightPath(knot_points, init_pos, init_vel, launch_speed, roll_max, delta_t):
