@@ -150,7 +150,7 @@ class OceanMesh(BaseMesh):
         vertex_normals = np.zeros_like(mesh_vertices)
 
         super().__init__(np.array([0, 0., 0]), mesh_tri_idx, mesh_vertices, mesh_normals,
-                         vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int), [1e2], [.0001])
+                         vertex_normals, np.zeros((mesh_tri_idx.shape[0],)).astype(int), [1.1], [.00001])
 
         bboxes = np.stack([np.stack([v.min(axis=0), v.max(axis=0)]) for v in mesh_vertices])
         bboxes[:, 0, 2] = -u10**2 / GRAVITIC_CONSTANT

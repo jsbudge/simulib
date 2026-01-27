@@ -20,8 +20,8 @@ class DynamicModel(object):
     _rxpos = None
     _tx_offset = None
     _rx_offset = None
-    _gimbal_az = None
-    _gimbal_el = None
+    gimbal_az = None
+    gimbal_el = None
     _gimbal_rot_offset = None
     _gimbal_offset = None
     _az_iner = None
@@ -47,8 +47,8 @@ class DynamicModel(object):
         self._boresight = np.zeros_like(self._pos)
 
         self._t = np.zeros(self._buffer)
-        self._gimbal_el = np.zeros_like(self._t)
-        self._gimbal_az = np.zeros_like(self._t)
+        self.gimbal_el = np.zeros_like(self._t)
+        self.gimbal_az = np.zeros_like(self._t)
         self._az_iner = np.zeros_like(self._t)
         self._el_iner = np.zeros_like(self._t)
 
@@ -69,8 +69,8 @@ class DynamicModel(object):
         # Take into account the gimbal/AESA rotations
         self._gimbal_rot_offset = getRotationOffsetMatrix(*gimbal_rotations)
         self._gimbal_offset = gimbal_offset
-        self._gimbal_az[0] = gimbal_az
-        self._gimbal_el[0] = gimbal_el
+        self.gimbal_az[0] = gimbal_az
+        self.gimbal_el[0] = gimbal_el
 
         self._history = {}
 
@@ -99,8 +99,8 @@ class DynamicModel(object):
     def update(self, t, new_acc, new_att_acc, gim_az, gim_el):
         if self.next >= self._buffer:
             self._flush()
-        self._gimbal_el[self.next] = gim_el
-        self._gimbal_az[self.next] = gim_az
+        self.gimbal_el[self.next] = gim_el
+        self.gimbal_az[self.next] = gim_az
         self.updatePos(t, new_acc)
         self.updateAtt(t, new_att_acc)
         self.updatePhaseCenter(1 if isinstance(t, float) else len(t))
@@ -147,18 +147,18 @@ class DynamicModel(object):
         for idx, txo in enumerate(self._tx_offset):
             phase_corrections = [getPhaseCenterInertialCorrection(self._gimbal_rot_offset, ga, ge, a[2], a[1], a[0],
                                                                   txo, self._gimbal_offset)
-                                 for ga, ge, a in zip(self._gimbal_az[self.prev(n_ts)], self._gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])]
+                                 for ga, ge, a in zip(self.gimbal_az[self.prev(n_ts)], self.gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])]
             tx_update[idx] = self._pos[self.prev(n_ts)] + np.array(phase_corrections)
         for idx, rxo in enumerate(self._rx_offset):
             phase_corrections = [getPhaseCenterInertialCorrection(self._gimbal_rot_offset, ga, ge, a[2], a[1], a[0],
                                                                   rxo, self._gimbal_offset)
                                  for ga, ge, a in
-                                 zip(self._gimbal_az[self.prev(n_ts)], self._gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])]
+                                 zip(self.gimbal_az[self.prev(n_ts)], self.gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])]
             rx_update[idx] = self._pos[self.prev(n_ts)] + np.array(phase_corrections)
         self._txpos[:, self.next] = tx_update
         self._rxpos[:, self.next] = np.squeeze(rx_update, 1)
         bai = [getBoresightVector(self._gimbal_rot_offset, ga, ge, a[2], a[1], a[0])
-               for ga, ge, a in zip(self._gimbal_az[self.prev(n_ts)], self._gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])][0]
+               for ga, ge, a in zip(self.gimbal_az[self.prev(n_ts)], self.gimbal_el[self.prev(n_ts)], self._att[self.prev(n_ts)])][0]
         self._boresight[self.next] = np.array(bai).T
 
         # Calculate antenna azimuth/elevation for beampattern
@@ -166,8 +166,8 @@ class DynamicModel(object):
         self._az_iner[self.next] = np.arctan2(self._boresight[self.next, 0], self._boresight[self.next, 1])
 
     def getGimbalUpdatesFromBoresight(self, inertial_boresight):
-        return getAzElGimbalFromDesiredBoresight(inertial_boresight, self._gimbal_rot_offset, self._gimbal_az[self._tell],
-                                                 self._gimbal_el[self._tell], self._att[self._tell, 2],
+        return getAzElGimbalFromDesiredBoresight(inertial_boresight, self._gimbal_rot_offset, self.gimbal_az[self._tell],
+                                                 self.gimbal_el[self._tell], self._att[self._tell, 2],
                                                  self._att[self._tell, 1], self._att[self._tell, 0])
 
     def turnToHeading(self, t, tvec, des_bore=None):
@@ -197,9 +197,9 @@ class DynamicModel(object):
         self._att_vel[self.next] = (self._att[self._tell] * delta_t).reshape((1, 3))
         self._att_acc[self.next] = (self._att_vel[self._tell] * delta_t).reshape((1, 3))
         gim_az, gim_el = self.getGimbalUpdatesFromBoresight(des_bore) if des_bore is not None else \
-            (self._gimbal_az[self._tell], self._gimbal_el[self._tell])
-        self._gimbal_el[self.next] = gim_el
-        self._gimbal_az[self.next] = gim_az
+            (self.gimbal_az[self._tell], self.gimbal_el[self._tell])
+        self.gimbal_el[self.next] = gim_el
+        self.gimbal_az[self.next] = gim_az
         self.updatePhaseCenter(1)
         self._t[self.next] = t
         self._tell += 1
@@ -232,8 +232,8 @@ class DynamicModel(object):
         self._att_acc[:self._buffer // 2] = self._att_acc[self._buffer // 2:]
         self._boresight[:self._buffer // 2] = self._boresight[self._buffer // 2:]
         self._t[:self._buffer // 2] = self._t[self._buffer // 2:]
-        self._gimbal_az[:self._buffer // 2] = self._gimbal_az[self._buffer // 2:]
-        self._gimbal_el[:self._buffer // 2] = self._gimbal_el[self._buffer // 2:]
+        self.gimbal_az[:self._buffer // 2] = self.gimbal_az[self._buffer // 2:]
+        self.gimbal_el[:self._buffer // 2] = self.gimbal_el[self._buffer // 2:]
         self._az_iner[:self._buffer // 2] = self._az_iner[self._buffer // 2:]
         self._el_iner[:self._buffer // 2] = self._el_iner[self._buffer // 2:]
         self._txpos[:, :self._buffer // 2] = self._txpos[:, self._buffer // 2:]
@@ -301,8 +301,28 @@ class DynamicModel(object):
         return self._t
 
     @property
+    def tell(self):
+        return self._tell
+
+    @property
     def next(self):
         return self._tell + 1
+
+    @property
+    def txoffset(self):
+        return self._tx_offset
+
+    @property
+    def rxoffset(self):
+        return self._rx_offset
+
+    @property
+    def gimbaloffset(self):
+        return self._gimbal_offset
+
+    @property
+    def gimbalrotation(self):
+        return self._gimbal_rot_offset
 
 
 
