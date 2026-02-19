@@ -395,11 +395,12 @@ class Platform(object):
         self._gimbal_offset = gimbal_offset
         self.gimbal_rotations = gimbal_rotations
 
-        position_matrix = np.stack([e, n, u, r, p, t, t])
+        # The yaw is calculated separately here if necessary
+        position_matrix = np.stack([e, n, u, r, p, y, t])
         position_matrix[5] = np.interp(t, gps_t, gps_az + 2 * np.pi) if gps_t is not None else y
 
-        self._tx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset, aesa)
-        self._rx = Antenna(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset, aesa)
+        self._tx = AntennaPosition(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset, aesa)
+        self._rx = AntennaPosition(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset, aesa)
 
         self._att = self._tx.att
 
@@ -617,8 +618,8 @@ class RadarPlatform(Platform):
         :param height: float. Height of antenna off the ground in meters.
         :return: tuple of near and far slant ranges in meters.
         """
-        nrange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang + self.el_half_bw * exp_factor)
-        frange = height / np.sin(self._att(self.gpst[0])[0] + self.dep_ang - self.el_half_bw * exp_factor)
+        nrange = height / np.sin(self._att(self.gpst[0])[0] + self.near_range_angle * exp_factor)
+        frange = height / np.sin(self._att(self.gpst[0])[0] + self.far_range_angle * exp_factor)
         return nrange, frange
 
     def calcPulseLength(self, height, pulse_length_percent=1., use_tac=False, nrange=None, **kwargs):
@@ -891,27 +892,40 @@ class SDRPlatform(RadarPlatform):
 
 
 
-class Antenna:
+class AntennaPosition:
     bw_az: float
     bw_el: float
     gain_db: float
+    _pos: object
+    _vel: object
+    _att: object
+    _heading: object
+    az_iner: object
+    el_iner: object
 
-    def __init__(self, pos_mat: np.ndarray, gimbal: np.ndarray, gimbal_offset: np.ndarray, gimbal_rotations: np.ndarray, offset: np.ndarray,
-                 aesa: np.ndarray = None):
+    def __init__(self, pos_mat: np.ndarray, gimbal: np.ndarray, gimbal_offset: np.ndarray, gimbal_rotations: np.ndarray,
+                 offset: np.ndarray,  aesa: np.ndarray = None):
 
-        pos = pos_mat[:3].T  # np.array([e, n, u]).T
+        pos = pos_mat[:3].T
 
         # attitude spline
-        # yy = np.interp(t, gps_t, gps_az + 2 * np.pi) if use_gps else y
-        # self._att = CubicSpline(t, np.array([r, p, yy]).T)
         self._att = CubicSpline(pos_mat[6], pos_mat[3:6].T)
         r, p, y = pos_mat[3:6]
 
         # Take into account the gimbal
         gom = getRotationOffsetMatrix(*gimbal_rotations, aesa is not None)
         # Matrix to rotate from body to inertial frame for each INS point
-        offset = np.array([*offset, 1.]) if offset is not None else np.array([0., 0., 0., 1])
+        if offset is None:
+            offset = np.array([[0., 0., 0., 1]])
 
+        if len(offset.shape) == 1 or offset.shape[0] == 1:
+            self.singlePosition(pos, r, p, y, pos_mat[6], gimbal, gimbal_offset, gom, np.array([*offset, 1.]), aesa)
+        else:
+            self.multiPosition(pos, r, p, y, pos_mat[6], gimbal, gimbal_offset, gom, offset, aesa)
+
+    def singlePosition(self, pos: np.ndarray, r: np.ndarray, p: np.ndarray, y: np.ndarray, t: np.ndarray,
+                       gimbal: np.ndarray, gimbal_offset: np.ndarray, gom: np.ndarray, offset: np.ndarray,
+                       aesa: np.ndarray = None):
         i_b = get_body_to_inertial_matrix(y, p, r, *pos.T)
         is_aesad = aesa is not None
 
@@ -919,42 +933,71 @@ class Antenna:
         # mg_gp = mg_gp_matrix(gimbal[0, 0], gimbal[0, 1])
         tpos = np.einsum('ijk,ik->ij', i_b, pos_m_b.dot(offset))
         if is_aesad:
-            aesa_phi = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 1] * DTR)
-            aesa_theta = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 2] * DTR)
+            aesa_phi = np.interp(t, aesa[:, 0], aesa[:, 1] * DTR)
+            aesa_theta = np.interp(t, aesa[:, 0], aesa[:, 2] * DTR)
             bore_m_b = mg_b_matrix(aesa_phi, aesa_theta, gom, gimbal_offset, is_aesad)
-            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], bore_m_b[:, :3, :3].dot(np.array([0, 0, 1])))
+            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], np.array([0, 0, 1]).dot(bore_m_b[:, :3, :3]))
         else:
-            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], pos_m_b[:, :3, :3].dot(np.array([0, 0, 1])))
-
-        # Rotate antenna into inertial frame in the same way as above
-        '''if aesa is not None:
-            aesa_phi = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 1] * DTR)
-            aesa_theta = np.interp(pos_mat[6], aesa[:, 0], aesa[:, 2] * DTR)
-            bai = np.array(
-                [get_aesa_boresight_vector(gom, aesa_phi[n], aesa_theta[n], y[n], p[n], r[n]) for
-                 n in range(y.shape[0])])
-        else:
-            bai = np.array([getBoresightVector(gom, gimbal[n, 0], gimbal[n, 1], y[n], p[n], r[n])
-                            for n in range(gimbal.shape[0])])
-            bai = bai.reshape((bai.shape[0], bai.shape[1])).T'''
+            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], np.array([0, 0, 1]).dot(pos_m_b[:, :3, :3]))
 
         # Calculate antenna azimuth/elevation for beampattern
         gtheta = np.arcsin(-bai[:, 2])
         gphi = np.arctan2(bai[:, 0], bai[:, 1])
 
         # Build the position splines
-        self._pos = CubicSpline(pos_mat[6], tpos)
+        self._pos = CubicSpline(t, tpos)
 
         # Build a velocity spline
-        self._vel = CubicSpline(pos_mat[6], median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *
+        self._vel = CubicSpline(t, median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *
                                 INS_REFRESH_HZ)
 
         # heading check
         self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
 
         # Beampattern stuff
-        self.az_iner = CubicSpline(pos_mat[6], gphi)
-        self.el_iner = CubicSpline(pos_mat[6], gtheta)
+        self.az_iner = CubicSpline(t, gphi)
+        self.el_iner = CubicSpline(t, gtheta)
+
+    def multiPosition(self, pos: np.ndarray, r: np.ndarray, p: np.ndarray, y: np.ndarray, t: np.ndarray,
+                       gimbal: np.ndarray, gimbal_offset: np.ndarray, gom: np.ndarray, offset: np.ndarray,
+                       aesa: np.ndarray = None):
+        i_b = get_body_to_inertial_matrix(y, p, r, *pos.T)
+        is_aesad = aesa is not None
+
+        pos_m_b = mg_b_matrix(gimbal[:, 0], gimbal[:, 1], gom, gimbal_offset, False)
+        tpos_splines = []
+
+        if is_aesad:
+            aesa_phi = np.interp(t, aesa[:, 0], aesa[:, 1] * DTR)
+            aesa_theta = np.interp(t, aesa[:, 0], aesa[:, 2] * DTR)
+            bore_m_b = mg_b_matrix(aesa_phi, aesa_theta, gom, gimbal_offset, is_aesad)
+            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], np.array([0, 0, 1]).dot(bore_m_b[:, :3, :3]))
+        else:
+            bai = np.einsum('ijk,ik->ij', i_b[:, :3, :3], np.array([0, 0, 1]).dot(pos_m_b[:, :3, :3]))
+
+        # Calculate antenna azimuth/elevation for beampattern
+        gtheta = np.arcsin(-bai[:, 2])
+        gphi = np.arctan2(bai[:, 0], bai[:, 1])
+
+        for off in offset:
+            tpos_splines.append(np.einsum('ijk,ik->ij', i_b, pos_m_b.dot(np.array([*off, 1.]))))
+
+
+        # Build the position splines
+        self._pos = CubicSpline(t, np.stack(tpos_splines, axis=1))
+
+        # Build a velocity spline
+        self._vel = CubicSpline(t, median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *
+                                INS_REFRESH_HZ)
+
+        # heading check
+        self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
+
+        # Beampattern stuff
+        self.az_iner = CubicSpline(t, gphi)
+        self.el_iner = CubicSpline(t, gtheta)
+
+
 
     @singledispatch
     def boresight(self, t):

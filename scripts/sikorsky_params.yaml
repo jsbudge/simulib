@@ -1,0 +1,42 @@
+ant_params:
+  tx_gain: 25.
+  rx_gain: 25.
+  rec_gain: 80.
+  transmit_power: 220.
+  az_bw: 2.
+  el_bw: 8.
+  noise_figure: 35.
+  operating_temperature: 290.
+
+radar_params:
+  prf: 5000.
+  fc: 16000000000.0
+  fs: 320000000.0
+  bandwidth: 150000000.0
+  broadening_factor: 1.5
+  pulse_length: 8000
+  scan_rate: .4
+  cfar_pfa: 40.
+  init_az: -45.
+  scan_limit: 30.
+  plp: .05
+
+tracer_params:
+  pix_width: 12000
+  pix_height: 12000
+  block_size: 64
+  sar_block_size: 1024
+  num_bounces: 1
+  upsample: 1
+  dopp_upsample: 1
+  file_path: ./test.dat
+  pickle_path: ./test.pic
+  write_to_file: False
+  use_dechirp: False
+
+sim_params:
+  launch_height: 6096.
+  launch_speed: 102.889
+  init_vel: [0, 1., 0]
+  init_ranges: [1000, 2000.]
+  time: 1.
