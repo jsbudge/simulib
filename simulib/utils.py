@@ -149,14 +149,6 @@ def design_element_positions(
         element_width_m)
 
 
-def get_aesa_phi_theta(
-        a_boresight_aesa_frame: np.ndarray) -> tuple[float, float]:
-    phi = np.arctan2(
-        a_boresight_aesa_frame.item(1), a_boresight_aesa_frame.item(0))
-    theta = np.arccos(a_boresight_aesa_frame.item(2))
-    return phi, theta
-
-
 def get_element_phases(
         a_element_pos_m: np.ndarray, a_point_theta_r: float,
         a_point_phi_r: float,

@@ -9,3 +9,5 @@ build/
 simulib.egg-info/
 
 scripts/model_zoo/
+
+*.gif

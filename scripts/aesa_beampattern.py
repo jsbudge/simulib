@@ -5,27 +5,17 @@
 
 import numpy as np  # Packing of structures in C-compatible format
 from config import load_yaml_config
-from mesh_utils import BaseMesh, OceanMesh
-from scipy.signal import fftconvolve, sawtooth
-from scipy.interpolate import interpn, make_interp_spline
-from scipy.signal.windows import taylor
-from scene_tracer import build_tracer, trace_cpi
-from simulib.simulib.simulation_functions import db, genChirp, genTaylorWindow, azelToVec, \
-    getDopplerLine, genPulse
-from simulib.simulib.platform_helper import RadarPlatform, getRotationOffsetMatrix
-from plotly_utils import drawAntennaBox
+from mesh_utils import BaseMesh
+from scipy.signal import sawtooth
+from scene_tracer import build_tracer, trace_beampattern
+from simulib.simulib.simulation_functions import db, genChirp, genTaylorWindow, azelToVec
+from simulib.simulib.platform_helper import RadarPlatform
 from simulib.simulib.utils import c0, DTR, _complex_float, design_element_positions, get_element_phases
 from simulib.simulib.rotation_functions import get_aesa_pointing_from_phi_theta
 import trimesh as tri
 import matplotlib.pyplot as plt
-import matplotlib as mplib
-from matplotlib.gridspec import GridSpec
 from tqdm import tqdm
 import plotly.express as px
-import plotly.io as pio
-import plotly.graph_objects as go
-from scipy.ndimage import generic_filter, label
-from writer_utils import writePacket, writeDataParams
 
 def aliasFrequency(f, a_fs):
     return f - int(f / (a_fs / 2)) * a_fs / 2
@@ -62,12 +52,12 @@ if __name__ == "__main__":
     # Position of plane/heli
     n_total_gps = int(cfig.sim_params.time * 100)
     gps_times = np.arange(n_total_gps) / 100
-    e = np.zeros(n_total_gps) - 25. + np.linspace(0, 50, n_total_gps)
+    e = np.zeros(n_total_gps)
     n = np.zeros(n_total_gps) - 1400
     u = np.zeros(n_total_gps) + 1524
     r = np.zeros(n_total_gps)
     p = np.zeros(n_total_gps)
-    y = np.arctan2(np.gradient(e), np.gradient(n))
+    y = np.zeros(n_total_gps) + np.pi / 2 # np.arctan2(np.gradient(e), np.gradient(n))
 
     # Position of gimbal
     gim_pan = np.zeros_like(gps_times) # sawtooth(gps_times / cfig.radar_params.scan_rate, width=.5) * cfig.radar_params.scan_limit * DTR / 2
@@ -80,11 +70,9 @@ if __name__ == "__main__":
 
     pointing_az = sawtooth(gps_times * cfig.radar_params.scan_rate / cfig.radar_params.scan_limit * 2 * np.pi, width=.5) * cfig.radar_params.scan_limit * DTR / 2
     aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(pointing_az), pointing_az).T
-    # aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(pointing_az), np.zeros_like(pointing_az) + np.pi / 4).T
+    # aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(pointing_az), np.zeros_like(pointing_az)).T
     aesa_elem_pos_m, aesa_width_m, aesa_height_m, element_patch_size_m = \
         design_element_positions(fc, 5, 4, 4, 2)
-    bw_az = 115 / (aesa_width_m / wavelength) * DTR / 2
-    bw_el = 170 / (aesa_height_m / wavelength) * DTR / 2
     # aesa_elem_pos_m, aesa_width_m, aesa_height_m, element_patch_size_m = \
     #    design_element_positions(fc, 2, 2, 1, 1)
     tx_el_offsets = [aesa_elem_pos_m.swapaxes(2, 4).swapaxes(2, 3).reshape((-1, 3))]
@@ -112,14 +100,11 @@ if __name__ == "__main__":
 
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp_tx.getRadarParams(u.mean(), .25)
 
-    chirps = genChirp(nr, fs, fc, bandwidth).reshape((1, -1)) * 1000.
+    chirps = genChirp(nr, fs, fc, bandwidth).reshape((1, -1)) * 100.
     fft_chirps = np.fft.fft(chirps, fft_len, axis=-1)
     mf_chirps = genTaylorWindow((fc % fs), bandwidth / 2, fs, fft_len) / fft_chirps
-    doppwin = taylor(npulses * dopp_upsample, nbar=11, sll=90)
 
-    dopp_freq = np.fft.fftshift(np.fft.fftfreq(len(doppwin), 1. / prf))
-
-    #villa = tri.load(f'/home/jeff/Documents/roman_facade/scene.gltf', force='mesh')
+    # villa = tri.load(f'/home/jeff/Documents/taiwan_hills/scene.gltf', force='mesh')
     spheres = []
     materials = []
     for s in range(1):
@@ -128,50 +113,31 @@ if __name__ == "__main__":
         # villa.apply_scale(100.)
         villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0) + np.array([0, 2000, 1]))
         villa_mats = np.zeros((villa.triangles.shape[0], 2))
-        villa_mats[:, 0] = 1e6
-        villa_mats[:, 1] = .017
+        villa_mats[:, 0] = 1e1
+        villa_mats[:, 1] = .0017
         spheres.append(BaseMesh(villa, 1, villa_mats, do_sample=False, motion_keys=None))
-        materials.append([1e5, .17])
+        materials.append([1e1, .00017])
 
-    '''boat_motion_keys = []
-
-    boat_motion_vector = azelToVec(-45 * DTR, 0.) * 10.2889 * np.diff(pulse_times[::100])[1]
-
-    for idx, o in enumerate(pulse_times[::100]):
-        boat_motion_keys += [
-            1.0, 0.0, 0.0, idx * boat_motion_vector[0],
-            0.0, 1.0, 0.0, idx * boat_motion_vector[1],
-            0.0, 0.0, 1.0, idx * boat_motion_vector[2],
-        ]'''
-    '''villa = tri.load(f'/home/jeff/Documents/target_meshes/helic.obj', force='mesh')
-    villa.apply_transform(tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
-    # villa.apply_scale(10.)
-    villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0) + np.array([0, 1600, 150]))
-    villa_mats = np.zeros((villa.triangles.shape[0], 2))
-    villa_mats[:, 0] = 1e6
-    villa_mats[:, 1] = .017
-    spheres.append(BaseMesh(villa, 1, villa_mats, do_sample=False, motion_keys=None))
-    materials.append([1e6, .0017])'''
+    gx, gy = np.meshgrid(np.linspace(-5000, 5000, cfig.tracer_params.pix_width), np.linspace(-3000, 7000, cfig.tracer_params.pix_height))
+    gz = np.zeros_like(gx) + 1.5
+    gxyz = np.stack([gx, gy, gz], axis=0)
 
 
     materials = np.stack(materials)
 
     print('Launching...')
 
-    fig = plt.figure(constrained_layout=True)
-    gs = GridSpec(1, 2, figure=fig)
-    sumax = fig.add_subplot(gs[0, 0])
-    scatax = fig.add_subplot(gs[0, 1])
-    # fig, ax = plt.subplots()
+    fig, ax = plt.subplots()
     ims = []
 
-    tracer = build_tracer(spheres, pulse_times=pulse_times)
+    tracer = build_tracer(spheres, cu_file='beampattern.cu', pulse_times=pulse_times)
 
     print(f'Launching {cfig.tracer_params.pix_height * cfig.tracer_params.pix_width} rays.')
     for frame in tqdm(list(zip(*(iter(range(0, len(pulse_times), npulses)),)))):
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         if len(ptimes) < npulses:
             break
+        ptimes = pulse_times[frame[0]:frame[0] + npulses]
         aesa_bore = azelToVec(rp_tx._tx.az_aesa_iner(ptimes), rp_tx._tx.el_aesa_iner(ptimes)).T
         # Compute the AESA phi and theta angles for commanding it
         aesa_phi_r, aesa_theta_r = rp_tx._tx.aesa_frame_phi_theta(ptimes[0])
@@ -182,92 +148,23 @@ if __name__ == "__main__":
         weights_rx = np.expand_dims(elem_weights.flatten(), axis=0)
         txposes = np.expand_dims(rp_tx.txpos(ptimes)[..., :3].swapaxes(0, 1), axis=0)
         rxposes = np.stack([rp.rxpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_rx], axis=0)
-        block_data = trace_cpi(tracer, chirps, npulses, txposes, rxposes, weights_tx, weights_rx, rp_tx._tx.boresight(ptimes[0]), aesa_bore, materials,
+        gpower, cam_u, cam_v, cam_w = trace_beampattern(tracer, chirps, gxyz, npulses, txposes, rxposes, weights_tx, weights_rx, rp_tx._tx.boresight(ptimes[0]), aesa_bore, materials,
                                ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
                                 cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
                                 cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
                                cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
-                               cfig.ant_params.operating_temperature, fft_len, add_noise=True)
-        block_data = np.sum(block_data, axis=0)
+                               cfig.ant_params.operating_temperature, fft_len, add_noise=False)
 
-        # rp_data.append(upsamplePulse(block_data * mf_chirp, fft_len, cfig.tracer_params.upsample, is_freq=True,
-        #                         time_len=nsam).astype(_complex_float))
+        locations, index_ray, index_tri = villa.ray.intersects_location(
+            ray_origins=np.repeat(txposes[0, 0, 0].reshape(1, -1), 2, axis=0),
+            ray_directions=np.stack([aesa_bore[0], rp_tx._tx.boresight(ptimes[0])], axis=0)
+        )
 
-        # Matched Filter
-        rp_data = np.fft.ifft(block_data * mf_chirps, fft_len, axis=-1)[..., :nsam].astype(_complex_float)
-        base_pos = rp_tx.pos(ptimes)
-        dopp_correction = getDopplerLine(rp_tx.az_iner(ptimes).mean(), ranges,
-                                         rp_tx.vel(ptimes).mean(axis=0),
-                                         base_pos.mean(axis=0),
-                                         rp_tx.el_iner(ptimes).mean() + bw_el / 2,
-                                         bw_az / 2, prf, c0 / fc)
-        dp_f, dp_times = np.meshgrid(dopp_correction[0], ptimes)
-        dopp = np.exp(-1j * 2 * np.pi * dp_f * dp_times)
-        # dopp_corr_data = np.fft.fftshift(np.fft.fft(rp_data * dopp * doppwin[:, None], axis=1), axes=1)
-        dopp_corr_data = np.fft.fftshift(np.fft.fft(rp_data, axis=1), axes=1)
-        # sum_data = dopp_corr_data.sum(axis=0)
-        sum_data = dopp_corr_data[0]
-        '''az_del_data = (dopp_corr_data[0] + dopp_corr_data[1]) - (dopp_corr_data[2] + dopp_corr_data[3])
-        el_del_data = (dopp_corr_data[0] + dopp_corr_data[2]) - (dopp_corr_data[1] + dopp_corr_data[3])
-        det_sum = abs(sum_data)'''
-
-
-        # print(f'{aesa_bore} - {boresight_mbs}')
-        bore = rp_tx._tx.boresight(ptimes[0])
-        aesa_az = np.arctan2(aesa_bore[0, 0], aesa_bore[0, 1])
-        aesa_el = -np.arcsin(aesa_bore[0, 2])
-        aesa_near_range = ranges[0] * np.cos(aesa_el)
-        aesa_far_range = ranges[-1] * np.cos(aesa_el)
-
-        neg_beamvec = np.array([np.sin(aesa_az - bw_az / 2),
-                                np.cos(aesa_az - bw_az / 2)])
-        pos_beamvec = np.array([np.sin(aesa_az + bw_az / 2),
-                                np.cos(aesa_az + bw_az / 2)])
-        beamx = np.array([neg_beamvec[0] * aesa_near_range, neg_beamvec[0] * aesa_far_range, pos_beamvec[0] * aesa_far_range,
-                  pos_beamvec[0] * aesa_near_range, neg_beamvec[0] * aesa_near_range]) + base_pos[0, 0]
-        beamy = np.array([neg_beamvec[1] * aesa_near_range, neg_beamvec[1] * aesa_far_range, pos_beamvec[1] * aesa_far_range,
-                          pos_beamvec[1] * aesa_near_range, neg_beamvec[1] * aesa_near_range]) + base_pos[0, 1]
-
-        neg_beamvec = np.array([np.sin(rp_tx.az_iner(ptimes).mean() - bw_az / 2),
-                                np.cos(rp_tx.az_iner(ptimes).mean() - bw_az / 2)])
-        pos_beamvec = np.array([np.sin(rp_tx.az_iner(ptimes).mean() + bw_az / 2),
-                                np.cos(rp_tx.az_iner(ptimes).mean() + bw_az / 2)])
-        aesa_near_range = ranges[0] * np.cos(rp_tx.el_iner(ptimes).mean())
-        aesa_far_range = ranges[-1] * np.cos(rp_tx.el_iner(ptimes).mean())
-        gimx = np.array(
-            [neg_beamvec[0] * aesa_near_range, neg_beamvec[0] * aesa_far_range, pos_beamvec[0] * aesa_far_range,
-             pos_beamvec[0] * aesa_near_range, neg_beamvec[0] * aesa_near_range]) + base_pos[0, 0]
-        gimy = np.array(
-            [neg_beamvec[1] * aesa_near_range, neg_beamvec[1] * aesa_far_range, pos_beamvec[1] * aesa_far_range,
-             pos_beamvec[1] * aesa_near_range, neg_beamvec[1] * aesa_near_range]) + base_pos[0, 1]
-        # plt.cla()
-
-
-        sumax.cla()
-        scatax.cla()
-        sumax.set_title('Sum Beam')
-        im = sumax.imshow(db(sum_data).T, origin='lower', extent=(dopp_freq[0], dopp_freq[-1], ranges[0], ranges[-1]), aspect='auto')
-        # im.set_clim([-250, -100])
-        sumax.set_ylabel('Range (m)')
-        scatax.scatter(base_pos[:, 0], base_pos[:, 1], c='blue')
-        for h in tracer.hulls:
-            scatax.scatter(h.vertices[:, 0], h.vertices[:, 1], c='red')
-        scatax.plot(beamx, beamy, c='blue')
-        scatax.plot(gimx, gimy, c='red')
-        '''im = ax.imshow(db(sum_data).T, origin='lower', extent=(dopp_freq[0], dopp_freq[-1], ranges[0], ranges[-1]),
-                     aspect='auto', animated=True)
-        ims.append([im])'''
+        plt.cla()
+        ax.imshow(gpower, origin = 'lower', extent=[gx.min(), gx.max(), gy.min(), gy.max()], cmap='jet')
+        ax.scatter([locations[:, 0]], [locations[:, 1]])
         plt.draw()
-        plt.pause(.01)
-
-
-    import matplotlib.animation as anim
-    ani = anim.ArtistAnimation(fig, ims, interval=150, blit=True)
-    test = anim.FFMpegWriter(fps=5)
-    ani.save('data.gif', writer=test)
-
-    # plt.figure('Minimum Range Distance')
-    # plt.imshow(range_grid)
+        plt.pause(0.01)
 
     plt.figure('Chirps')
     plt.plot(db(fft_chirps[0]))
@@ -301,11 +198,19 @@ if __name__ == "__main__":
     fig.add_scatter3d(x=rxa[:, 0], y=rxa[:, 1], z=rxa[:, 2], mode='markers')
     fig.show()
 
-    for sph in spheres:
-        fig = go.Figure(data=[go.Mesh3d(x=sph.mesh.vertices[:, 0], y=sph.mesh.vertices[:, 1], z=sph.mesh.vertices[:, 2],
-                                        i=sph.mesh.faces[:, 0], j=sph.mesh.faces[:, 1], k=sph.mesh.faces[:, 2])])
-        fig.update_layout(scene=dict(zaxis=dict(range=[sph.mesh.vertices[:, 2].min(), sph.mesh.vertices.max()])))
-        fig.show()
+    grid_vecs = np.array([gx.flatten() - e[0], gy.flatten() - n[0], gz.flatten() - u[0]]).T
+    rot_mat = np.stack([cam_u[0], cam_v[0], cam_w[0]])
+    grid_vecs = grid_vecs / np.linalg.norm(grid_vecs, axis=1)[:, None]
+    grid_mbs = grid_vecs @ rot_mat
+    grid_redux = grid_mbs @ rot_mat.T
+
+    plt.figure('UV')
+    plt.scatter(grid_mbs[:, 0], grid_mbs[:, 1], c=gpower.flatten())
+    plt.show()
+
+    plt.figure('Inertial')
+    plt.scatter(grid_redux[:, 0], grid_redux[:, 1], c=gpower.flatten())
+    plt.show()
 
 
 
