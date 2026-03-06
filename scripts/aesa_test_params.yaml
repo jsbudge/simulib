@@ -9,7 +9,7 @@ ant_params:
   operating_temperature: 290.
 
 radar_params:
-  prf: 3000.
+  prf: 1000.
   fc: 16000000000.0
   fs: 320000000.0
   bandwidth: 150000000.0
@@ -19,7 +19,7 @@ radar_params:
   cfar_pfa: 40.
   init_az: -45.
   scan_limit: 60.
-  plp: .05
+  plp: .15
 
 tracer_params:
   pix_width: 10000
@@ -27,7 +27,7 @@ tracer_params:
   block_size: 64
   sar_block_size: 1024
   num_bounces: 1
-  upsample: 1
+  upsample: 8
   dopp_upsample: 1
   file_path: ./test.dat
   pickle_path: ./test.pic

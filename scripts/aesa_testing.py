@@ -5,17 +5,15 @@
 
 import numpy as np  # Packing of structures in C-compatible format
 from config import load_yaml_config
-from mesh_utils import BaseMesh, OceanMesh
-from scipy.signal import fftconvolve, sawtooth
-from scipy.interpolate import interpn, make_interp_spline
+from mesh_utils import BaseMesh
+from scipy.signal import sawtooth
 from scipy.signal.windows import taylor
 from scene_tracer import build_tracer, trace_cpi
-from simulib.simulib.simulation_functions import db, genChirp, genTaylorWindow, azelToVec, \
-    getDopplerLine, genPulse
-from simulib.simulib.platform_helper import RadarPlatform, getRotationOffsetMatrix
-from plotly_utils import drawAntennaBox
+from simulib.simulib.simulation_functions import db, genChirp, genTaylorWindow, azelToVec
+from simulib.simulib.platform_helper import RadarPlatform
 from simulib.simulib.utils import c0, DTR, _complex_float, design_element_positions, get_element_phases
 from simulib.simulib.rotation_functions import get_aesa_pointing_from_phi_theta
+from simulib.simulib.sim_objects import AESA
 import trimesh as tri
 import matplotlib.pyplot as plt
 import matplotlib as mplib
@@ -24,8 +22,6 @@ from tqdm import tqdm
 import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
-from scipy.ndimage import generic_filter, label
-from writer_utils import writePacket, writeDataParams
 
 def aliasFrequency(f, a_fs):
     return f - int(f / (a_fs / 2)) * a_fs / 2
@@ -35,13 +31,8 @@ def calcDopplerPRF(v, fc, bandwidth, half_az_bw):
     return 4 * v * np.sin(half_az_bw) * (fc + bandwidth / 2) / c0
 
 
-def to_vec(phi, theta):
-    return np.array([np.sin(phi) * np.cos(theta), np.cos(phi) * np.cos(theta),
-              np.cos(theta)])
-
-
 if __name__ == "__main__":
-    cfig = load_yaml_config('./sikorsky_params.yaml')
+    cfig = load_yaml_config('./aesa_test_params.yaml')
     plp = cfig.radar_params.plp
     dopp_upsample = cfig.tracer_params.dopp_upsample
     init_ranges = cfig.sim_params.init_ranges
@@ -50,9 +41,6 @@ if __name__ == "__main__":
     prf_broadening_factor = cfig.radar_params.broadening_factor
     fc = cfig.radar_params.fc
     fs = cfig.radar_params.fs
-    bw_az = cfig.ant_params.az_bw * DTR
-    bw_el = cfig.ant_params.el_bw * DTR
-    prf = cfig.radar_params.prf * prf_broadening_factor
     bandwidth = cfig.radar_params.bandwidth
     sim_time = cfig.sim_params.time
     wavelength = c0 / fc
@@ -70,49 +58,25 @@ if __name__ == "__main__":
     p = np.zeros(n_total_gps)
     y = np.arctan2(np.gradient(e), np.gradient(n))
 
-    # Position of gimbal
-    gim_pan = np.zeros_like(gps_times) # sawtooth(gps_times / cfig.radar_params.scan_rate, width=.5) * cfig.radar_params.scan_limit * DTR / 2
-    gim_el = np.zeros_like(gps_times)
-    gimbal = np.array([gim_pan, gim_el]).T
-
-    aesa_elem_pos_m, aesa_width_m, aesa_height_m, element_patch_size_m = \
-        design_element_positions(fc, 5, 4, 4, 2)
-    bw_az = 115 / (aesa_width_m / wavelength) * DTR / 2
-    bw_el = 115 / (aesa_height_m / wavelength) * DTR / 2
+    ant_rx = AESA(fc, 5, 4, 1, 1)
+    ant_tx = AESA(fc, 20, 10, 1, 1)
+    bw_az, bw_el = ant_tx.calc_beamwidth(0, 0.)
     pointing_az = sawtooth(gps_times * cfig.radar_params.scan_rate / cfig.radar_params.scan_limit * 2 * np.pi,
                            width=.5) * cfig.radar_params.scan_limit * DTR / 2
     aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(pointing_az), pointing_az).T
-    # aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(pointing_az), np.zeros_like(pointing_az) + np.pi / 4).T
-    # aesa_elem_pos_m, aesa_width_m, aesa_height_m, element_patch_size_m = \
-    #    design_element_positions(fc, 2, 2, 1, 1)
-    tx_el_offsets = [aesa_elem_pos_m.swapaxes(2, 4).swapaxes(2, 3).reshape((-1, 3))]
-    rx_el_offsets = [aesa_elem_pos_m.swapaxes(2, 4).swapaxes(2, 3).reshape((-1, 3))]
-    # rx_el_offsets = [x for xs in [[aesa_elem_pos_m[i, j].swapaxes(0, 2).swapaxes(0, 1).reshape(-1, 3) for j in range(aesa_elem_pos_m.shape[1])] for i in range(aesa_elem_pos_m.shape[0])] for x in xs]
-
     gimbal_rotations = np.array([180. * DTR, 60 * DTR, -np.pi / 2])
     gimbal_offsets = np.array([.0753, 1.6053, -.7873])
     aesa_pointing = np.array([0, -1800, 1524])
 
-    dep_ang = 30.
-    # rxel_array = np.stack([rxe.dot(getRotationOffsetMatrix(*goffsets)) for rxe in rx_el_offsets], axis=0)
-    rxel_array = np.stack([rxe for rxe in rx_el_offsets], axis=0)
-    rx_array = rxel_array.mean(axis=1)
-    txel_array = np.stack([txe for txe in tx_el_offsets], axis=0)
-    tx_array = txel_array.mean(axis=1)
-    vx_array = np.concatenate([rx_array + tx for tx in tx_array])
-
     prf = calcDopplerPRF(np.linalg.norm(np.gradient(np.array([e, n, u]).T, axis=0), axis=1).mean() * 100., fc,
-                         bandwidth, bw_az / 2 + cfig.radar_params.scan_limit * DTR / 2)# * prf_broadening_factor
+                         bandwidth, bw_az / 2 + cfig.radar_params.scan_limit * DTR / 2) * prf_broadening_factor
     pulse_times = np.arange(int(gps_times[-1] * prf)) / prf
 
-    rp_rx = [RadarPlatform(e, n, u, r, p, y, gps_times, np.array([0, 0, 0.]), rxo, gimbal=gimbal,
-                           gimbal_offset=gimbal_offsets, gimbal_rotations=gimbal_rotations, dep_angle=dep_ang,
-                           az_bw=bw_az / DTR, el_bw=bw_el / DTR, fs=fs, fc=fc, prf=prf, bwidth=bandwidth, aesa=aesa) for rxo in rx_el_offsets]
-    rp_tx = RadarPlatform(e, n, u, r, p, y, gps_times, tx_el_offsets[0], np.array([0, 0, 0.]), gimbal=gimbal,
-                          gimbal_offset=gimbal_offsets, gimbal_rotations=gimbal_rotations, dep_angle=dep_ang,
-                          az_bw=bw_az / DTR, el_bw=bw_el / DTR, fs=fs, fc=fc, prf=prf, bwidth=bandwidth, aesa=aesa)
+    rp = RadarPlatform(e, n, u, r, p, y, gps_times, ant_tx.phase_center_offsets, ant_rx.phase_center_offsets,
+                           gimbal_offset=gimbal_offsets, gimbal_rotations=gimbal_rotations, dep_angle=30.,
+                           az_bw=bw_az / DTR, el_bw=bw_el / DTR, fs=fs, fc=fc, prf=prf, bwidth=bandwidth, aesa=aesa)
 
-    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp_tx.getRadarParams(u.mean(), .25)
+    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp.getRadarParams(u.mean(), .25)
 
     chirps = genChirp(nr, fs, fc, bandwidth).reshape((1, -1)) * 1000.
     fft_chirps = np.fft.fft(chirps, fft_len, axis=-1)
@@ -121,20 +85,25 @@ if __name__ == "__main__":
 
     dopp_freq = np.fft.fftshift(np.fft.fftfreq(len(doppwin), 1. / prf))
 
-    villa = tri.load(f'/home/jeff/Documents/roman_facade/scene.gltf')
+    villa = tri.load(f'/home/jeff/Downloads/Parkview Gsplat.glb').to_mesh()
     spheres = []
     materials = []
     for s in range(1):
         # villa = tri.creation.box(extents=np.array([10000, 10000, 1]))
         villa.apply_transform(tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
-        villa.apply_scale(7.)
-        villa.apply_transform(tri.transformations.translation_matrix(-villa.bounding_box.bounds.mean(axis=0) + np.array([0, 2000, 1])))
-        # mats = np.random.rand(len(villa.geometry), 2) * np.array([1e3, .1])
+        villa.apply_scale(100.)
+        villa.apply_transform(tri.transformations.translation_matrix(-villa.bounding_box.bounds.mean(axis=0)))
+        stretch_matrix = np.array([
+            [10.0, 0.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ])
+        villa.apply_transform(stretch_matrix)
+        villa.apply_transform(
+            tri.transformations.translation_matrix(np.array([0, 2000, 1])))
+        mats = np.array([[1.01, .1]])
         spheres.append(BaseMesh(villa, motion_keys=None))
-
-    villa = tri.creation.box(extents=np.array([10000, 10000, 1]))
-    villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0) + np.array([0, 2000, -1]))
-    spheres.append(BaseMesh(villa, motion_keys=None))
 
     '''for saucer in range(5):
         boat_motion_keys = []
@@ -156,30 +125,34 @@ if __name__ == "__main__":
         materials.append([1e6, .017])'''
 
     boat_motion_keys = []
+    motion_pulses = pulse_times[::100]
 
-    boat_motion_vector = azelToVec(-45 * DTR, 0.) * 10.2889 * np.diff(pulse_times[::100])[1]
+    boat_motion_vector = azelToVec(-45 * DTR, 0.) * 10.2889 * np.diff(motion_pulses)[1]
+    car_x = np.zeros(len(motion_pulses))
+    car_y = np.linspace(4000, 0, len(motion_pulses))
+    car_z = np.linspace(-23, -59, len(motion_pulses))
 
-    for idx, o in enumerate(pulse_times[::100]):
+    for idx, o in enumerate(motion_pulses):
         boat_motion_keys += [
-            1.0, 0.0, 0.0, idx * boat_motion_vector[0],
-            0.0, 1.0, 0.0, idx * boat_motion_vector[1],
-            0.0, 0.0, 1.0, idx * boat_motion_vector[2],
+            1.0, 0.0, 0.0, car_x[idx],
+            0.0, 1.0, 0.0, car_y[idx],
+            0.0, 0.0, 1.0, car_z[idx],
         ]
-    villa = tri.load(f'/home/jeff/Documents/target_meshes/helic.obj')
+    villa = tri.load(f'/home/jeff/Documents/target_meshes/Porsche_911_GT2.obj')
     villa.apply_transform(tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
-    villa.apply_scale(10.)
-    villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0) + np.array([0, 1600, 150]))
-    mats = np.random.rand(len(villa.geometry), 2) * np.array([1e3, .1])
-    spheres.append(BaseMesh(villa, materials=mats, motion_keys=boat_motion_keys))
+    # villa.apply_scale(10.)
+    villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0) + np.array([0, 4000, -21.5]))
+    # mats = {0: [1.01, .1], 1: [1e6, .17]}
+    spheres.append(BaseMesh(villa, motion_keys=boat_motion_keys))
 
     print('Launching...')
 
-    fig = plt.figure(constrained_layout=True)
+    '''fig = plt.figure(constrained_layout=True)
     gs = GridSpec(1, 2, figure=fig)
     sumax = fig.add_subplot(gs[0, 0])
-    scatax = fig.add_subplot(gs[0, 1])
-    # fig, ax = plt.subplots()
-    # ims = []
+    scatax = fig.add_subplot(gs[0, 1])'''
+    fig, ax = plt.subplots()
+    ims = []
 
     tracer = build_tracer(spheres, pulse_times=pulse_times, debug=False)
 
@@ -188,17 +161,15 @@ if __name__ == "__main__":
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         if len(ptimes) < npulses:
             break
-        aesa_bore = azelToVec(rp_tx._tx.az_aesa_iner(ptimes), rp_tx._tx.el_aesa_iner(ptimes)).T
+        aesa_bore = azelToVec(rp._tx.az_aesa_iner(ptimes), rp._tx.el_aesa_iner(ptimes)).T
         # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp_tx._tx.aesa_frame_phi_theta(ptimes[0])
+        aesa_phi_r, aesa_theta_r = rp._tx.aesa_frame_phi_theta(ptimes[0])
         # Get the element weights for the designed AESA phi and theta
-        elem_phases_r, elem_weights = get_element_phases(aesa_elem_pos_m, aesa_theta_r, aesa_phi_r, wavelength)
-        weights_tx = np.expand_dims(elem_weights.flatten(), axis=0)
-        # weights_rx = np.stack([x for xs in [[elem_weights[i, j].flatten() for j in range(elem_weights.shape[1])] for i in range(elem_weights.shape[0])] for x in xs], axis=0)
-        weights_rx = np.expand_dims(elem_weights.flatten(), axis=0)
-        txposes = np.expand_dims(rp_tx.txpos(ptimes)[..., :3].swapaxes(0, 1), axis=0)
-        rxposes = np.stack([rp.rxpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_rx], axis=0)
-        block_data = trace_cpi(tracer, chirps, npulses, txposes, rxposes, weights_tx, weights_rx, rp_tx._tx.boresight(ptimes[0]), aesa_bore,
+        weights_tx = ant_tx.get_weights(aesa_phi_r, aesa_theta_r)
+        weights_rx = ant_rx.get_weights(aesa_phi_r, aesa_theta_r)
+        txposes = rp.txpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
+        rxposes = rp.rxpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
+        block_data = trace_cpi(tracer, chirps, txposes, rxposes, weights_tx, weights_rx, rp._tx.boresight(ptimes[0]), aesa_bore,
                                ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
                                 cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
                                 cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
@@ -211,11 +182,11 @@ if __name__ == "__main__":
 
         # Matched Filter
         rp_data = np.fft.ifft(block_data * mf_chirps, fft_len, axis=-1)[..., :nsam].astype(_complex_float)
-        base_pos = rp_tx.pos(ptimes)
-        '''dopp_correction = getDopplerLine(rp_tx.az_iner(ptimes).mean(), ranges,
-                                         rp_tx.vel(ptimes).mean(axis=0),
+        base_pos = rp.pos(ptimes)
+        '''dopp_correction = getDopplerLine(rp.az_iner(ptimes).mean(), ranges,
+                                         rp.vel(ptimes).mean(axis=0),
                                          base_pos.mean(axis=0),
-                                         rp_tx.el_iner(ptimes).mean() + bw_el / 2,
+                                         rp.el_iner(ptimes).mean() + bw_el / 2,
                                          bw_az / 2, prf, c0 / fc)
         dp_f, dp_times = np.meshgrid(dopp_correction[0], ptimes)
         dopp = np.exp(-1j * 2 * np.pi * dp_f * dp_times)'''
@@ -231,7 +202,7 @@ if __name__ == "__main__":
         # print(f'{aesa_bore} - {boresight_mbs}')
         locations, index_ray, index_tri = spheres[0].intersects(
             ray_origins=np.repeat(txposes[0, 0, 0].reshape(1, -1), 2, axis=0),
-            ray_directions=np.stack([aesa_bore[0], rp_tx._tx.boresight(ptimes[0])], axis=0)
+            ray_directions=np.stack([aesa_bore[0], rp._tx.boresight(ptimes[0])], axis=0)
         )
         aesa_az = np.arctan2(aesa_bore[0, 0], aesa_bore[0, 1])
         aesa_el = -np.arcsin(aesa_bore[0, 2])
@@ -247,12 +218,12 @@ if __name__ == "__main__":
         beamy = np.array([neg_beamvec[1] * aesa_near_range, neg_beamvec[1] * aesa_far_range, pos_beamvec[1] * aesa_far_range,
                           pos_beamvec[1] * aesa_near_range, neg_beamvec[1] * aesa_near_range]) + base_pos[0, 1]
 
-        neg_beamvec = np.array([np.sin(rp_tx.az_iner(ptimes).mean() - bw_az / 2),
-                                np.cos(rp_tx.az_iner(ptimes).mean() - bw_az / 2)])
-        pos_beamvec = np.array([np.sin(rp_tx.az_iner(ptimes).mean() + bw_az / 2),
-                                np.cos(rp_tx.az_iner(ptimes).mean() + bw_az / 2)])
-        aesa_near_range = ranges[0] * np.cos(rp_tx.el_iner(ptimes).mean())
-        aesa_far_range = ranges[-1] * np.cos(rp_tx.el_iner(ptimes).mean())
+        neg_beamvec = np.array([np.sin(rp.az_iner(ptimes).mean() - bw_az / 2),
+                                np.cos(rp.az_iner(ptimes).mean() - bw_az / 2)])
+        pos_beamvec = np.array([np.sin(rp.az_iner(ptimes).mean() + bw_az / 2),
+                                np.cos(rp.az_iner(ptimes).mean() + bw_az / 2)])
+        aesa_near_range = ranges[0] * np.cos(rp.el_iner(ptimes).mean())
+        aesa_far_range = ranges[-1] * np.cos(rp.el_iner(ptimes).mean())
         gimx = np.array(
             [neg_beamvec[0] * aesa_near_range, neg_beamvec[0] * aesa_far_range, pos_beamvec[0] * aesa_far_range,
              pos_beamvec[0] * aesa_near_range, neg_beamvec[0] * aesa_near_range]) + base_pos[0, 0]
@@ -262,7 +233,7 @@ if __name__ == "__main__":
         # plt.cla()
 
 
-        sumax.cla()
+        '''sumax.cla()
         scatax.cla()
         sumax.set_title('Sum Beam')
         im = sumax.imshow(db(sum_data).T, origin='lower', cmap='jet', extent=(dopp_freq[0], dopp_freq[-1], ranges[0], ranges[-1]), aspect='auto')
@@ -276,12 +247,12 @@ if __name__ == "__main__":
         scatax.scatter(locations[:, 0], locations[:, 1], c='orange')
 
         plt.draw()
-        plt.pause(.01)
+        plt.pause(.01)'''
 
-        '''im = ax.imshow(db(sum_data).T, origin='lower', cmap='jet',
+        im = ax.imshow(db(sum_data).T, origin='lower', cmap='jet',
                        extent=(dopp_freq[0], dopp_freq[-1], ranges[0], ranges[-1]), aspect='auto', animated=True)
         im.set_clim([-30, 15])
-        ims.append([im])'''
+        ims.append([im])
 
     import matplotlib.animation as anim
     ani = anim.ArtistAnimation(fig, ims, interval=150, blit=True)
@@ -308,25 +279,25 @@ if __name__ == "__main__":
         scene=dict(xaxis=dict(range=[-100, 100]), yaxis=dict(range=[-1400, 100]), zaxis=dict(range=[-1, 1530])))
     cloud_fig.show()
 
-    # rx_array = np.stack([rp_tx.txpos(rp_tx.gpst[0]) for rp in rps])
-    maxes = txel_array[0].max()
-    mins = txel_array[0].min()
-    fig = px.scatter_3d(x=txel_array[0, :, 0], y=txel_array[0, :, 1], z=txel_array[0, :, 2])
-    fig.add_scatter3d(x=tx_array[:, 0], y=tx_array[:, 1], z=tx_array[:, 2], mode='markers')
-    fig.add_scatter3d(x=rx_array[:, 0], y=rx_array[:, 1], z=rx_array[:, 2], mode='markers')
-    fig.update_layout(scene=dict(xaxis=dict(range=[mins, maxes]), yaxis=dict(range=[mins, maxes]), zaxis=dict(range=[mins, maxes])))
-    fig.show()
-
-    txa = rp_tx.txpos(ptimes[0])
-    rxa = rp_rx[0].rxpos(ptimes[0])
-    fig = px.scatter_3d(x=txa[:, 0], y=txa[:, 1], z=txa[:, 2])
-    fig.add_scatter3d(x=rxa[:, 0], y=rxa[:, 1], z=rxa[:, 2], mode='markers')
+    # rx_array = np.stack([rp.txpos(rp.gpst[0]) for rp in rps])
+    maxes = ant_tx.phase_center_offsets[0].max()
+    mins = ant_tx.phase_center_offsets[0].min()
+    fig = px.scatter_3d(x=ant_tx.phase_center_offsets[0, :, 0], y=ant_tx.phase_center_offsets[0, :, 1],
+                        z=ant_tx.phase_center_offsets[0, :, 2])
+    fig.add_scatter3d(x=ant_tx.phase_centers[:, 0], y=ant_tx.phase_centers[:, 1], z=ant_tx.phase_centers[:, 2], mode='markers')
+    fig.add_scatter3d(x=ant_rx.phase_centers[:, 0], y=ant_rx.phase_centers[:, 1], z=ant_rx.phase_centers[:, 2], mode='markers')
+    fig.update_layout(
+        scene=dict(xaxis=dict(range=[mins, maxes]), yaxis=dict(range=[mins, maxes]), zaxis=dict(range=[mins, maxes])))
     fig.show()
 
     for sph in spheres:
-        fig = go.Figure(data=[go.Mesh3d(x=sph.mesh.vertices[:, 0], y=sph.mesh.vertices[:, 1], z=sph.mesh.vertices[:, 2],
-                                        i=sph.mesh.faces[:, 0], j=sph.mesh.faces[:, 1], k=sph.mesh.faces[:, 2])])
-        fig.update_layout(scene=dict(zaxis=dict(range=[sph.mesh.vertices[:, 2].min(), sph.mesh.vertices.max()])))
+        if isinstance(sph.mesh, tri.Scene):
+            fig = go.Figure(data=[go.Mesh3d(x=g.vertices[:, 0], y=g.vertices[:, 1], z=g.vertices[:, 2],
+                                            i=g.faces[:, 0], j=g.faces[:, 1], k=g.faces[:, 2]) for g in sph.mesh.geometry.values()])
+        else:
+            fig = go.Figure(data=[go.Mesh3d(x=sph.mesh.vertices[:, 0], y=sph.mesh.vertices[:, 1], z=sph.mesh.vertices[:, 2],
+                                            i=sph.mesh.faces[:, 0], j=sph.mesh.faces[:, 1], k=sph.mesh.faces[:, 2])])
+        # fig.update_layout(scene=dict(zaxis=dict(range=[sph.mesh.vertices[:, 2].min(), sph.mesh.vertices.max()])))
         fig.show()
 
 

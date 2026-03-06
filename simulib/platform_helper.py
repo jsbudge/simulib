@@ -10,6 +10,7 @@ from functools import singledispatch
 from .utils import GRAVITIC_CONSTANT, c0, TAC, DTR, INS_REFRESH_HZ
 from itertools import product
 SDRBase = Type
+SARParse = Type
 
 
 class DynamicModel(object):
@@ -794,15 +795,212 @@ class SDRPlatform(RadarPlatform):
         else:
             tx_num = sdr[channel].trans_num if not sdr.is_v2 else sdr[channel].tx_num
             tx_offset = np.array(
-                [sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]) if tx_offset is None else tx_offset
+                [[[sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]]]) if tx_offset is None else tx_offset
         rx_num = sdr[channel].rec_num if not sdr.is_v2 else sdr[channel].rx_num
         rx_offset = np.array(
-            [sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]) if rx_offset is None else rx_offset
+            [[[sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]]]) if rx_offset is None else rx_offset
         try:
-            aesa = sdr.aesa.values
-            aesa[:, 0] = np.interp(aesa[:, 0], sdr.gps_data['systime'].values, sdr.gps_data.index.values)
+            aesa_vals = sdr.aesa.values
+            aesa_vals[:, 0] = np.interp(aesa_vals[:, 0], sdr.gps_data['systime'].values, sdr.gps_data.index.values)
+            aesa = np.zeros((len(t), 2))
+            aesa[:, 0] = np.interp(t, aesa_vals[:, 0], aesa_vals[:, 1]) * DTR
+            aesa[:, 1] = np.interp(t, aesa_vals[:, 0], aesa_vals[:, 2]) * DTR
+
         except AttributeError:
             aesa = None
+        super().__init__(e=e, n=n, u=u, r=r, p=p, y=y, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
+                         gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
+                         dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
+                         az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
+                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, tx_num=tx_num,
+                         rx_num=rx_num, aesa=aesa)
+        self._sdr = sdr
+        self.origin = origin
+        self._channel = channel
+
+    def getRadarParams(self, fdelay, plp, upsample=1, a_ranges=None):
+        """
+        A function to get many relevant radar parameters gathered in one spot.
+
+        Args:
+            fdelay: The fdelay value.
+            plp: The plp value.
+            upsample: The upsample value (default: 1).
+
+        Returns:
+            nsam: The calculated number of samples.
+            nr: The calculated pulse length.
+            ranges: The calculated range bins.
+            ranges_sampled: The calculated range bins with upsample value of 1.
+            near_range_s: The calculated near range in seconds.
+            granges: The calculated range bins multiplied by the cosine of the dep_ang.
+            fft_len: The calculated FFT length.
+            up_fft_len: The calculated upsampled FFT length.
+        """
+        nsam = self.calcNumSamples(fdelay, plp, a_ranges)
+        nr = self.calcPulseLength(fdelay, plp, True, a_ranges[0] if a_ranges is not None else None)
+        ranges = self.calcRangeBins(fdelay, upsample, plp, a_ranges)
+        ranges_sampled = self.calcRangeBins(fdelay, 1, plp, a_ranges)
+        near_range_s = ranges[0] / c0
+        granges = ranges * np.cos(self.dep_ang)
+        fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True, nrange=a_ranges[0] if a_ranges is not None else None)))))
+        up_fft_len = fft_len * upsample
+        return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
+
+    def calcRanges(self, fdelay, partial_pulse_percent=1., **kwargs):
+        """
+        Calculate near and far ranges for this collect using the SAR file.
+        :param fdelay: float. FDelay desired in TAC.
+        :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
+        :return: tuple of near and far ranges in meters.
+        """
+        try:
+            nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC) * c0 / 2
+            frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
+                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        except AttributeError:
+            nrange = ((self._sdr[0].Receive_On_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC) * c0 / 2
+            frange = ((self._sdr[0].Receive_Off_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC -
+                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        return nrange, frange
+
+    def calcPulseLength(self, height=0, pulse_length_percent=1., use_tac=False, nrange=None, **kwargs):
+        """
+        Calculate the pulse length for this collect.
+        :param height: Not used. Here for compatibility with parent classes.
+        :param pulse_length_percent: Not used. Here for compatibility with parent classes.
+        :param use_tac: bool. If True, returns pulse length in TAC, otherwise in seconds.
+        :return: Pulse length in TAC, otherwise in seconds.
+        """
+        return self._sdr[self._channel].pulse_length_N if use_tac else self._sdr[self._channel].pulse_length_S
+
+    def calcNumSamples(self, height=0, plp=1., ranges=None, **kwargs):
+        """
+        Get number of samples in a pulse.
+        :param height: Not used. Here for compatibility with parent classes.
+        :param plp: Not used. Here for compatibility with parent classes.
+        :return: Number of samples in a pulse.
+        """
+        return self._sdr[self._channel].nsam
+
+    def calcRangeBins(self, fdelay, upsample=1, plp=1., ranges=None, **kwargs):
+        """
+        Calculate range bins for a pulse/collect.
+        :param fdelay: float. FDelay desired for this pulse in TAC.
+        :param upsample: int. Upsample factor.
+        :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
+        :return: array of range bins in meters.
+        """
+        nrange, frange = self.calcRanges(fdelay, partial_pulse_percent=plp)
+        MPP = c0 / self.fs / upsample
+        return (nrange * 2 + np.arange(self.calcNumSamples() * upsample) * MPP) / 2
+
+    def calcRadVelRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        """
+        Calculate the radial velocity resolution for this collect.
+        :param cpi_len: int. Length of CPI in number of pulses.
+        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal value.
+        :return: Radial velocity resolution in meters per second.
+        """
+        return dopplerBroadeningFactor * c0 * self._sdr[self._channel].prf / \
+            (self._sdr[self._channel].fc * cpi_len)
+
+    def calcDopRes(self, cpi_len, dopplerBroadeningFactor=2.5):
+        """
+        Calculate the Doppler resolution for this collect.
+        :param cpi_len: int. Length of CPI in number of pulses.
+        :param dopplerBroadeningFactor: float. Factor by which to decrease the resolution from the expected optimal value.
+        :return: Doppler resolution in Hz.
+        """
+        return dopplerBroadeningFactor * self._sdr[self._channel].prf / cpi_len
+
+    def calcWrapVel(self):
+        """
+        Calculate the wrap velocity for this collect.
+        :return: Wrap velocity in meters per second.
+        """
+        return self._sdr[self._channel].prf * (c0 / self._sdr[self._channel].fc) / 4.0
+
+    def calcIlluminationVector(self, t):
+        gps_times = np.interp(t, self._sdr.gps_data.index.values, self._sdr.gps_data['systime'].values.astype(int))
+        phi = np.interp(gps_times, self._sdr.aesa['systime'].values.astype(int), self._sdr.aesa['phi'].values.astype(np.float64))
+        theta = np.interp(gps_times, self._sdr.aesa['systime'].values.astype(int), self._sdr.aesa['theta'].values.astype(np.float64))
+        return azelToVec(phi, theta)
+
+
+"""
+SARPlatform
+More specialized version of RadarPlatform that gets all of the values it needs from a SAR file or instance of
+SARParse.
+"""
+
+class SARPlatform(RadarPlatform):
+    _sdr = None
+
+    def __init__(self, sdr: SARParse,
+                 origin: np.ndarray = None,
+                 tx_offset: np.ndarray = None,
+                 rx_offset: np.ndarray = None,
+                 fs: float = 500e6,
+                 channel: int = 0,
+                 gimbal_offset: np.ndarray = None):
+        """
+        Init function. Inherits RadarPlatform to allow for storing radar parameters such as center frequency.
+        This is a Platform object specifically built for SlimSDR collects. Represents a single channel of data.
+        :param sdr: SDRParse object or str. This is path to the SAR file used as a basis for other calculations,
+            or the SDRParse object of an already parsed file.
+        :param origin: 3-tuple. Point used as the origin for ENU reference frame, in (lat, lon, alt).
+        :param tx_offset: 3-tuple. Offset of Tx antenna from body frame in meters. Only used if a different offset is wanted than
+        the one in the SlimSDR .xml file.
+        :param rx_offset: 3-tuple. Offset of Rx antenna from body frame in meters. Only used if a different offset is wanted than
+        the one in the SlimSDR .xml file.
+        :param fs: float. Sampling frequency in Hz.
+        :param channel: int. Channel of data for this object to represent in the SAR file.
+        """
+
+        # Get times, sampling frequency, and set an origin for the local tangent plane
+        t = sdr.gps_data.index.values
+        fs = fs if fs is not None else sdr[channel].fs
+        origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
+
+        # Load GPS values for location and attitude
+        e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
+        r = sdr.gps_data['r'].values
+        p = sdr.gps_data['p'].values
+        y = sdr.gps_data['y'].values
+
+        # Get gimbal values, if any
+        if sdr.gimbal is not None:
+            pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
+                            sdr.gimbal['pan'].values.astype(np.float64))
+            tilt = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
+                             sdr.gimbal['tilt'].values.astype(np.float64))
+        else:
+            pan = np.zeros_like(sdr.gps_data['systime'].values)
+            tilt = np.zeros_like(sdr.gps_data['systime'].values)
+        pan = np.interp(t, sdr.gps_data.index.values, pan)
+        tilt = np.interp(t, sdr.gps_data.index.values, tilt)
+        if 'gim' in sdr.__dict__.keys():
+            goff = np.array(
+                [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
+            grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
+        else:
+            goff = np.zeros(3)
+            grot = np.array([0, 0, -np.pi / 2])
+        try:
+            channel_dep = (sdr.xml['Band_1']['Band_1_Near_Range_D'] + sdr.xml['Band_1']['Band_1_Far_Range_D']) / 2
+        except AttributeError:
+            channel_dep = (sdr.xml['Band_1']['Band_1_Near_Range_D'] + sdr.xml['Band_1']['Band_1_Far_Range_D']) / 2
+        if sdr.channels[channel].is_receive_only:
+            tx_num = np.where([n is not None for n in sdr.port])[0][0]
+        else:
+            tx_num = sdr[channel].trans_num
+            tx_offset = np.array(
+                [[[sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]]]) if tx_offset is None else tx_offset
+        rx_num = sdr[channel].rec_num
+        rx_offset = np.array(
+            [[[sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]]]) if rx_offset is None else rx_offset
+        aesa = None
         super().__init__(e=e, n=n, u=u, r=r, p=p, y=y, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
                          gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
                          dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
@@ -911,7 +1109,7 @@ class AntennaPosition:
     boresight: object
 
     def __init__(self, pos_mat: np.ndarray, gimbal: np.ndarray, gimbal_offset: np.ndarray, gimbal_rotations: np.ndarray,
-                 offset: np.ndarray,  aesa: np.ndarray = None):
+                 offset: np.ndarray, aesa: np.ndarray = None):
 
         pos = pos_mat[:3].T
 
@@ -921,9 +1119,10 @@ class AntennaPosition:
         t = pos_mat[6]
 
         # Take into account the gimbal
+        gim = gimbal if gimbal is not None else np.zeros((len(t), 2))
         self.gimbal_rotation = gimbal_rotations
         self.gimbal_offset = gimbal_offset
-        self._gimbal = CubicSpline(t, gimbal)
+        self._gimbal = CubicSpline(t, gim)
 
         # Matrix to rotate from body to inertial frame for each INS point
         if offset is None:
@@ -932,13 +1131,13 @@ class AntennaPosition:
         self.rot_b_to_mbs = get_aesa_rotation_offset_matrix(*self.gimbal_rotation) if aesa is not None else (
             get_rotation_offset_matrix(*self.gimbal_rotation))
 
-        boresight_inertial = get_boresight_vector(self.rot_b_to_mbs, gimbal[:, 0], gimbal[:, 1], y, p, r)
+        boresight_inertial = get_boresight_vector(self.rot_b_to_mbs, gim[:, 0], gim[:, 1], y, p, r)
         self.boresight = CubicSpline(t, boresight_inertial)
         self.az_iner = CubicSpline(t, np.arctan2(boresight_inertial[:, 0], boresight_inertial[:, 1]))
         self.el_iner = CubicSpline(t, -np.arcsin(boresight_inertial[:, 2]))
 
         if aesa is not None:
-            aesa_phi_r, aesa_theta_r = get_aesa_phi_theta(aesa)
+            aesa_phi_r, aesa_theta_r = aesa.T
             boresight_aesa = get_aesa_boresight_vector(self.rot_b_to_mbs, aesa_phi_r, aesa_theta_r, y, p, r)
             self.az_aesa_iner = CubicSpline(t, np.arctan2(boresight_aesa[:, 0], boresight_aesa[:, 1]))
             self.el_aesa_iner = CubicSpline(t, -np.arcsin(boresight_aesa[:, 2]))
@@ -949,37 +1148,12 @@ class AntennaPosition:
             self.az_aesa_iner = None
             self.el_aesa_iner = None
 
-        if len(offset.shape) == 1 or offset.shape[0] == 1:
-            self.singlePosition(pos, r, p, y, t, gimbal, offset, aesa)
-        else:
-            self.multiPosition(pos, r, p, y, t, gimbal, offset, aesa)
-
-    def singlePosition(self, pos: np.ndarray, r: np.ndarray, p: np.ndarray, y: np.ndarray, t: np.ndarray,
-                       gimbal: np.ndarray, offset: np.ndarray, aesa: np.ndarray = None):
-
-
-        tpos = apply_lever_arm_corrections(self.rot_b_to_mbs, y, p, r, gimbal[:, 0], gimbal[:, 1], self.gimbal_offset,
-            offset, pos)
+        tpos = np.stack([np.stack([apply_lever_arm_corrections(
+            self.rot_b_to_mbs, y, p, r, gim[:, 0], gim[:, 1], self.gimbal_offset,
+            off, pos) for off in a], axis=1) for a in offset], axis=1)
 
         # Build the position splines
         self._pos = CubicSpline(t, tpos)
-
-        # Build a velocity spline
-        self._vel = CubicSpline(t, median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *
-                                INS_REFRESH_HZ)
-
-        # heading check
-        self._heading = lambda lam_t: np.arctan2(self._vel(lam_t)[:, 0], self._vel(lam_t)[:, 1])
-
-    def multiPosition(self, pos: np.ndarray, r: np.ndarray, p: np.ndarray, y: np.ndarray, t: np.ndarray,
-                       gimbal: np.ndarray, offset: np.ndarray, aesa: np.ndarray = None):
-
-        tpos_splines = [apply_lever_arm_corrections(
-            self.rot_b_to_mbs, y, p, r, gimbal[:, 0], gimbal[:, 1], self.gimbal_offset,
-            off, pos) for off in offset]
-
-        # Build the position splines
-        self._pos = CubicSpline(t, np.stack(tpos_splines, axis=1))
 
         # Build a velocity spline
         self._vel = CubicSpline(t, median_filter(np.gradient(pos, axis=0), 15, axes=(0,)) *

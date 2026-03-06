@@ -9,6 +9,7 @@ import plotly.io as pio
 import os
 from functools import reduce
 from dted import Tile, LatLon
+from pathlib import Path
 
 pio.renderers.default = 'browser'
 
@@ -28,10 +29,16 @@ def getDTEDName(lat, lon):
     tmplon = int(np.floor(lon))
     direw = 'w' if tmplon < 0 else 'e'
     dirns = 's' if tmplat < 0 else 'n'
-    if os.name == 'nt':
-        return 'E:\\dted\\%s%03d\\%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+    win_path = f'E:\\dted\\{direw}{abs(tmplon)}\\{dirns}{abs(tmplat)}'
+    unix_path = f'/data1/dted/{direw}{abs(tmplon)}/{dirns}{abs(tmplat)}'
+    if Path(win_path + '.dt2').exists():
+        return win_path + '.dt2'
+    elif Path(win_path + '.dt3').exists():
+        return win_path + '.dt3'
+    elif Path(unix_path + '.dt2').exists():
+        return unix_path + '.dt2'
     else:
-        return '/data1/dted/%s%03d/%s%02d.dt2' % (direw, abs(tmplon), dirns, abs(tmplat))
+        return unix_path + '.dt3'
 
 
 def detect_local_extrema(arr):
@@ -50,7 +57,7 @@ def db(x):
     if isinstance(ret, np.ndarray):
         ret[ret < 1e-15] = 1e-15
     else:
-        ret = min(ret, 1e-15)
+        ret = max(ret, 1e-15)
     return 20 * np.log10(ret)
 
 
@@ -59,7 +66,7 @@ def findPowerOf2(x):
 
 
 def undulationEGM96(lat, lon):
-    inp_file = './simulib/simulib/geoids/EGM96.DAT'
+    inp_file = f'{os.path.dirname(os.path.abspath(__file__))}/geoids/EGM96.DAT'
     with open(inp_file, "rb") as f:  # or "rt" as text file with universal newlines
         egm96 = np.fromfile(f, 'double', 1441 * 721, '')
     eg_n = np.ceil(lat / .25) * .25

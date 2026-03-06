@@ -1,10 +1,11 @@
 import numpy as np
 from sdrparse import load, SDRParse
+from sdrparse.SARParsing import SARParse
 import functools as ftools
 
 # DEFINES
-_float = np.float64
-_complex_float = np.complex128
+_float = np.float32
+_complex_float = np.complex64
 
 # CONSTANTS
 THREADS_PER_BLOCK = 512
@@ -23,8 +24,8 @@ inch_to_m = .0254
 m_to_ft = 3.2808
 
 
-def getRadarAndEnvironment(sdr_file: [SDRParse, str], a_channel: int = 0) -> tuple | None:
-    from .platform_helper import SDRPlatform
+def getRadarAndEnvironment(sdr_file: [SDRParse, str], a_channel: int = 0, is_sdr: bool = True) -> tuple | None:
+    from .platform_helper import SDRPlatform, SARPlatform
     from .grid_helper import SDREnvironment
 
     # Load SAR file into SDRParse object
@@ -40,7 +41,8 @@ def getRadarAndEnvironment(sdr_file: [SDRParse, str], a_channel: int = 0) -> tup
     a_bg = SDREnvironment(a_sdr)
 
     # Load the platform
-    a_rp = SDRPlatform(a_sdr, a_bg.ref, channel=a_channel)
+
+    a_rp = SDRPlatform(a_sdr, a_bg.ref, channel=a_channel) if is_sdr else SARPlatform(a_sdr, a_bg.ref, channel=a_channel)
     return a_bg, a_rp
 
 
