@@ -66,7 +66,7 @@ if __name__ == "__main__":
 
     # Design the antenna
     ant = AESA(fc, 20, 20, 1, 1)
-    aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(gps_times), np.zeros_like(gps_times)).T
+    aesa = np.zeros((len(gps_times), 2))
     gimbal_rotations = np.array([180. * DTR, 40 * DTR, -np.pi / 2])
     gimbal_offsets = np.array([.0753, 1.6053, -.7873])
     aesa_pointing = np.array([0, -1800, 1524])
@@ -133,18 +133,18 @@ if __name__ == "__main__":
     for frame in tqdm(list(zip(*(iter(range(0, len(pulse_times), npulses)),)))):
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
 
-        aesa_bore = azelToVec(rp._tx.az_aesa_iner(ptimes), rp._tx.el_aesa_iner(ptimes)).T
+        aesa_bore = azelToVec(rp.tx.az_aesa_iner(ptimes), rp.tx.el_aesa_iner(ptimes))
         # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp._tx.aesa_frame_phi_theta(ptimes[0])
+        aesa_phi_r, aesa_theta_r = rp.tx.aesa_frame_phi_theta(ptimes[0])
         # Get the element weights for the designed AESA phi and theta
         weights_tx = ant.get_weights(aesa_phi_r, aesa_theta_r)
         weights_rx = ant.get_weights(aesa_phi_r, aesa_theta_r)
         txposes = rp.txpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
         rxposes = rp.rxpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
-        block_data = trace_cpi(tracer, chirps, txposes, rxposes, weights_tx, weights_rx, rp._tx.boresight(ptimes[0]), aesa_bore,
+        block_data = trace_cpi(tracer, chirps, txposes, rxposes, weights_tx, weights_rx, rp.tx.boresight(ptimes[0]), aesa_bore,
                                ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az, bw_el,
-                                cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
-                                cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
+                               cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
+                               cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
                                cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
                                cfig.ant_params.operating_temperature, fft_len, add_noise=False)
         block_data = np.sum(block_data, axis=0)
@@ -158,9 +158,9 @@ if __name__ == "__main__":
         # rp_data = np.fft.ifft(block_data * mf_chirps, fft_len, axis=-1)[..., :nsam].astype(_complex_float)
         base_pos = rp.pos(ptimes)
 
-        bpj_grid += backprojectPulseStream([rp_data[0]], [rp._tx.az_aesa_iner(ptimes)], [rp.rxpos(ptimes).mean(axis=(1, 2))],
-                               [rp.txpos(ptimes).mean(axis=(1, 2))], gz, _float(wavelength), _float(near_range_s), _float(fs * upsample), bw_az,
-                               gx=gx, gy=gy)
+        bpj_grid += backprojectPulseStream([rp_data[0]], [rp.tx.az_aesa_iner(ptimes)], [rp.rxpos(ptimes).mean(axis=(1, 2))],
+                                           [rp.txpos(ptimes).mean(axis=(1, 2))], gz, _float(wavelength), _float(near_range_s), _float(fs * upsample), bw_az,
+                                           gx=gx, gy=gy)
 
         aesa_az = np.arctan2(aesa_bore[0, 0], aesa_bore[0, 1])
         aesa_el = -np.arcsin(aesa_bore[0, 2])

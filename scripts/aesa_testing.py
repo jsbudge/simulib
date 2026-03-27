@@ -161,18 +161,18 @@ if __name__ == "__main__":
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         if len(ptimes) < npulses:
             break
-        aesa_bore = azelToVec(rp._tx.az_aesa_iner(ptimes), rp._tx.el_aesa_iner(ptimes)).T
+        aesa_bore = azelToVec(rp.tx.az_aesa_iner(ptimes), rp.tx.el_aesa_iner(ptimes)).T
         # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp._tx.aesa_frame_phi_theta(ptimes[0])
+        aesa_phi_r, aesa_theta_r = rp.tx.aesa_frame_phi_theta(ptimes[0])
         # Get the element weights for the designed AESA phi and theta
         weights_tx = ant_tx.get_weights(aesa_phi_r, aesa_theta_r)
         weights_rx = ant_rx.get_weights(aesa_phi_r, aesa_theta_r)
         txposes = rp.txpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
         rxposes = rp.rxpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
-        block_data = trace_cpi(tracer, chirps, txposes, rxposes, weights_tx, weights_rx, rp._tx.boresight(ptimes[0]), aesa_bore,
+        block_data = trace_cpi(tracer, chirps, txposes, rxposes, weights_tx, weights_rx, rp.tx.boresight(ptimes[0]), aesa_bore,
                                ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
-                                cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
-                                cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
+                               cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
+                               cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
                                cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
                                cfig.ant_params.operating_temperature, fft_len, add_noise=True)
         block_data = np.sum(block_data, axis=0)
@@ -202,7 +202,7 @@ if __name__ == "__main__":
         # print(f'{aesa_bore} - {boresight_mbs}')
         locations, index_ray, index_tri = spheres[0].intersects(
             ray_origins=np.repeat(txposes[0, 0, 0].reshape(1, -1), 2, axis=0),
-            ray_directions=np.stack([aesa_bore[0], rp._tx.boresight(ptimes[0])], axis=0)
+            ray_directions=np.stack([aesa_bore[0], rp.tx.boresight(ptimes[0])], axis=0)
         )
         aesa_az = np.arctan2(aesa_bore[0, 0], aesa_bore[0, 1])
         aesa_el = -np.arcsin(aesa_bore[0, 2])

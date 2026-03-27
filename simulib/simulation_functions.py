@@ -10,6 +10,7 @@ import os
 from functools import reduce
 from dted import Tile, LatLon
 from pathlib import Path
+import rasterio
 
 pio.renderers.default = 'browser'
 
@@ -23,7 +24,7 @@ DAC_FREQ_HZ = 4e9
 BASE_COMPLEX_SRATE_HZ = DAC_FREQ_HZ / 2
 
 
-def getDTEDName(lat, lon):
+def getDTEDName(lat: float, lon: float) -> str:
     """Return the path and name of the dted to load for the given lat/lon"""
     tmplat = int(np.floor(lat))
     tmplon = int(np.floor(lon))
@@ -41,7 +42,12 @@ def getDTEDName(lat, lon):
         return unix_path + '.dt3'
 
 
-def detect_local_extrema(arr):
+def detect_local_extrema(arr: np.ndarray) -> tuple:
+    """
+    Given a 2d array of floats, returns the areas of local extrema
+    :param arr: NxM array of floats
+    :return: tuple of locations of extrema.
+    """
     neighborhood = morphology.generate_binary_structure(len(arr.shape), 2)
     local_min = filters.minimum_filter(arr, footprint=neighborhood) == arr
     # local_max = filters.maximum_filter(arr, footprint=neighborhood) == arr
@@ -52,7 +58,7 @@ def detect_local_extrema(arr):
     return np.where(detected_extrema)
 
 
-def db(x):
+def db(x: float | np.ndarray) -> float | np.ndarray:
     ret = abs(x)
     if isinstance(ret, np.ndarray):
         ret[ret < 1e-15] = 1e-15
@@ -61,11 +67,11 @@ def db(x):
     return 20 * np.log10(ret)
 
 
-def findPowerOf2(x):
+def findPowerOf2(x: float | np.ndarray) -> float | np.ndarray:
     return int(2 ** (np.ceil(np.log2(x))))
 
 
-def undulationEGM96(lat, lon):
+def undulationEGM96(lat: float | np.ndarray, lon: float | np.ndarray) -> float | np.ndarray:
     inp_file = f'{os.path.dirname(os.path.abspath(__file__))}/geoids/EGM96.DAT'
     with open(inp_file, "rb") as f:  # or "rt" as text file with universal newlines
         egm96 = np.fromfile(f, 'double', 1441 * 721, '')
@@ -85,7 +91,15 @@ def undulationEGM96(lat, lon):
     )
 
 
-def getElevationMap(lats, lons, und=True, interp_method='linear'):
+def getElevationMap(lats: np.ndarray, lons: np.ndarray, und: bool = True, interp_method: str = 'linear') -> np.ndarray:
+    """
+    Get elevations from DTED library for a block of lat/lon pairs.
+    :param lats: Latitude values.
+    :param lons: Longitude values.
+    :param und: If True, applies undulation to get to EGM96.
+    :param interp_method: Passed to the interpolator for the DTED grid.
+    :return: List of elevation values same size as lats/lons.
+    """
     # First, check to see if multiple DTEDs are needed
     floor_lats = np.floor(lats)
     floor_lons = np.floor(lons)
@@ -105,14 +119,44 @@ def getElevationMap(lats, lons, und=True, interp_method='linear'):
         y = (lats[idx] - ulx) / xres
         x = (lons[idx] - uly) / yres
 
-        hght[idx] = interpn(np.array([np.arange(3601), np.arange(3601)]), data, np.array([x, y]).T,
+        hght[idx] = interpn(np.array([np.arange(block.dsi.shape[0]), np.arange(block.dsi.shape[1])]), data, np.array([x, y]).T,
                             method=interp_method, bounds_error=False, fill_value=0) + undulationEGM96(lats[idx], lons[
             idx]) if und else hght
 
     return hght
 
 
-def getElevation(lat, lon, und=True):
+def getElevationTIFF(tiff_name: str, lats: float | np.ndarray, lons: float | np.ndarray, und: bool = True,
+                     interp_method: str = 'linear') -> float | np.ndarray:
+    """
+    Get elevation from TIFF file.
+    :param tiff_name: Path to TIFF file.
+    :param lats: Latitude values.
+    :param lons: Longitude values.
+    :param und: If True, applies undulation to get to EGM96.
+    :param interp_method: Passed to the interpolator for the DTED grid.
+    :return: Elevation value(s) same size as lats/lons.
+    """
+    with rasterio.open(tiff_name) as src:
+        if isinstance(lats, float):
+            row, col = src.index(lons, lats)
+            if row > 0 and col > 0:
+                return src.read(1)[row, col] + undulationEGM96(lats, lons) if und else 0.
+            else:
+                print(f'Desired lat and lon ({lats}, {lons}) are not inside of TIFF area.')
+                return -32767.
+        else:
+            data = src.read(1, resampling=rasterio.enums.Resampling(2))
+            x = (lats - src.bounds[0]) / src.res[0]
+            y = (lons - src.bounds[1]) / src.res[1]
+            return interpn(np.array([np.arange(data.shape[0]), np.arange(data.shape[1])]), data, np.array([x, y]).T,
+                                method=interp_method, bounds_error=False, fill_value=0) + (
+            undulationEGM96(lats, lons) if und else 0.)
+
+
+
+
+def getElevation(lat: float, lon: float, und: bool = True):
     """Returns the digital elevation for a latitude and longitude"""
     ted = getDTEDName(np.floor(lat), np.floor(lon))
     data = Tile(ted, in_memory=False)
@@ -144,17 +188,44 @@ def getElevation(lat, lon, und=True):
     return elevation + undulationEGM96(lat, lon) if und else elevation
 
 
-def llh2enu(lat, lon, h, refllh):
+def llh2enu(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.ndarray,
+            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+    """
+    Converts from Lat/Lon/Alt to local tangent plane ENU
+    :param lat: Latitude values.
+    :param lon: Longitude values.
+    :param h: Altitude values.
+    :param refllh: Reference lat/lon/alt for local tangent plane ENU.
+    :return: Values in ENU.
+    """
     ecef = llh2ecef(lat, lon, h)
     return ecef2enu(*ecef, refllh)
 
 
-def enu2llh(e, n, u, refllh):
+def enu2llh(e: float | np.ndarray, n: float | np.ndarray, u: float | np.ndarray,
+            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+    """
+    Converts from ENU to Lat/Lon/Alt.
+    :param e: Easting values.
+    :param n: Northing values.
+    :param u: Up values.
+    :param refllh: Reference lat/lon/alt for local tangent plane ENU.
+    :return: Values in Lat/Lon/Alt.
+    """
     ecef = enu2ecef(e, n, u, refllh)
     return ecef2llh(*ecef)
 
 
-def enu2ecef(e, n, u, refllh):
+def enu2ecef(e: float | np.ndarray, n: float | np.ndarray, u: float | np.ndarray,
+            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+    """
+    Converts from ENU to ECEF.
+    :param e: Easting values.
+    :param n: Northing values.
+    :param u: Up values.
+    :param refllh: Reference lat/lon/alt for local tangent plane ENU.
+    :return: Values in ECEF.
+    """
     latr = refllh[0] * np.pi / 180
     lonr = refllh[1] * np.pi / 180
     rx, ry, rz = llh2ecef(*refllh)
@@ -170,7 +241,7 @@ def enu2ecef(e, n, u, refllh):
     return ecef[0], ecef[1], ecef[2]
 
 
-def llh2ecef(lat, lon, h):
+def llh2ecef(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.ndarray) -> tuple[float, float, float]:
     """
     Compute the Geocentric (Cartesian) Coordinates X, Y, Z
     given the Geodetic Coordinates lat, lon + Ellipsoid Height h
@@ -184,7 +255,7 @@ def llh2ecef(lat, lon, h):
     return X, Y, Z
 
 
-def ecef2llh(x, y, z):
+def ecef2llh(x: float | np.ndarray, y: float | np.ndarray, z: float | np.ndarray) -> tuple[float, float, float]:
     # This is the Heikkinen application of the Ferrari solution to Bowring's irrational
     # geodetic-latitude equation to get a geodetic latitude and height.
     # Longitude remains the same between the two.
@@ -207,7 +278,8 @@ def ecef2llh(x, y, z):
     return lat, lon, h
 
 
-def ecef2enu(x, y, z, refllh):
+def ecef2enu(x: float | np.ndarray, y: float | np.ndarray, z: float | np.ndarray,
+             refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
     latr = refllh[0] * np.pi / 180
     lonr = refllh[1] * np.pi / 180
     rx, ry, rz = llh2ecef(*refllh)
@@ -218,60 +290,42 @@ def ecef2enu(x, y, z, refllh):
     return enu[0], enu[1], enu[2]
 
 
-def genPulse(phase_x, phase_y, nnr, nfs, nfc, bandw):
+def genPulse(phase_x: np.ndarray, phase_y: np.ndarray, nnr: int, nfs: float, nfc: float, bandw: float) -> np.ndarray:
+    """
+    Generates a pulse with the given phase characteristics.
+    :param phase_x: Normalized points along the duration of the pulse to put a phase knot.
+    :param phase_y: Normalized locations of phase knots within bandwidth, e.g. 1 = bandwidth frequency
+    :param nnr: Number of sample points of pulse.
+    :param nfs: Sampling frequency.
+    :param nfc: Center frequency of pulse.
+    :param bandw: Bandwidth of pulse.
+    :return: Pulse array of length nnr with the given phase characteristics.
+    """
     phase = nfc - bandw // 2 + bandw * np.interp(np.linspace(0, 1, nnr), phase_x, phase_y)
     return np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / nfs))
 
 
-def genChirp(nnr, nfs, nfc, bandw):
+def genChirp(nnr: int, nfs: float, nfc: float, bandw: float) -> np.ndarray:
+    """
+    Generates a linear frequency modulated chirp.
+    :param nnr: Number of sample points of pulse.
+    :param nfs: Sampling frequency.
+    :param nfc: Center frequency of pulse.
+    :param bandw: Bandwidth of pulse.
+    :return: Pulse array of length nnr with linear frequency modulated chirp.
+    """
     phase = nfc - bandw // 2 + bandw * np.interp(np.linspace(0, 1, nnr), np.linspace(0, 1, 10), np.linspace(0, 1, 10))
     return np.exp(1j * 2 * np.pi * np.cumsum(phase * 1 / nfs))
 
 
-def rotate(az, nel, rot_mat):
-    return rot.from_euler('zx', [[-az, 0.], [0., nel - np.pi / 2]]).apply(rot_mat)
-
-def rotation_z(r):
-    return np.array([[np.cos(r), -np.sin(r), 0],
-                     [np.sin(r), np.cos(r), 0],
-                     [0, 0, 1.]])
-
-def rotation_y(r):
-    return np.array([[np.cos(r), 0, np.sin(r)],
-                     [0, 1., 0],
-                     [-np.sin(r), 0, np.cos(r)]])
-
-def rotation_x(r):
-    return np.array([[1, 0, 0.],
-                     [0, np.cos(r), -np.sin(r)],
-                     [0, np.sin(r), np.cos(r)]])
-
-
-def azelToVec(az, el):
-    return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)])
-
-
-def hornPattern(fc, width, height, theta=None, phi=None, deg_per_bin=.5, az_only=False):
-    _lambda = c0 / fc
-    d = _lambda / 2.
-    if theta is None:
-        theta = np.arange(0, np.pi, deg_per_bin * DTR)
-    if phi is None:
-        phi = [0] if az_only else np.arange(-np.pi / 2, np.pi / 2, deg_per_bin * DTR)
-    theta, phi = np.meshgrid(theta, phi)
-    lcw = np.arange(-width / 2, width / 2, d)
-    lch = np.arange(-height / 2, height / 2, d)
-    lch, lcw = np.meshgrid(lch, lcw)
-    lchm = lch.flatten()
-    lcwm = lcw.flatten()
-    k = 2 * np.pi / _lambda
-    locs = np.array([lcwm, np.zeros_like(lcwm), lchm]).T
-    ublock = -azelToVec(theta.flatten(), phi.flatten())
-    AF = np.sum(np.exp(-1j * k * locs.dot(ublock)), axis=0)
-    AF = AF.flatten() if az_only else AF.reshape(theta.shape)
-
-    # Return degree array and antenna pattern
-    return theta, phi, AF
+def azelToVec(az: float | np.ndarray, el: float | np.ndarray) -> np.ndarray:
+    """
+    Converts from inertial azimuth and depression angle to a pointing vector.
+    :param az: Azimuth in radians.
+    :param el: Depression in radians.
+    :return: Nx3 array of pointing vectors.
+    """
+    return np.array([np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), -np.sin(el)]).T
 
 
 def calcSNR(p_s, ant_g, az, el, wavelength, pulse_time, bandw, dopp_mult, rng, rcs_val=None):
@@ -298,41 +352,18 @@ def calcPower(p_s, ant_g, az, el, wavelength, pulse_time, bandw, dopp_mult, rng,
     return sig
 
 
-def arrayFactor(fc, pos, theta=None, phi=None, weights=None, deg_per_bin=.5, az_only=False, horn_dim=None,
-                horn_pattern=None):
-    use_pat = False
-    if horn_pattern is not None:
-        _, _, el_pat = horn_pattern
-        use_pat = True
-    elif horn_dim is not None:
-        use_pat = True
-        _, _, el_pat = hornPattern(fc, horn_dim[0], horn_dim[1], theta=theta, phi=phi,
-                                   deg_per_bin=deg_per_bin, az_only=az_only)
-    _lambda = c0 / fc
-    if theta is None:
-        theta = np.arange(0, np.pi, deg_per_bin * DTR)
-    if phi is None:
-        phi = [0] if az_only else np.arange(-np.pi / 2, np.pi / 2, deg_per_bin * DTR)
-    theta, phi = np.meshgrid(theta, phi)
-    k = 2 * np.pi / _lambda
-    # az, el = np.meshgrid(theta, theta)
-    ublock = -azelToVec(theta.flatten(), phi.flatten())
-    AF = np.exp(-1j * k * pos.dot(ublock))
-    if use_pat:
-        AF *= el_pat.flatten()[None, :]
-    weights = weights if weights is not None else np.ones(pos.shape[0])
-    AF = AF.T.dot(weights).flatten() if az_only else AF.T.dot(weights).reshape(theta.shape)
-    # Return degree array and antenna pattern
-    return theta, phi, AF
-
-
-def factors(n):
+def factors(n: int) -> list:
+    """
+    Returns a list of all factors of n.
+    :param n: Number to get factors of.
+    :return: List of all factors of n.
+    """
     return list(set(reduce(list.__add__,
                            ([i, n // i] for i in range(1, int(pow(n, 0.5) + 1)) if n % i == 0))))
 
 
 def genTaylorWindow(baseband_fc: float, half_bw: float, fs: float, fft_len: int, nbar: int = 5,
-                    sll: float = -35) -> np.array:
+                    sll: float = -35) -> np.ndarray:
     # Get the basebanded center, start and stop frequency of the chirp
     basebandedStartFreqHz = baseband_fc - half_bw
     basebandedStopFreqHz = baseband_fc + half_bw
@@ -358,108 +389,21 @@ def genTaylorWindow(baseband_fc: float, half_bw: float, fs: float, fft_len: int,
     return taylorWindowExtended
 
 
-def GetAdvMatchedFilter(chan, nbar=5, SLL=-35, sar=None, pulseNum=20, fft_len=None):
-    # Things the PS will need to know from the configuration
-    numSamples = chan.nsam
-    samplingFreqHz = chan.fs
-    basebandedChirpRateHzPerS = chan.chirp_rate
-    # If the NCO was positive it means we will have sampled the reverse spectrum
-    #   and the chirp will be flipped
-    if chan.NCO_freq_Hz > 0:
-        basebandedChirpRateHzPerS *= -1
-    halfBandwidthHz = chan.bw / 2.0
-    # Get the basebanded center, start and stop frequency of the chirp
-    basebandedCenterFreqHz = chan.baseband_fc
-    basebandedStartFreqHz = chan.baseband_fc - halfBandwidthHz
-    basebandedStopFreqHz = chan.baseband_fc + halfBandwidthHz
-    if basebandedChirpRateHzPerS < 0:
-        basebandedStartFreqHz = chan.baseband_fc + halfBandwidthHz
-        basebandedStopFreqHz = chan.baseband_fc - halfBandwidthHz
-
-    # Get the reference waveform and mix it down by the NCO frequency and
-    #   downsample to the sampling rate of the receive data if necessary
-    # The waveform input into the DAC has already had the Hilbert transform
-    #   and downsample operation performed on it by SDRParsing, so it is
-    #   complex sampled data at this point at the SlimSDR base complex sampling
-    #   rate.
-    # Compute the decimation rate if the data has been low-pass filtered and
-    #   downsampled
-    decimationRate = 1
-    if chan.is_lpf:
-        decimationRate = int(np.floor(BASE_COMPLEX_SRATE_HZ / samplingFreqHz))
-
-    # Grab the waveform
-    waveformData = chan.ref_chirp
-
-    # Create the plot for the FFT of the waveform
-    waveformLen = len(waveformData)
-
-    # Compute the mixdown signal
-    mixDown = np.exp(1j * (2 * np.pi * chan.NCO_freq_Hz * np.arange(waveformLen) / BASE_COMPLEX_SRATE_HZ))
-    basebandWaveform = mixDown * waveformData
-
-    # Decimate the waveform if applicable
-    if decimationRate > 1:
-        basebandWaveform = basebandWaveform[:: decimationRate]
-    # Calculate the updated baseband waveform length
-    basebandWaveformLen = len(basebandWaveform)
-    # Grab the calibration data
-    calData = chan.cal_chirp + 0.0
-    # Grab the pulses
-    if sar:
-        calData = sar.getPulse(pulseNum, channel=0).T + 0.0
-
-    # Calculate the convolution length
-    convolutionLength = numSamples + basebandWaveformLen - 1
-    FFTLength = findPowerOf2(convolutionLength) if fft_len is None else fft_len
-
-    # Calculate the inverse transfer function
-    FFTCalData = np.fft.fft(calData, FFTLength)
-    FFTBasebandWaveformData = np.fft.fft(basebandWaveform, FFTLength)
-    inverseTransferFunction = FFTBasebandWaveformData / FFTCalData
-    # NOTE! Outside of the bandwidth of the signal, the inverse transfer function
-    #   is invalid and should not be viewed. Values will be enormous.
-
-    # Generate the Taylor window
-    TAYLOR_NBAR = 5
-    TAYLOR_NBAR = nbar
-    TAYLOR_SLL_DB = -35
-    TAYLOR_SLL_DB = SLL
-    windowSize = \
-        int(np.floor(halfBandwidthHz * 2.0 / samplingFreqHz * FFTLength))
-    taylorWindow = window_taylor(windowSize, nbar=TAYLOR_NBAR, sll=TAYLOR_SLL_DB) if SLL != 0 else np.ones(windowSize)
-
-    # Create the matched filter and polish up the inverse transfer function
-    matchedFilter = np.fft.fft(basebandWaveform, FFTLength)
-    # IQ baseband vs offset video
-    if np.sign(basebandedStartFreqHz) != np.sign(basebandedStopFreqHz):
-        # Apply the inverse transfer function
-        aboveZeroLength = int(np.ceil((basebandedCenterFreqHz + halfBandwidthHz) / samplingFreqHz * FFTLength))
-        belowZeroLength = int(windowSize - aboveZeroLength)
-        taylorWindowExtended = np.zeros(FFTLength)
-        taylorWindowExtended[int(FFTLength / 2) - aboveZeroLength:int(FFTLength / 2) - aboveZeroLength + windowSize] = \
-            taylorWindow
-        # Zero out the invalid part of the inverse transfer function
-        inverseTransferFunction[aboveZeroLength: -belowZeroLength] = 0
-        taylorWindowExtended = np.fft.fftshift(taylorWindowExtended)
-    else:
-        # Apply the inverse transfer function
-        bandStartInd = \
-            int(np.floor((basebandedCenterFreqHz - halfBandwidthHz) / samplingFreqHz * FFTLength))
-        taylorWindowExtended = np.zeros(FFTLength)
-        taylorWindowExtended[bandStartInd: bandStartInd + windowSize] = taylorWindow
-        inverseTransferFunction[: bandStartInd] = 0
-        inverseTransferFunction[bandStartInd + windowSize:] = 0
-    matchedFilter = matchedFilter.conj() * inverseTransferFunction * taylorWindowExtended
-    return matchedFilter
-
-
-def getRadarCoeff(fc, ant_transmit_power, rx_gain, tx_gain, rec_gain):
+def getRadarCoeff(fc: float, ant_transmit_power: float, rx_gain: float, tx_gain: float, rec_gain: float) -> float:
+    """
+    Calculates the coefficient needed for the radar equation that does not change with range or angle of arrival.
+    :param fc: Center frequency in Hz.
+    :param ant_transmit_power: Antenna transmission power in watts.
+    :param rx_gain: Receiver gain in dB.
+    :param tx_gain: Transmitter gain in dB.
+    :param rec_gain: Upconverter gain in dB.
+    :return: Radar coefficient.
+    """
     return (c0 ** 2 / fc ** 2 * ant_transmit_power * 10 ** ((rx_gain + 2.15) / 10) * 10 ** ((tx_gain + 2.15) / 10) *
      10 ** ((rec_gain + 2.15) / 10) / (4 * np.pi) ** 3)
 
 
-def window_taylor(N, nbar=4, sll=-30):
+def window_taylor(N: int, nbar: float = 4., sll: float = -30.) -> np.ndarray:
     """Taylor tapering window
     Taylor windows allows you to make tradeoffs between the
     mainlobe width and sidelobe level (sll).
@@ -500,94 +444,19 @@ def window_taylor(N, nbar=4, sll=-30):
     return w
 
 
-def atmospheric_gamma(f, P, wv, T):
-    from itur.models.itu676 import gammaw_exact, gamma0_exact
-    return gamma0_exact(f, P, wv, T).value, gammaw_exact(f, P, wv, T).value
-
-
-def slant_path_atmospheric_attenuation(gamma0, gammaw, f, el_ang):
+def slant_path_atmospheric_attenuation(gamma0: float, gammaw: float, f: float, el_ang: float):
+    """
+    Calculates the slant path attenuation at a given elevation. Taken from Armin Doerry report on atmospheric conditions
+    affecting attenuation.
+    :param gamma0:
+    :param gammaw:
+    :param f:
+    :param el_ang:
+    :return:
+    """
     h0 = 6
     hw = 1.6 * (1 + 3 / ((f - 22.2)**2 + 5) + 5 / ((f - 183.3)**2 + 6) + 2.5 / ((f - 325.4)**2 + 4))
     return (h0 * gamma0 + hw * gammaw) / np.sin(el_ang)
-
-
-def antennaGain(N, wN, Nsub, wNsub, Nel, wNel, a, b, d, lamda):
-    """
-    Inputs are x, y, and z components of the intertial Range vector, which
-    points from the aircraft to the point target (full magnitude, not normalized),
-    as well as the rotation matrices from inertial-to-body,
-    body-to-perpindicular body, and perpindicular body-to-antenna frames.
-    As well as the weights for the Tx array, Rx array, and elevation array and
-    the number of elements in the Tx, Rx, and Elevation arrays, and
-    width (a) and height (b) of a single element, and the wavenumber.
-    """
-    k = 2 * np.pi / lamda
-    thetat = 0.0
-    thetar = 0.0
-    phit = 0.0
-    phir = 0.0
-    cttx = np.cos(thetat)
-    sttx = np.sin(thetat)
-    ctrx = np.cos(thetar)
-    strx = np.sin(thetar)
-    cptx = np.cos(phit)
-    sptx = np.sin(phit)
-    cprx = np.cos(phir)
-    sprx = np.sin(phir)
-    E_i = np.sinc(a * k * sttx * cptx / (2 * np.pi)) * np.sinc(b * k * sttx * sptx / (2 * np.pi))
-    # compute the Tx array factor
-    AFtx = 0.0
-    AFtx2 = 0.0
-    for i in range(int(N / 2)):
-        AFtx += 2 * wN[i]
-        AFtx2 += 2 * (wN[i] ** 2)
-    # compute the Rx array factor for the sub-array
-    AFsub = 0.0
-    AFsub2 = 0.0
-    for i in range(int(Nsub / 2)):
-        AFsub += 2 * wNsub[i]
-        AFsub2 += 2 * (wNsub[i] ** 2)
-    # compute the Elevation array factor
-    AFel = 0.0
-    AFel2 = 0.0
-    for i in range(int(Nel / 2)):
-        AFel += 2 * wNel[i]
-        AFel2 += 2 * (wNel[i] ** 2)
-
-    # let's try the solution from the other PDF from online
-    DFtx = 0.0
-    DFel = 0.0
-    DFde = 0.0
-    for i in range(int(N / 2)):
-        for j in range(int(Nel / 2)):
-            DFtx += 2 * (wN[i] * wNel[j]) * (((i * 2 + 1) / 2.0) ** 2)
-            DFel += 2 * (wN[i] * wNel[j]) * (((j * 2 + 1) / 2.0) ** 2)
-            DFde += 2 * wN[i] * wNel[j]
-    DFtx = np.sqrt(DFtx)
-    DFel = np.sqrt(DFel)
-
-    MTI_DF = 8 * np.pi ** 2 * d * d * DFtx * DFel / (DFde * lamda ** 2)
-
-    # let's try the solution from the other PDF from online
-    DFsub = 0.0
-    DFel = 0.0
-    DFde = 0.0
-    for i in range(int(Nsub / 2)):
-        for j in range(int(Nel / 2)):
-            DFsub += 2 * (wNsub[i] * wNel[j]) * ((i * 2 + 1) / 2.0) ** 2
-            DFel += 2 * (wNsub[i] * wNel[j]) * ((j * 2 + 1) / 2.0) ** 2
-            DFde += 2 * wNsub[i] * wNel[j]
-
-    DFsub = np.sqrt(DFsub)
-    DFel = np.sqrt(DFel)
-
-    SAR_DF = 8 * np.pi ** 2 * d * d * DFsub * DFel / (DFde * lamda ** 2)
-
-    # combine the element electric field with all of the array factors to obtain
-    # the two way normalized radiation pattern
-    MTI_D = AFtx ** 2 * AFel ** 2 / (AFtx2 * AFel2)
-    SAR_D = AFsub ** 2 * AFel ** 2 / (AFsub2 * AFel2)
-    return MTI_D, SAR_D, MTI_DF, SAR_DF
 
 
 def marcumq(alpha, T, end, numSamples):
@@ -738,87 +607,30 @@ def complexMixDown(signalData, mixDownFrequency, srateHz):
     return signalData * mixDownSignal
 
 
-def getTimeDelayS(
-        refDat, secDat, pulseLengthS, chirpRateHzPerS, srateHz, offset):
-    # Compute the pulse length in samples
-    pulseLengthN = int(pulseLengthS * srateHz)
-    cutStart = offset
-    cutEnd = cutStart + pulseLengthN - offset * 2
-    choppedRef = refDat[cutStart: cutEnd].copy() + 0.0
-    choppedSec = secDat[cutStart: cutEnd].copy() + 0.0
-    # Look at phase difference between reference and secondary channels
-    unwrappedPhaseDif = np.unwrap(np.angle(choppedRef / choppedSec))
-    # Get a least squares order 1 polynomial fit of the phase difference
-    times = np.arange(choppedRef.shape[0]) / srateHz
-    polynomials = np.polyfit(times, unwrappedPhaseDif, 1)
-    # Attempt to calculate the time delay based on the delta phase per delta
-    #   freq
-    tau = polynomials[0] / (2 * np.pi * chirpRateHzPerS)
-    print("Time delay tau: %0.3f ps" % (tau / 1e-12))
-
-    """ Now we need to apply the time shift, then compute residual phase. """
-    # Prepare for the FFT of the pulses by computing the next power of 2
-    fftLength = int(2 ** np.ceil(np.log2(choppedRef.shape[0])))
-    # Also estimate the residual remaining phase and return the amplitude bias
-    secondaryFreq = np.fft.fftshift(np.fft.fft(choppedSec, fftLength))
-    # Generate frequencies for the spectrum
-    frequenciesHz = np.arange(fftLength) / fftLength * srateHz
-    omegaK = 2 * np.pi * frequenciesHz
-    # Apply time shift to the secondary pulse in the frequency domain
-    secShiftFreq = secondaryFreq * np.exp(1j * omegaK * tau)
-    # IFFT back to the time domain
-    secShift = np.fft.ifft(
-        np.fft.ifftshift(secShiftFreq))[:choppedRef.shape[0]]
-    # Compute the number of sample shifts from the time delay
-    shiftSamplesN = int(tau * srateHz)
-    chopLopRef = secShift[:shiftSamplesN]
-    chopLopSec = secShift[:shiftSamplesN]
-    # Compute the new unwrapped phase difference
-    unwrappedPhaseDifC = np.unwrap(np.angle(chopLopRef / chopLopSec))
-    meanPhaseOffset = unwrappedPhaseDifC.mean()
-    print("Residual phase offset: %0.3f deg" % (
-            meanPhaseOffset * 180 / np.pi))
-    # Apply the mean phase offset and IFFT
-    secShiftFreq = \
-        secondaryFreq * np.exp(1j * (omegaK * tau + meanPhaseOffset))
-    secShift = np.fft.ifft(
-        np.fft.ifftshift(secShiftFreq))[:choppedRef.shape[0]]
-    # Get the mean amplitutde bias
-    amplitudeBias = abs(choppedRef).mean() / abs(secShift).mean()
-    print("Amplitude bias: %0.5f" % amplitudeBias)
-
-    return tau, meanPhaseOffset, amplitudeBias
-
-
-def applyPulseCorrections(
-        refPulse, timeDelayS, residualPhase, ampBias, fftLength, numSamples,
-        srateHz):
-    # Compute the FFT of the ref pulse
-    freqRefPulse = np.fft.fftshift(
-        np.fft.fft(refPulse * ampBias, fftLength))
-    frequenciesHz = np.arange(fftLength) / fftLength * srateHz
-    omegaK = 2 * np.pi * frequenciesHz
-    freqFixedRef = \
-        freqRefPulse * np.exp(1j * (omegaK * timeDelayS + residualPhase))
-    fixedRef = np.fft.ifft(
-        np.fft.ifftshift(freqFixedRef))[:numSamples]
-    corrections = \
-        ampBias * np.exp(1j * (omegaK * timeDelayS + residualPhase))
-
-    return fixedRef, corrections
-
-
-def upsamplePulse(p, fft_len, upsample, is_freq=False, out_freq=False, time_len=0):
+def upsamplePulse(p: np.ndarray, fft_len: int, upsample: int, is_freq: bool = False, out_freq: bool = False,
+                  time_len: int = 0) -> np.ndarray:
+    """
+    Given an array of complex data, upsamples it in the frequency domain.
+    :param p: Array of complex data. Can be in time domain or frequency domain, but should specify using is_freq.
+    :param fft_len: Length of FFT to return. This is the base value and needs to be upsampled.
+    :param upsample: Upsampling number.
+    :param is_freq: If True, assumes the input p is in the frequency domain.
+    :param out_freq: If True, returns the data still in the frequency domain. Otherwise, returns it to time domain and cuts it to time_len, if specified.
+    :param time_len: If the user specifies out_freq=False, this is the length to cut the data when returned to the time domain. If not specified, just
+        returns the whole thing.
+    :return: Upsampled data.
+    """
+    tl = time_len if time_len else len(p)
     if len(p.shape) == 1:
         op = p if is_freq else np.fft.fft(p, fft_len)
         up = np.zeros(fft_len * upsample, dtype=op.dtype)
         up[:fft_len // 2] = op[:fft_len // 2]
         up[-fft_len // 2:] = op[-fft_len // 2:]
-        up = np.fft.ifft(up)[:time_len * upsample] if not out_freq else up
+        up = np.fft.ifft(up)[:tl * upsample] if not out_freq else up
     else:
         op = p if is_freq else np.fft.fft(p, axis=-1)
         up = np.zeros((*op.shape[:-1], fft_len * upsample), dtype=op.dtype)
         up[..., :fft_len // 2] = op[..., :fft_len // 2]
         up[..., -fft_len // 2:] = op[..., -fft_len // 2:]
-        up = np.fft.ifft(up, axis=-1)[..., :time_len * upsample] if not out_freq else up
+        up = np.fft.ifft(up, axis=-1)[..., :tl * upsample] if not out_freq else up
     return up

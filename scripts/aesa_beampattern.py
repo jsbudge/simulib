@@ -138,9 +138,9 @@ if __name__ == "__main__":
         if len(ptimes) < npulses:
             break
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
-        aesa_bore = azelToVec(rp_tx._tx.az_aesa_iner(ptimes), rp_tx._tx.el_aesa_iner(ptimes)).T
+        aesa_bore = azelToVec(rp_tx.tx.az_aesa_iner(ptimes), rp_tx.tx.el_aesa_iner(ptimes)).T
         # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp_tx._tx.aesa_frame_phi_theta(ptimes[0])
+        aesa_phi_r, aesa_theta_r = rp_tx.tx.aesa_frame_phi_theta(ptimes[0])
         # Get the element weights for the designed AESA phi and theta
         elem_phases_r, elem_weights = get_element_phases(aesa_elem_pos_m, aesa_theta_r, aesa_phi_r, wavelength)
         weights_tx = np.expand_dims(elem_weights.flatten(), axis=0)
@@ -148,16 +148,16 @@ if __name__ == "__main__":
         weights_rx = np.expand_dims(elem_weights.flatten(), axis=0)
         txposes = np.expand_dims(rp_tx.txpos(ptimes)[..., :3].swapaxes(0, 1), axis=0)
         rxposes = np.stack([rp.rxpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_rx], axis=0)
-        gpower, cam_u, cam_v, cam_w = trace_beampattern(tracer, chirps, gxyz, npulses, txposes, rxposes, weights_tx, weights_rx, rp_tx._tx.boresight(ptimes[0]), aesa_bore, materials,
-                               ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
-                                cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
-                                cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
-                               cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
-                               cfig.ant_params.operating_temperature, fft_len, add_noise=False)
+        gpower, cam_u, cam_v, cam_w = trace_beampattern(tracer, chirps, gxyz, npulses, txposes, rxposes, weights_tx, weights_rx, rp_tx.tx.boresight(ptimes[0]), aesa_bore, materials,
+                                                        ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
+                                                        cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
+                                                        cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
+                                                        cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
+                                                        cfig.ant_params.operating_temperature, fft_len, add_noise=False)
 
         locations, index_ray, index_tri = villa.ray.intersects_location(
             ray_origins=np.repeat(txposes[0, 0, 0].reshape(1, -1), 2, axis=0),
-            ray_directions=np.stack([aesa_bore[0], rp_tx._tx.boresight(ptimes[0])], axis=0)
+            ray_directions=np.stack([aesa_bore[0], rp_tx.tx.boresight(ptimes[0])], axis=0)
         )
 
         plt.cla()

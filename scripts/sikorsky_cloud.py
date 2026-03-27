@@ -203,9 +203,9 @@ if __name__ == "__main__":
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         if len(ptimes) < npulses:
             break
-        aesa_bore = azelToVec(rp_tx[0]._tx.az_aesa_iner(ptimes), rp_tx[0]._tx.el_aesa_iner(ptimes)).T
+        aesa_bore = azelToVec(rp_tx[0].tx.az_aesa_iner(ptimes), rp_tx[0].tx.el_aesa_iner(ptimes)).T
         # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp_tx[0]._tx.aesa_frame_phi_theta(ptimes[0])
+        aesa_phi_r, aesa_theta_r = rp_tx[0].tx.aesa_frame_phi_theta(ptimes[0])
         # Get the element weights for the designed AESA phi and theta
         _, elem_weights = get_element_phases(aesa_elem_tx, aesa_theta_r, aesa_phi_r, wavelength)
         weights_tx = np.stack([x for xs in [[elem_weights[i, j].flatten() for j in range(elem_weights.shape[1])] for i in range(elem_weights.shape[0])] for x in xs], axis=0)
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         txposes = np.stack([rp.txpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_tx], axis=0)
         rxposes = np.stack([rp.rxpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_rx], axis=0)
         block_data = trace_cpi(tracer, chirps, npulses, txposes, rxposes, weights_tx, weights_rx,
-                               rp_tx[0]._tx.boresight(ptimes[0]), aesa_bore,
+                               rp_tx[0].tx.boresight(ptimes[0]), aesa_bore,
                                ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
                                cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
                                cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
@@ -269,14 +269,14 @@ if __name__ == "__main__":
 
                 best_pts = np.argmax(music_, axis=1)
 
-                dirs = azelToVec(fine_az_mesh[best_pts] + rp_tx[0]._tx.az_aesa_iner(ptimes).mean(),
-                                 fine_el_mesh[best_pts] + rp_tx[0]._tx.el_aesa_iner(ptimes).mean()).T
+                dirs = azelToVec(fine_az_mesh[best_pts] + rp_tx[0].tx.az_aesa_iner(ptimes).mean(),
+                                 fine_el_mesh[best_pts] + rp_tx[0].tx.el_aesa_iner(ptimes).mean()).T
                 poss_pts = rp_tx[0].pos(ptimes).mean(axis=0) + dirs.mean(axis=0) * ranges[blob_idx].mean()
                 pcloud0.append(poss_pts)
                 apr = az_del_data / sum_data
                 epr = el_del_data / sum_data
-                target_angles = np.array([[rp_tx[0]._tx.az_aesa_iner(ptimes).mean(),
-                                           rp_tx[0]._tx.el_aesa_iner(ptimes).mean()] for _ in blob_x])
+                target_angles = np.array([[rp_tx[0].tx.az_aesa_iner(ptimes).mean(),
+                                           rp_tx[0].tx.el_aesa_iner(ptimes).mean()] for _ in blob_x])
                 target_angles[:, 0] += np.arcsin(
                     (c0 / fc) / (np.pi * np.linalg.norm(rx_array[0] - rx_array[1])) * np.arctan(apr.imag[blob_x, blob_y]))
                 target_angles[:, 1] += np.arcsin(

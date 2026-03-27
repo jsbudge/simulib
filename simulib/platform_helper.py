@@ -4,9 +4,7 @@ from scipy.ndimage import median_filter
 from typing import Type
 from .simulation_functions import llh2enu, azelToVec
 from .rotation_functions import (apply_lever_arm_corrections, get_aesa_rotation_offset_matrix,
-                                 get_rotation_offset_matrix, rotate_aesa_vec_to_inertial, rotate_ant_vec_to_inertial,
-                                 get_aesa_phi_theta, get_aesa_boresight_vector, get_boresight_vector)
-from functools import singledispatch
+                                 get_rotation_offset_matrix, get_aesa_boresight_vector, get_boresight_vector)
 from .utils import GRAVITIC_CONSTANT, c0, TAC, DTR, INS_REFRESH_HZ
 from itertools import product
 SDRBase = Type
@@ -363,8 +361,6 @@ class Platform(object):
                  rx_offset: np.ndarray = None,
                  gps_t: np.ndarray = None,
                  gps_az: np.ndarray = None,
-                 gps_rxpos: np.ndarray = None,
-                 gps_txpos: np.ndarray = None,
                  aesa: np.ndarray = None,
                  *args,
                  **kwargs):
@@ -403,10 +399,10 @@ class Platform(object):
         position_matrix = np.stack([e, n, u, r, p, y, t])
         position_matrix[5] = np.interp(t, gps_t, gps_az + 2 * np.pi) if gps_t is not None else y
 
-        self._tx = AntennaPosition(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset, aesa)
-        self._rx = AntennaPosition(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset, aesa)
+        self.tx = AntennaPosition(position_matrix, gimbal, gimbal_offset, gimbal_rotations, tx_offset, aesa)
+        self.rx = AntennaPosition(position_matrix, gimbal, gimbal_offset, gimbal_rotations, rx_offset, aesa)
 
-        self._att = self._tx.att
+        self._att = self.tx.att
 
         # Take into account the gimbal if necessary
         if gimbal is not None:
@@ -447,12 +443,12 @@ class Platform(object):
     @property
     def rxpos(self):
         # Return Rx position lambda
-        return self._rx.pos
+        return self.rx.pos
 
     @property
     def txpos(self):
         # Return Tx position lambda
-        return self._tx.pos
+        return self.tx.pos
 
     @property
     def vel(self):
@@ -465,11 +461,11 @@ class Platform(object):
 
     @property
     def az_iner(self):
-        return self._tx.az_iner
+        return self.tx.az_iner
 
     @property
     def el_iner(self):
-        return self._tx.el_iner
+        return self.tx.el_iner
 
 
 """
@@ -560,8 +556,6 @@ class RadarPlatform(Platform):
                  prf: float = 1200.,
                  gps_t: np.ndarray = None,
                  gps_az: np.ndarray = None,
-                 gps_rxpos: np.ndarray = None,
-                 gps_txpos: np.ndarray = None,
                  tx_num: int = 0,
                  rx_num: int = 0,
                  wavenumber: int = 0,
@@ -592,15 +586,13 @@ class RadarPlatform(Platform):
             fs: float. Frequency.
             gps_t: np.ndarray. GPS time.
             gps_az: np.ndarray. GPS azimuth.
-            gps_rxpos: np.ndarray. GPS receiver position.
-            gps_txpos: np.ndarray. GPS transmitter position.
             tx_num: int. Transmitter number (default: 0).
             rx_num: int. Receiver number (default: 0).
             wavenumber: int. Wavenumber (default: 0).
         """
 
         super().__init__(e, n, u, r, p, y, t, gimbal, np.array(gimbal_offset), np.array(gimbal_rotations),
-                         tx_offset, rx_offset, gps_t, gps_az, gps_rxpos, gps_txpos, **kwargs)
+                         tx_offset, rx_offset, gps_t, gps_az, **kwargs)
         self.dep_ang = dep_angle * DTR
         self.squint_ang = squint_angle * DTR
         self.az_half_bw = az_bw * DTR / 2
@@ -943,7 +935,8 @@ class SARPlatform(RadarPlatform):
                  rx_offset: np.ndarray = None,
                  fs: float = 500e6,
                  channel: int = 0,
-                 gimbal_offset: np.ndarray = None):
+                 gimbal_offset: np.ndarray = None,
+                 gimbal_rotations: np.ndarray = None):
         """
         Init function. Inherits RadarPlatform to allow for storing radar parameters such as center frequency.
         This is a Platform object specifically built for SlimSDR collects. Represents a single channel of data.
@@ -980,13 +973,15 @@ class SARPlatform(RadarPlatform):
             tilt = np.zeros_like(sdr.gps_data['systime'].values)
         pan = np.interp(t, sdr.gps_data.index.values, pan)
         tilt = np.interp(t, sdr.gps_data.index.values, tilt)
-        if 'gim' in sdr.__dict__.keys():
+        if gimbal_offset is None:
             goff = np.array(
-                [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
-            grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
+                [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if 'gim' in sdr.__dict__.keys() else np.zeros(3)
         else:
-            goff = np.zeros(3)
-            grot = np.array([0, 0, -np.pi / 2])
+            goff = gimbal_offset
+        if gimbal_rotations is None:
+            grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR]) if 'gim' in sdr.__dict__.keys() else np.zeros(3)
+        else:
+            grot = gimbal_rotations
         try:
             channel_dep = (sdr.xml['Band_1']['Band_1_Near_Range_D'] + sdr.xml['Band_1']['Band_1_Far_Range_D']) / 2
         except AttributeError:

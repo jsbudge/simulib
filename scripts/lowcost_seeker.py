@@ -344,7 +344,7 @@ if __name__ == '__main__':
     scaled_rp = (ray_powers[0] - sc_min) * sc
 
     flight_path = rp.pos(rp.gpst)
-    boresights = rp._tx.boresight(rp.gpst).T
+    boresights = rp.tx.boresight(rp.gpst).T
     # boresights = azelToVec(y, p).T
 
     fig = px.scatter_3d(x=flight_path[:, 0], y=flight_path[:, 1], z=flight_path[:, 2])
@@ -467,7 +467,7 @@ if __name__ == '__main__':
 
 
     txposes = rp.txpos(pulse_times[:32]).astype(_float)
-    bores = rp._tx.boresight(pulse_times[0]).T
+    bores = rp.tx.boresight(pulse_times[0]).T
     rolls = rp.vel(pulse_times)
     rolls = rolls / np.linalg.norm(rolls, axis=1)[:, None]
 
@@ -536,7 +536,7 @@ if __name__ == '__main__':
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         ocean.gen_waves(ptimes)
         txposes = rp.txpos(ptimes).astype(_float)
-        bores = rp._tx.boresight(ptimes).T
+        bores = rp.tx.boresight(ptimes).T
         rolls = rp.vel(ptimes)
         rolls = rolls / np.linalg.norm(rolls, axis=1)[:, None]
 

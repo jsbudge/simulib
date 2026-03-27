@@ -165,12 +165,12 @@ if __name__ == "__main__":
                             txposes = rps.txpos(ptimes)[:, :3].reshape((1, npulses, 3))
                             rxposes = rps.rxpos(ptimes)[:, :3].reshape((1, npulses, 3))
                             block_data = trace_cpi(tracer, chirp,
-                                                npulses, txposes, rxposes,
-                                                   rps._tx.boresight(ptimes).T, materials, ptimes,
-                                                nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
-                                                cfig.tracer_params.pix_width, cfig.tracer_params.pix_height, cfig.ant_params.transmit_power,
-                                                cfig.ant_params.rx_gain, cfig.ant_params.tx_gain, cfig.ant_params.rec_gain,
-                                                cfig.ant_params.noise_figure, cfig.ant_params.operating_temperature, fft_len, add_chirp=False)
+                                                   npulses, txposes, rxposes,
+                                                   rps.tx.boresight(ptimes).T, materials, ptimes,
+                                                   nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
+                                                   cfig.tracer_params.pix_width, cfig.tracer_params.pix_height, cfig.ant_params.transmit_power,
+                                                   cfig.ant_params.rx_gain, cfig.ant_params.tx_gain, cfig.ant_params.rec_gain,
+                                                   cfig.ant_params.noise_figure, cfig.ant_params.operating_temperature, fft_len, add_chirp=False)
 
                             base_pos = rps.pos(ptimes)
 

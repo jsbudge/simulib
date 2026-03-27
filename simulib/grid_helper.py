@@ -1,5 +1,5 @@
 import numpy as np
-from .simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation
+from .simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation, getElevationTIFF
 from .utils import DTR
 from scipy.spatial import Delaunay
 from scipy.interpolate import interpn
@@ -16,12 +16,14 @@ class Environment(object):
     _refgrid: np.ndarray
     ref: np.ndarray
     origin: np.ndarray
+    rps: float = 1.
+    cps: float = 1.
 
     def __init__(self, rmat: np.ndarray = None, reflectivity: np.ndarray = None, **kwargs):
         if rmat is not None:
             self.setGrid(reflectivity, rmat)
 
-    def getGridParams(self, pos: tuple[float], width: float, height: float, npts: tuple[int, int], az=0.) -> np.ndarray:
+    def getGridParams(self, pos: tuple[float] | np.ndarray, width: float, height: float, npts: tuple[int, ...], az=0.) -> np.ndarray:
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
         corr_az = np.pi / 2 - az
         # Translation
@@ -38,10 +40,13 @@ class Environment(object):
         h_k = height / (npts[1] - 1)
         rmat = rmat.dot(np.diag([h_k, w_k, 1]))
 
+        self.rps = h_k
+        self.cps = w_k
+
         return rmat
 
     def getGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
-                ncols: int = 0, az: float = 0, use_elevation: bool = True) -> tuple:
+                ncols: int = 0, az: float = 0, use_elevation: str = None) -> tuple:
         # This grid is independent of the refgrid or stored transforms
         npts = self.shape if nrows == 0 else (ncols, nrows)
         if pos is None and width is None and height is None and nrows == 0 and ncols == 0 and az == 0:
@@ -59,18 +64,25 @@ class Environment(object):
         py = rmat[1, 0] * gx + rmat[1, 1] * gy + rmat[1, 2]
         latg, long, altg = enu2llh(px.ravel(), py.ravel(), np.zeros(px.shape[0] * px.shape[1]), self.ref)
         sh = gx.shape
-        if use_elevation:
+        if use_elevation is None:
             try:
                 gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
             except FileNotFoundError:
                 gz = np.zeros(px.shape)
+            except Exception as e:
+                gz = np.zeros(px.shape)
+                print(f'Error found: {e}')
+
         else:
-            gz = np.zeros(px.shape)
+            try:
+                gz = (getElevationTIFF(use_elevation, latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
+            except FileNotFoundError:
+                gz = np.zeros(px.shape)
         return px, py, gz
 
     def getRefGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
-                   ncols: int = 0, az: float = 0) -> np.ndarray:
-        x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az, True)
+                   ncols: int = 0, az: float = 0, use_elevation: str = None) -> np.ndarray:
+        x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az, use_elevation)
         irmat = np.linalg.pinv(self._transform)
         px = self.shape[1] - (irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2)
         py = self.shape[0] - (irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2)
@@ -134,7 +146,7 @@ class Environment(object):
         return np.array([pos_x, pos_y, getElevation(lat, lon) - self.ref[2]]) if isinstance(px, float) else (
             np.array([pos_x, pos_y, getElevationMap(lat, lon) - self.ref[2]]).T)
 
-    def getIndex(self, x: float, y: float) -> np.ndarray:
+    def getIndex(self, x: float | np.ndarray, y: float | np.ndarray) -> np.ndarray:
         irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
         py = irmat[1, 0] * x + irmat[1, 1] * y + irmat[1, 2] + self.shape[0] / 2
@@ -147,6 +159,7 @@ class Environment(object):
         else:
             return interpn((np.arange(self.refgrid.shape[0]),
                             np.arange(self.refgrid.shape[1])), self.refgrid, self.getIndex(x, y)).reshape(x.shape)
+
 
     @property
     def refgrid(self):
@@ -167,7 +180,7 @@ class MapEnvironment(Environment):
         self.origin = origin
         self.ref = origin if ref is None else ref
         super().__init__()
-        bg = np.ones(extent) if background is None else background
+        bg = np.ones((extent, extent)) if background is None else background
         self.setGrid(bg, self.getGridParams(origin, extent[0], extent[1], bg.shape, az=az))
 
 
@@ -176,7 +189,7 @@ class SDREnvironment(Environment):
     cps: float = 1
     heading: float = 0.
 
-    def __init__(self, sdr, local_grid=None, origin=None):
+    def __init__(self, sdr, local_grid: np.ndarray = None, origin: tuple[float, float, float] | np.ndarray =None):
         print('SDR loaded')
         try:
             asi = sdr.loadASI(sdr.files['asi'])
@@ -239,6 +252,81 @@ class SDREnvironment(Environment):
     @property
     def sdr(self):
         return self._sdr
+
+
+class SAREnvironment(Environment):
+    rps: float = 1
+    cps: float = 1
+    heading: float = 0.
+
+    def __init__(self, sar, local_grid=None, origin=None, local_height: float = None, use_tiff: str = None):
+        print('SDR loaded')
+        if local_grid is None:
+            try:
+                asi = sar.loadASI(sar.files['asi'])
+                grid = abs(asi)
+            except KeyError:
+                print('ASI not found.')
+                asi = np.random.rand(2000, 2000)
+                asi[250, 250] = 10
+                asi[750, 750] = 10
+                grid = asi
+            except TypeError:
+                asi = sar.loadASI(sar.files['asi'][0])
+                grid = abs(asi)
+            except FileNotFoundError:
+                print('ASI not found.')
+                asi = np.random.rand(2000, 2000)
+                asi[250, 250] = 10
+                asi[750, 750] = 10
+                grid = asi
+        else:
+            grid = local_grid
+            asi = None
+        self._sar = sar
+        self._asi = asi
+        self.heading = np.arctan2(sar.gps_data['ve'].values[0], sar.gps_data['vn'].values[0])
+        if sar.ash is None:
+            try:
+                hght = sar.xml['Flight_Line']['Flight_Line_Altitude_M']
+                pt = ((sar.xml['Flight_Line']['Start_Latitude_D'] + sar.xml['Flight_Line']['Stop_Latitude_D']) / 2,
+                      (sar.xml['Flight_Line']['Start_Longitude_D'] + sar.xml['Flight_Line']['Stop_Longitude_D']) / 2)
+                alt = local_height if local_height is not None else getElevation(*pt)
+            except KeyError:
+                alt = sar.gps_data['alt'].mean()
+                pt = (sar.gps_data['lat'].mean(), sar.gps_data['lon'].mean())
+                hght = alt + (local_height if local_height is not None else getElevation(*pt))
+            mrange = hght / np.tan(sar.ant[0].dep_ang)
+            if origin is None:
+                ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
+                                           (pt[0], pt[1], alt))
+            else:
+                ref_llh = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
+                                  (pt[0], pt[1], alt))
+        else:
+            if origin is None:
+                origin = (sar.ash['geo']['centerY'], sar.ash['geo']['centerX'],
+                          local_height if local_height is not None else getElevation(sar.ash['geo']['centerY'], sar.ash['geo']['centerX'])
+                          )
+            ref_llh = (sar.ash['geo']['refLat'], sar.ash['geo']['refLon'],
+                       sar.ash['geo']['hRef'])
+            self.rps = sar.ash['geo']['rowPixelSizeM']
+            self.cps = sar.ash['geo']['colPixelSizeM']
+            self.heading = sar.ash['flight']['flnHdg'] * DTR
+
+        self.origin = origin
+        self.ref = ref_llh
+
+        grid = local_grid if local_grid is not None else grid
+
+        rmat = self.getGridParams(self.origin, grid.shape[0] * self.cps, grid.shape[1] * self.rps, grid.shape,
+                                         self.heading)
+
+        super().__init__(rmat=rmat, reflectivity=grid)
+
+    @property
+    def sar(self):
+        return self._sar
 
 
 def createMesh(ptx, pty, ref_im, tri_err, max_vertices, max_iters=20, minimize_vertices=True):
@@ -306,8 +394,8 @@ if __name__ == '__main__':
 
     plt.figure()
     plt.imshow(test.refgrid)
-    gx, gy, gz = test.getGrid()
+    tgx, tgy, tgz = test.getGrid()
 
     plt.figure()
-    plt.scatter(gx.flatten(), gy.flatten())
+    plt.scatter(tgx.flatten(), tgy.flatten())
     plt.show()
