@@ -22,9 +22,9 @@ radar_params:
   plp: .05
 
 tracer_params:
-  pix_width: 10000
-  pix_height: 10000
-  block_size: 64
+  pix_width: 1000
+  pix_height: 1000
+  block_size: 256
   sar_block_size: 1024
   num_bounces: 1
   upsample: 1
@@ -39,4 +39,4 @@ sim_params:
   launch_speed: 102.889
   init_vel: [0, 1., 0]
   init_ranges: [1000, 2000.]
-  time: 2.
+  time: .25

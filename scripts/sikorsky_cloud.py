@@ -40,31 +40,6 @@ def std_filter(arr):
     return np.std(arr)
 pio.renderers.default = 'browser'
 
-def getRParams(a_fs, a_fc, a_plp, a_upsample, near_rng, far_rng, a_npulses, a_dopp_upsample, bandwidth, is_dechirp: bool = False):
-    max_nr = int(near_rng * 2 / c0 * a_fs)
-    nr = min(int(max_nr * a_plp), 4096)
-    chirp_rate = bandwidth / (nr / a_fs)
-    nsam = int(2 * (far_rng - near_rng) * chirp_rate * nr / (c0 * a_fs)) + nr if is_dechirp else int((far_rng - near_rng) / (c0 / 2) * a_fs)
-    # nr = min(int(2 * (far_rng - near_rng) * bandwidth / (a_fs * c0) * a_fs) + 1, int(near_rng * 2 / c0 * a_plp * a_fs)
-    dechirp_bandwidth = chirp_rate * nsam / a_fs
-    fft_len = 2 ** int(np.ceil(np.log2(nsam + nr)))
-    chirp = genChirp(nr, a_fs, a_fc, bandwidth)
-    fft_chirp = np.fft.fft(chirp, fft_len)
-    MPP = c0 * a_fs / (2 * nr * chirp_rate) if is_dechirp else c0 * a_upsample / (a_fs * 2)
-    dechirp = genChirp(nsam, a_fs, a_fc, dechirp_bandwidth) if is_dechirp else None
-    # near_rng -= MPP * (dechirp_bandwidth - bandwidth) / 2 / chirp_rate * a_fs if is_dechirp else 0.
-    if is_dechirp:
-        mwing = .55 * (bandwidth if bandwidth * 2 < a_fs / 2 else a_fs / 2 - (dechirp_bandwidth - bandwidth) / 2)
-        near_rng = (near_rng / c0 - mwing / chirp_rate) * c0
-    ranges = near_rng + np.arange(nsam) * MPP + c0 / a_fs
-    granges = np.sqrt(ranges ** 2 - launch_height ** 2)
-    near_range_s = near_rng / c0
-    mf_chirp = None if is_dechirp else genTaylorWindow((a_fc % a_fs), bandwidth / 2, a_fs, fft_len) / fft_chirp
-    doppwin = taylor(a_npulses * a_dopp_upsample, nbar=11, sll=90)
-    mod_fs = a_fs if is_dechirp else 1 / ((ranges[1] - ranges[0]) * 2 / c0)
-    return nsam, nr, ranges, granges, near_range_s, fft_len, chirp, fft_chirp, mf_chirp, np.fft.fftshift(doppwin), dechirp, mod_fs, chirp_rate
-
-
 
 if __name__ == "__main__":
     cfig = load_yaml_config('./sikorsky_params.yaml')
@@ -76,8 +51,6 @@ if __name__ == "__main__":
     prf_broadening_factor = cfig.radar_params.broadening_factor
     fc = cfig.radar_params.fc
     fs = cfig.radar_params.fs
-    bw_az = cfig.ant_params.az_bw * DTR
-    bw_el = cfig.ant_params.el_bw * DTR
     prf = cfig.radar_params.prf
     bandwidth = cfig.radar_params.bandwidth
     n_eigs = 1
@@ -88,11 +61,11 @@ if __name__ == "__main__":
     print('Generating platform...', end='')
 
     # Position of plane/heli
-    n_total_gps = int(cfig.sim_params.time * 100)
-    gps_times = np.arange(n_total_gps) / 100
-    e = np.zeros(n_total_gps) + 150
-    n = np.zeros(n_total_gps) - 1400 + np.linspace(0, 100, n_total_gps)
-    u = np.zeros(n_total_gps)
+    n_total_gps = int(sim_time * GPS_UPDATE_HZ)
+    gps_times = np.arange(n_total_gps) / GPS_UPDATE_HZ
+    e = np.zeros(n_total_gps) - 200. + np.linspace(0, 400, n_total_gps)
+    n = np.zeros(n_total_gps) - 1400
+    u = np.zeros(n_total_gps) + 200
     r = np.zeros(n_total_gps)
     p = np.zeros(n_total_gps)
     y = np.arctan2(np.gradient(e), np.gradient(n))
@@ -102,48 +75,24 @@ if __name__ == "__main__":
         gps_times)  # sawtooth(gps_times / cfig.radar_params.scan_rate, width=.5) * cfig.radar_params.scan_limit * DTR / 2
     gim_el = np.zeros_like(gps_times)
     gimbal = np.array([gim_pan, gim_el]).T
-    pointing_az = sawtooth(gps_times * cfig.radar_params.scan_rate / cfig.radar_params.scan_limit * 2 * np.pi,
-                           width=.5) * cfig.radar_params.scan_limit * DTR / 2
-    aesa = get_aesa_pointing_from_phi_theta(np.zeros_like(pointing_az), pointing_az).T
 
-    # Transmit array
-    aesa_elem_tx, aesa_width_m, aesa_height_m, element_patch_size_m = \
-        design_element_positions(fc, 10, 16, 2, 1)
-    tx_el_offsets = [x for xs in [
-        [aesa_elem_tx[i, j].swapaxes(0, 2).swapaxes(0, 1).reshape(-1, 3) for j in range(aesa_elem_tx.shape[1])]
-        for i in range(aesa_elem_tx.shape[0])] for x in xs]
+    # Design the antenna
+    ant = AESA(fc, 2, 2, 1, 1)
+    aesa = np.zeros((len(gps_times), 2))
+    gimbal_rotations = np.array([180. * DTR, 40 * DTR, -np.pi / 2])
+    gimbal_offsets = np.array([.0753, 1.6053, -.7873])
+    aesa_pointing = np.array([0, -1800, 1524])
+    bw_az, bw_el = ant.calc_beamwidth(0., 0.)
 
-    # Receive array
-    aesa_elem_rx, aesa_width_m, aesa_height_m, element_patch_size_m = \
-        design_element_positions(fc, 10, 8, 2, 2)
-    rx_el_offsets = [x for xs in [
-        [aesa_elem_rx[i, j].swapaxes(0, 2).swapaxes(0, 1).reshape(-1, 3) for j in range(aesa_elem_rx.shape[1])]
-        for i in range(aesa_elem_rx.shape[0])] for x in xs]
-    bw_az = 115 / (aesa_width_m / wavelength) * DTR / 2
-    bw_el = 115 / (aesa_height_m / wavelength) * DTR / 2
-
+    dep_ang = 15.
     pulse_times = np.arange(int(gps_times[-1] * prf)) / prf
 
-    dep_ang = 0.
+    rp = RadarPlatform(e, n, u, r, p, y, gps_times, ant.phase_center_offsets, ant.phase_center_offsets, gimbal=gimbal,
+                       gimbal_offset=gimbal_offsets, gimbal_rotations=gimbal_rotations, dep_angle=dep_ang,
+                       az_bw=bw_az / DTR, el_bw=bw_el / DTR, fs=fs, fc=fc, prf=prf, bwidth=bandwidth, aesa=aesa)
 
-    gimbal_rotations = np.array([180. * DTR, np.pi / 2, 0.0])
-    gimbal_offsets = np.array([0.0, 1.6053, 1.2])
-    rxel_array = np.stack([rxe for rxe in rx_el_offsets], axis=0)
-    rx_array = rxel_array.mean(axis=1)
-    txel_array = np.stack([txe for txe in tx_el_offsets], axis=0)
-    tx_array = txel_array.mean(axis=1)
-    vx_array = np.concatenate([rx_array + tx for tx in tx_array])
-
-    rp_rx = [RadarPlatform(e, n, u, r, p, y, gps_times, np.array([0, 0, 0.]), rxo, gimbal=gimbal,
-                           gimbal_offset=gimbal_offsets, gimbal_rotations=gimbal_rotations, dep_angle=dep_ang,
-                           az_bw=bw_az / DTR, el_bw=bw_el / DTR, fs=fs, fc=fc, prf=prf, bwidth=bandwidth, aesa=aesa) for
-             rxo in rx_el_offsets]
-    rp_tx = [RadarPlatform(e, n, u, r, p, y, gps_times, txo, np.array([0, 0, 0.]), gimbal=gimbal,
-                          gimbal_offset=gimbal_offsets, gimbal_rotations=gimbal_rotations, dep_angle=dep_ang,
-                          az_bw=bw_az / DTR, el_bw=bw_el / DTR, fs=fs, fc=fc, prf=prf, bwidth=bandwidth, aesa=aesa) for
-             txo in tx_el_offsets]
-
-    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp_tx[0].getRadarParams(u.mean(), .5, a_ranges=init_ranges)
+    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp.getRadarParams(u.mean(), plp,
+                                                                                                     upsample, a_ranges=[1200, 3000])
 
     chirps = np.array([genChirp(nr, fs, fc, bandwidth) * 1000.,
               genPulse(np.linspace(0, 1, 10), np.linspace(1, 0, 10), nr, fs, fc, bandwidth) * 1000.])
@@ -159,13 +108,17 @@ if __name__ == "__main__":
 
     # villa = tri.load('/home/jeff/Documents/roman_facade/scene.gltf', force='mesh')
     spheres = []
-    materials = []
-    for s in range(4):
-        villa = tri.creation.icosphere(3, radius=10)
-        villa.apply_transform(tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
-        # villa.apply_scale(10.)
-        villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0) + np.array([s * 100, s * 60, 0]))
-        spheres.append(BaseMesh(villa, motion_keys=None))
+    villa = tri.load(f'/home/jeff/Documents/{scene}/scene.gltf', force='mesh')
+    villa.apply_transform(
+        tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
+    villa.apply_transform(
+        tri.transformations.rotation_matrix(rotation, np.array([0., 0., 1.]), np.array([0, 0, 0.])))
+    villa.apply_scale(40.)
+    villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0))
+    villa_mats = np.zeros((villa.triangles.shape[0], 2))
+    villa_mats[:, 0] = 1e6
+    villa_mats[:, 1] = .017
+    spheres.append(BaseMesh(villa, villa_mats, motion_keys=None))
 
     print('Launching...')
 
@@ -203,26 +156,22 @@ if __name__ == "__main__":
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
         if len(ptimes) < npulses:
             break
-        aesa_bore = azelToVec(rp_tx[0].tx.az_aesa_iner(ptimes), rp_tx[0].tx.el_aesa_iner(ptimes)).T
+        aesa_bore = azelToVec(rps.tx.az_aesa_iner(ptimes), rps.tx.el_aesa_iner(ptimes))
         # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp_tx[0].tx.aesa_frame_phi_theta(ptimes[0])
+        aesa_phi_r, aesa_theta_r = rps.tx.aesa_frame_phi_theta(ptimes[0])
         # Get the element weights for the designed AESA phi and theta
-        _, elem_weights = get_element_phases(aesa_elem_tx, aesa_theta_r, aesa_phi_r, wavelength)
-        weights_tx = np.stack([x for xs in [[elem_weights[i, j].flatten() for j in range(elem_weights.shape[1])] for i in range(elem_weights.shape[0])] for x in xs], axis=0)
-        _, elem_weights = get_element_phases(aesa_elem_tx, aesa_theta_r, aesa_phi_r, wavelength)
-        weights_rx = np.stack([x for xs in [[elem_weights[i, j].flatten() for j in range(elem_weights.shape[1])] for i in range(elem_weights.shape[0])] for x in xs], axis=0)
-        txposes = np.stack([rp.txpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_tx], axis=0)
-        rxposes = np.stack([rp.rxpos(ptimes)[..., :3].swapaxes(0, 1) for rp in rp_rx], axis=0)
-        block_data = trace_cpi(tracer, chirps, npulses, txposes, rxposes, weights_tx, weights_rx,
-                               rp_tx[0].tx.boresight(ptimes[0]), aesa_bore,
-                               ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el / 2,
+        weights_tx = ant.get_weights(aesa_phi_r, aesa_theta_r)
+        weights_rx = ant.get_weights(aesa_phi_r, aesa_theta_r)
+        txposes = rps.txpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
+        rxposes = rps.rxpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
+        block_data = trace_cpi(tracer, chirps, txposes, rxposes, weights_tx, weights_rx,
+                               rps.tx.boresight(ptimes[0]), aesa_bore,
+                               ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az, bw_el,
                                cfig.tracer_params.pix_width, cfig.tracer_params.pix_height,
-                               cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
+                               cfig.ant_params.transmit_power, cfig.ant_params.rx_gain,
+                               cfig.ant_params.tx_gain,
                                cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
-                               cfig.ant_params.operating_temperature, fft_len, add_chirp=False, add_noise=True)
-        # block_data = np.sum(block_data, axis=0)
-        block_data = np.concatenate([np.fft.fft(b, fft_len, axis=-1) * ff[None, None, None, :]
-                                     for b, ff in zip(block_data, fft_chirps)], axis=0)
+                               cfig.ant_params.operating_temperature, fft_len, add_noise=True, add_chirp=True)
         block_data = np.sum(block_data, axis=0)
 
         # rp_data.append(upsamplePulse(block_data * mf_chirp, fft_len, cfig.tracer_params.upsample, is_freq=True,
