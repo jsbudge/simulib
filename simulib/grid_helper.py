@@ -1,6 +1,6 @@
 import numpy as np
 from .simulation_functions import getElevationMap, llh2enu, enu2llh, getElevation, getElevationTIFF
-from .utils import DTR
+from .utils import DTR, TAC, c0
 from scipy.spatial import Delaunay
 from scipy.interpolate import interpn
 import pickle
@@ -13,17 +13,18 @@ This is a class to represent the environment of a radar.
 
 class Environment(object):
     _transform: np.ndarray
-    _refgrid: np.ndarray
+    _refgrid: np.ndarray | None
     ref: np.ndarray
     origin: np.ndarray
     rps: float = 1.
     cps: float = 1.
 
-    def __init__(self, rmat: np.ndarray = None, reflectivity: np.ndarray = None, **kwargs):
+    def __init__(self, rmat: np.ndarray | None = None, reflectivity: np.ndarray | None = None, **kwargs):
         if rmat is not None:
             self.setGrid(reflectivity, rmat)
 
-    def getGridParams(self, pos: tuple[float] | np.ndarray, width: float, height: float, npts: tuple[int, ...], az=0.) -> np.ndarray:
+    def getGridParams(self, pos: tuple[float, float, float] | np.ndarray, width: float,
+                      height: float, npts: tuple[int, ...], az=0.) -> np.ndarray:
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
         corr_az = np.pi / 2 - az
         # Translation
@@ -45,8 +46,9 @@ class Environment(object):
 
         return rmat
 
-    def getGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
-                ncols: int = 0, az: float = 0, use_elevation: str = None) -> tuple:
+    def getGrid(self, pos: tuple[float, float, float] | None = None, width: float | None = None,
+                height: float | None = None, nrows: int = 0, ncols: int = 0, az: float = 0,
+                use_elevation: str | None = None) -> tuple:
         # This grid is independent of the refgrid or stored transforms
         npts = self.shape if nrows == 0 else (ncols, nrows)
         if pos is None and width is None and height is None and nrows == 0 and ncols == 0 and az == 0:
@@ -72,7 +74,6 @@ class Environment(object):
             except Exception as e:
                 gz = np.zeros(px.shape)
                 print(f'Error found: {e}')
-
         else:
             try:
                 gz = (getElevationTIFF(use_elevation, latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
@@ -80,8 +81,9 @@ class Environment(object):
                 gz = np.zeros(px.shape)
         return px, py, gz
 
-    def getRefGrid(self, pos: tuple[float] = None, width: float = None, height: float = None, nrows: int = 0,
-                   ncols: int = 0, az: float = 0, use_elevation: str = None) -> np.ndarray:
+    def getRefGrid(self, pos: tuple[float, float, float] | None = None, width: float | None = None,
+                   height: float | None = None, nrows: int = 0, ncols: int = 0, az: float = 0,
+                   use_elevation: str | None = None) -> np.ndarray:
         x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az, use_elevation)
         irmat = np.linalg.pinv(self._transform)
         px = self.shape[1] - (irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2)
@@ -91,11 +93,12 @@ class Environment(object):
                         np.arange(self.refgrid.shape[0])), self.refgrid.T, pos_r, bounds_error=False,
                        fill_value=0).reshape(x.shape, order='C')
 
-    def setGrid(self, newgrid: np.ndarray, rmat: np.ndarray) -> None:
+    def setGrid(self, newgrid: np.ndarray | None, rmat: np.ndarray) -> None:
         self._refgrid = newgrid
         self._transform = rmat
 
-    def resampleGrid(self, pos: tuple[float], width: float, height: float, nrows: int, ncols: int, az: float = 0) -> None:
+    def resampleGrid(self, pos: tuple[float, float, float], width: float, height: float,
+                     nrows: int, ncols: int, az: float = 0) -> None:
         x, y, _ = self.getGrid(pos, width, height, nrows, ncols, az)
         irmat = np.linalg.pinv(self._transform)
         px = irmat[0, 0] * x + irmat[0, 1] * y + irmat[0, 2] + self.shape[1] / 2
@@ -176,12 +179,17 @@ class Environment(object):
 
 class MapEnvironment(Environment):
 
-    def __init__(self, origin, extent, ref=None, background=None, az=0.):
+    def __init__(self, origin, extent: tuple[int, int], pixels_per_meter: tuple[float, float] = (1., 1.), ref=None,
+                 background=None, az=0.):
         self.origin = origin
         self.ref = origin if ref is None else ref
-        super().__init__()
-        bg = np.ones((extent, extent)) if background is None else background
-        self.setGrid(bg, self.getGridParams(origin, extent[0], extent[1], bg.shape, az=az))
+        self.heading = az
+        self.cps = pixels_per_meter[0]
+        self.rps = pixels_per_meter[1]
+        rmat = self.getGridParams(self.origin, extent[0] * self.cps, extent[1] * self.rps, extent,
+                                  az)
+        bg = np.ones(extent) if background is None else background
+        super().__init__(rmat=rmat, reflectivity=bg)
 
 
 class SDREnvironment(Environment):
@@ -189,7 +197,8 @@ class SDREnvironment(Environment):
     cps: float = 1
     heading: float = 0.
 
-    def __init__(self, sdr, local_grid: np.ndarray = None, origin: tuple[float, float, float] | np.ndarray =None):
+    def __init__(self, sdr, local_grid: np.ndarray | None = None,
+                 origin: tuple[float, float, float] | np.ndarray | None = None):
         print('SDR loaded')
         try:
             asi = sdr.loadASI(sdr.files['asi'])
@@ -211,7 +220,7 @@ class SDREnvironment(Environment):
             grid = asi
         self._sdr = sdr
         self._asi = asi
-        self.heading = np.arctan2(sdr.gps_data['ve'].values[0], sdr.gps_data['vn'].values[0])
+        self.heading = np.arctan2(sdr.gps_ve.mean(), sdr.gps_vn.mean())
         if sdr.ash is None:
             try:
                 hght = sdr.xml.Flight_Line.Flight_Line_Altitude_M
@@ -219,15 +228,23 @@ class SDREnvironment(Environment):
                       (sdr.xml.Flight_Line.Start_Longitude_D + sdr.xml.Flight_Line.Stop_Longitude_D) / 2)
                 alt = getElevation(*pt)
             except KeyError:
-                alt = sdr.gps_data['alt'].mean()
-                pt = (sdr.gps_data['lat'].mean(), sdr.gps_data['lon'].mean())
-                hght = alt + getElevation(*pt)
-            mrange = hght / np.tan(sdr.ant[0].dep_ang)
+                pt = (sdr.gps_lat.mean(), sdr.gps_lon.mean())
+                alt = getElevation(*pt)
+                hght = sdr.gps_alt.mean() - alt
+            try:
+                nrange = ((sdr[0].receive_on_TAC - sdr[0].transmit_on_TAC) / TAC) * c0 / 2
+                frange = ((sdr[0].receive_off_TAC - sdr[0].transmit_on_TAC) / TAC -
+                          sdr[0].pulse_length_S) * c0 / 2
+            except AttributeError:
+                nrange = ((sdr[0].Receive_On_TAC - sdr[0].Transmit_On_TAC) / TAC) * c0 / 2
+                frange = ((sdr[0].Receive_Off_TAC - sdr[0].Transmit_On_TAC) / TAC -
+                          sdr[0].pulse_length_S) * c0 / 2
+            mrange = np.sqrt(((frange + nrange) / 2)**2 - hght**2)
             if origin is None:
-                ref_llh = origin = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
+                ref_llh = origin = enu2llh(mrange * np.sin(self.heading - np.pi / 2), mrange * np.cos(self.heading - np.pi / 2), 0.,
                                            (pt[0], pt[1], alt))
             else:
-                ref_llh = enu2llh(mrange * np.sin(self.heading), mrange * np.cos(self.heading), 0.,
+                ref_llh = enu2llh(mrange * np.sin(self.heading - np.pi / 2), mrange * np.cos(self.heading - np.pi / 2), 0.,
                                   (pt[0], pt[1], alt))
         else:
             if origin is None:
@@ -239,8 +256,8 @@ class SDREnvironment(Environment):
             self.cps = sdr.ash['geo']['colPixelSizeM']
             self.heading = sdr.ash['flight']['flnHdg'] * DTR
 
-        self.origin = origin
-        self.ref = ref_llh
+        self.origin = np.array(origin)
+        self.ref = np.array(ref_llh)
 
         grid = local_grid if local_grid is not None else grid
 
@@ -248,6 +265,30 @@ class SDREnvironment(Environment):
                                          self.heading)
 
         super().__init__(rmat=rmat, reflectivity=grid)
+
+    def gridFromSwath(self, partial_pulse_percent: float = 0., fdelay: float = 0.,
+                      beamwidth: float = 0., bandwidth: float = 1.):
+        try:
+            nrange = ((self._sdr[0].receive_on_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC) * c0 / 2
+            frange = ((self._sdr[0].receive_off_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC -
+                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        except AttributeError:
+            nrange = ((self._sdr[0].Receive_On_TAC - self._sdr[0].Transmit_On_TAC - fdelay) / TAC) * c0 / 2
+            frange = ((self._sdr[0].Receive_Off_TAC - self._sdr[0].Transmit_On_TAC - fdelay) / TAC -
+                      self._sdr[0].pulse_length_S * partial_pulse_percent) * c0 / 2
+        alt = self._sdr.gps_alt.mean() - getElevation(self._sdr.gps_lat.mean(), self._sdr.gps_lon.mean())
+        nrange = np.sqrt(nrange**2 - alt**2)
+        frange = np.sqrt(frange**2 - alt**2)
+        bottom_enu = llh2enu(self._sdr.gps_lat[0], self._sdr.gps_lon[0], self._sdr.gps_alt[0], self.ref)
+        top_enu = llh2enu(self._sdr.gps_lat[-1], self._sdr.gps_lon[-1], self._sdr.gps_alt[-1], self.ref)
+        bottom_corner = np.array([bottom_enu[0] + nrange * np.sin(self.heading + np.pi / 2), bottom_enu[0] + nrange * np.cos(self.heading + np.pi / 2), 0])
+        top_corner = np.array([top_enu[0] + frange * np.sin(self.heading + np.pi / 2), top_enu[0] + frange * np.cos(self.heading + np.pi / 2), 0])
+        resolution = 1.2 * c0 / (2 * bandwidth)
+        origin_enu = (bottom_corner + top_corner) / 2.
+        origin_llh = enu2llh(*origin_enu, self.ref)
+        width = np.linalg.norm(np.array(bottom_enu) - np.array(top_enu)) - 2 * np.tan(beamwidth / 2) * frange
+        height = float(np.sqrt(np.linalg.norm(bottom_corner - top_corner)**2 - width**2))
+        return self.getGrid(origin_llh, height, width, min(1000, int(width / resolution)), min(1000, int(height / resolution)), self.heading)
 
     @property
     def sdr(self):
@@ -259,7 +300,7 @@ class SAREnvironment(Environment):
     cps: float = 1
     heading: float = 0.
 
-    def __init__(self, sar, local_grid=None, origin=None, local_height: float = None, use_tiff: str = None):
+    def __init__(self, sar, local_grid=None, origin=None, local_height: float | None = None, use_tiff: str | None = None):
         print('SDR loaded')
         if local_grid is None:
             try:
@@ -314,8 +355,8 @@ class SAREnvironment(Environment):
             self.cps = sar.ash['geo']['colPixelSizeM']
             self.heading = sar.ash['flight']['flnHdg'] * DTR
 
-        self.origin = origin
-        self.ref = ref_llh
+        self.origin = np.array(origin)
+        self.ref = np.array(ref_llh)
 
         grid = local_grid if local_grid is not None else grid
 
@@ -389,7 +430,7 @@ if __name__ == '__main__':
     bggrid = np.ones((200, 200))
     bggrid[::50, ::50] = 100
     test = MapEnvironment((40.011, -111.-11, 1380), (200, 300), background=bggrid, az=np.pi / 3)
-    from simulation_functions import db
+    # from simulation_functions import db
     import matplotlib.pyplot as plt
 
     plt.figure()

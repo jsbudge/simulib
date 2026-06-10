@@ -754,27 +754,29 @@ class SDRPlatform(RadarPlatform):
         """
 
         # Get times, sampling frequency, and set an origin for the local tangent plane
-        t = sdr.gps_data.index.values
-        fs = fs if fs is not None else sdr[channel].fs
-        origin = origin if origin is not None else (sdr.gps_data[['lat', 'lon', 'alt']].values[0, :])
+        t = sdr.gps_sec
+        origin = origin if origin is not None else (sdr.gps_lat[0], sdr.gps_lon[0], sdr.gps_alt[0])
 
         # Load GPS values for location and attitude
-        e, n, u = llh2enu(sdr.gps_data['lat'], sdr.gps_data['lon'], sdr.gps_data['alt'], origin)
-        r = sdr.gps_data['r'].values
-        p = sdr.gps_data['p'].values
-        y = sdr.gps_data['y'].values
+        e, n, u = llh2enu(sdr.gps_lat, sdr.gps_lon, sdr.gps_alt, origin)
+        # r = sdr.gps_roll
+        # p = sdr.gps_pitch
+        # y = sdr.gps_yaw
 
         # Get gimbal values, if any
-        if sdr.has_gimbal:
-            pan = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
-                            sdr.gimbal['pan'].values.astype(np.float64))
-            tilt = np.interp(sdr.gps_data['systime'].values, sdr.gimbal['systime'].values.astype(int),
-                             sdr.gimbal['tilt'].values.astype(np.float64))
-        else:
-            pan = np.zeros_like(sdr.gps_data['systime'].values)
-            tilt = np.zeros_like(sdr.gps_data['systime'].values)
-        pan = np.interp(t, sdr.gps_data.index.values, pan)
-        tilt = np.interp(t, sdr.gps_data.index.values, tilt)
+        try:
+            pan = np.interp(sdr.gps_systime, sdr.gimbal_systime.astype(int),
+                            sdr.gimbal_pan.astype(np.float64))
+            tilt = np.interp(sdr.gps_systime, sdr.gimbal_systime.astype(int),
+                             sdr.gimbal_tilt.astype(np.float64))
+        except AttributeError:
+            pan = np.zeros_like(sdr.gps_systime)
+            tilt = np.zeros_like(sdr.gps_systime)
+        except TypeError:
+            pan = np.zeros_like(sdr.gps_systime)
+            tilt = np.zeros_like(sdr.gps_systime)
+        pan = np.interp(t, sdr.gps_sec, pan)
+        tilt = np.interp(t, sdr.gps_sec, tilt)
         goff = np.array(
             [sdr.gim.x_offset, sdr.gim.y_offset, sdr.gim.z_offset]) if gimbal_offset is None else gimbal_offset
         grot = np.array([sdr.gim.roll * DTR, sdr.gim.pitch * DTR, sdr.gim.yaw * DTR])
@@ -782,30 +784,37 @@ class SDRPlatform(RadarPlatform):
             channel_dep = (sdr.xml.Channel_0.Near_Range_D + sdr.xml.Channel_0.Far_Range_D) / 2
         except AttributeError:
             channel_dep = (sdr.xml.Interval_0.Near_Range_D + sdr.xml.Interval_0.Far_Range_D) / 2
-        if sdr.intervals[channel].is_receive_only:
-            tx_num = np.where([n is not None for n in sdr.port])[0][0]
-        else:
-            tx_num = sdr[channel].trans_num if not sdr.is_v2 else sdr[channel].tx_num
-            tx_offset = np.array(
-                [[[sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]]]) if tx_offset is None else tx_offset
+        try:
+            if sdr.intervals[channel].is_receive_only:
+                tx_num = np.where([n is not None for n in sdr.port])[0][0]
+            else:
+                tx_num = sdr[channel].trans_num if not sdr.is_v2 else sdr[channel].tx_num
+                tx_offset = np.array(
+                    [[[sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]]]) if tx_offset is None else tx_offset
+        except AttributeError:
+            if sdr[channel].is_receive_only:
+                tx_num = np.where([n is not None for n in sdr.port])[0][0]
+            else:
+                tx_num = sdr[channel].trans_num if not sdr.is_v2 else sdr[channel].tx_num
+                tx_offset = np.array(
+                    [[[sdr.port[tx_num].x, sdr.port[tx_num].y, sdr.port[tx_num].z]]]) if tx_offset is None else tx_offset
         rx_num = sdr[channel].rec_num if not sdr.is_v2 else sdr[channel].rx_num
         rx_offset = np.array(
             [[[sdr.port[rx_num].x, sdr.port[rx_num].y, sdr.port[rx_num].z]]]) if rx_offset is None else rx_offset
         try:
-            aesa_vals = sdr.aesa.values
-            aesa_vals[:, 0] = np.interp(aesa_vals[:, 0], sdr.gps_data['systime'].values, sdr.gps_data.index.values)
+            aesa_vals = sdr.aesa
+            aesa_vals[:, 0] = np.interp(aesa_vals[:, 0], sdr.gps_systime, sdr.gps_sec)
             aesa = np.zeros((len(t), 2))
             aesa[:, 0] = np.interp(t, aesa_vals[:, 0], aesa_vals[:, 1]) * DTR
             aesa[:, 1] = np.interp(t, aesa_vals[:, 0], aesa_vals[:, 2]) * DTR
-
         except AttributeError:
             aesa = None
-        super().__init__(e=e, n=n, u=u, r=r, p=p, y=y, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
+        super().__init__(e=e, n=n, u=u, r=sdr.gps_roll, p=sdr.gps_pitch, y=sdr.gps_yaw, t=t, tx_offset=tx_offset, rx_offset=rx_offset,
                          gimbal=np.array([pan, tilt]).T, gimbal_offset=goff, gimbal_rotations=grot,
                          dep_angle=channel_dep, squint_angle=sdr.ant[sdr.port[tx_num].assoc_ant].squint / DTR,
                          az_bw=sdr.ant[sdr.port[tx_num].assoc_ant].az_bw / DTR,
-                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs, tx_num=tx_num,
-                         rx_num=rx_num, aesa=aesa)
+                         el_bw=sdr.ant[sdr.port[tx_num].assoc_ant].el_bw / DTR, fs=fs if fs is not None else sdr[channel].fs,
+                         fc=sdr[channel].fc, tx_num=tx_num, rx_num=rx_num, aesa=aesa)
         self._sdr = sdr
         self.origin = origin
         self._channel = channel

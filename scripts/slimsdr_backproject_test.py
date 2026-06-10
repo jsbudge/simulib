@@ -33,24 +33,26 @@ def calcDopplerPRF(v, fc, bandwidth, half_az_bw):
 
 if __name__ == "__main__":
     npulses = 128
-    upsample = 4
-    if False:
-        origin = np.array([40.116744, -111.626010, 1420])
+    upsample = 2
+    if True:
+        origin = (40.098902, -111.659862, 1399.)
 
         # Generate a platform
         print('Generating platform...', end='')
-        sdr = load('/home/jeff/SDR_DATA/RAW/11112025/SAR_11112025_145023.sar', progress_tracker=True)
+        sdr = load('/home/jeff/SDR_DATA/RAW/10282025/SAR_10282025_112741_copy.sar', import_pickle=False, progress_tracker=True)
         bg, rp = getRadarAndEnvironment(sdr)
 
         wavelength = c0 / sdr[0].fc
         fs = sdr[0].fs
+        rp.fs = fs
 
         nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp.getRadarParams(0., 0., upsample)
 
         mfilt = sdr.genReciprocalRipple(0, 0, 0, fft_len=fft_len)  # np.fft.fft(sdr[0].cal_chirp, fft_len).conj()
-        nbpj_pts = [400, 400]
+        nbpj_pts = [512, 512]
 
-        gx, gy, gz = bg.getGrid(origin, 200, 200, nrows=nbpj_pts[0], ncols=nbpj_pts[1])
+        gx, gy, gz = bg.getGrid(origin, 200, 200, nrows=nbpj_pts[0], ncols=nbpj_pts[1], az=bg.heading)
+        gz[:] = gz.mean()
         bpj_grid = np.zeros(gx.shape, dtype=_complex_float)
 
         for frame in tqdm(list(zip(*(iter(sdr[0].frames[::npulses]),)))):
@@ -79,7 +81,7 @@ if __name__ == "__main__":
     -----------------------SLIMSAR---------------------------------
     '''
 
-    if True:
+    if False:
         npulses = 32
         upsample = 4
         # test_name = '/data1/SAR_DATA/2018/10052018/SAR_10052018_133856.sar'

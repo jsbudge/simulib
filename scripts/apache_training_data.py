@@ -17,15 +17,12 @@ from matplotlib.gridspec import GridSpec
 from tqdm import tqdm
 import plotly.io as pio
 import pickle
-
-def aliasFrequency(f, a_fs):
-    return f - int(f / (a_fs / 2)) * a_fs / 2
+import pandas as pd
 
 
 def calcDopplerPRF(v, fc, bandwidth, half_az_bw):
     return 4 * v * np.sin(half_az_bw) * (fc + bandwidth / 2) / c0
 pio.renderers.default = 'browser'
-
 
 
 if __name__ == "__main__":
@@ -39,6 +36,9 @@ if __name__ == "__main__":
 
     velocity = 85
     wavelength = c0 / fc
+
+    targetNames = ['hangar.gltf', 'b2spirit.gltf', 'helic.obj', 'piper_pa18.obj', 'Porsche_911_GT2.obj',
+               'farmhouse_obj.obj', 'cessna-172-obj.obj', 'Humvee.obj', 'Tiger.obj']
 
     # Generate a platform
     print('Generating platform...', end='')
@@ -68,7 +68,7 @@ if __name__ == "__main__":
         dep_ang = 35.
 
         # Design the antenna
-        ant = AESA(fc, 2, 2, 1, 1)
+        ant = AESA(fc, 4, 2, 1, 1)
         aesa = np.zeros((len(gps_times), 2))
         gimbal_rotations = np.array([180. * DTR, dep_ang * DTR, -np.pi / 2])
         gimbal_offsets = np.array([.0753, 1.6053, -.7873])
@@ -102,11 +102,12 @@ if __name__ == "__main__":
 
         # scenes = ['rock_ring', 'winter_trees']
         # targets = ['hangar.gltf', 'b2spirit.gltf', 'helic.obj', 'piper_pa18.obj', 'Porsche_911_GT2.obj']
+        scalings = pd.read_csv('/home/jeff/repo/apache/data/target_info.csv')
 
-        scenes = ['rock_ring']
-        targets = ['helic.obj']
+        scenes = ['rock_ring', 'winter_trees']
+        targets = ['helic.obj', 'hangar.gltf', 'piper_pa18.obj', 'Porsche_911_GT2.obj']
 
-        for n in range(10):
+        for n in range(5):
             rotation = np.random.rand() * np.pi
             build_params['rotation'] = rotation
             for scene in scenes:
@@ -115,10 +116,10 @@ if __name__ == "__main__":
                     tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
                 villa.apply_transform(
                     tri.transformations.rotation_matrix(rotation, np.array([0., 0., 1.]), np.array([0, 0, 0.])))
-                villa.apply_scale(40.)
+                villa.apply_scale((40, 40, 2))
                 villa.apply_translation(-villa.bounding_box.bounds.mean(axis=0))
                 villa_mats = np.zeros((villa.triangles.shape[0], 2))
-                villa_mats[:, 0] = 1e2
+                villa_mats[:, 0] = 1.1
                 villa_mats[:, 1] = .017
                 villa_mesh = BaseMesh(villa, villa_mats, motion_keys=None)
                 for target in targets:
@@ -127,7 +128,8 @@ if __name__ == "__main__":
                         tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
                     b2.apply_transform(
                         tri.transformations.rotation_matrix(rotation, np.array([0., 0., 1.]), np.array([0, 0, 0.])))
-                    b2.apply_scale(.5)
+                    if target in scalings['filename'].values.astype(str):
+                        b2.apply_scale(1 / scalings.loc[scalings['filename'] == target, 'scaling'].values[0])
                     # Get the location to place it randomly
                     query_points = np.random.rand(2).reshape((1, 2)) * 10
 
@@ -141,10 +143,11 @@ if __name__ == "__main__":
                     )
 
                     # Move the target to be on top of the scene mesh in the random location
-                    b2.apply_translation(-b2.bounding_box.bounds.mean(axis=0) + locations[0])
+                    bbox = b2.bounding_box.bounds
+                    b2.apply_translation(-bbox.mean(axis=0) + locations[0] + np.array([0, 0, bbox[:, 2].mean() / 2]))
                     b2_mats = np.zeros((b2.triangles.shape[0], 2))
                     b2_mats[:, 0] = 1e6
-                    b2_mats[:, 1] = .01
+                    b2_mats[:, 1] = .017
                     b2_mesh = BaseMesh(b2, b2_mats, motion_keys=None)
                     non_targ = []
                     yes_targ = []
@@ -238,7 +241,7 @@ if __name__ == "__main__":
                                 plt.pause(.01)
 
                             if not (use_target and not use_background):
-                                block_data = np.fft.fft(block_data[:, 1:], fft_len, axis=-1) * np.fft.fft(chirps, fft_len, axis=-1)
+                                block_data = np.fft.fft(block_data, fft_len, axis=-1)
                             # block_data = block_data[0]
 
                             if np.any(np.isnan(block_data)):
@@ -263,6 +266,7 @@ if __name__ == "__main__":
                         non_targ = np.concatenate(non_targ).astype(np.complex64).view('(2,)float32').swapaxes(-1, -2)
                         just_targ = np.concatenate(just_targ).astype(np.complex64).view('(2,)float32').swapaxes(-1, -2)
                         targ_p = np.stack(targ_p)
+                        build_params['target_number'] = np.where([target == t for t in targetNames])[0]
                         with open(f'/home/jeff/repo/apache/data/target_new/{scene}-{target.split('.')[0]}-{sample_run}-{n}-training.pic', 'wb') as f:
                             pickle.dump({'target': just_targ, 'clutter': non_targ, 'both': yes_targ, 't_idx': targ_p, 'build': build_params}, f)
 
@@ -290,7 +294,13 @@ if __name__ == "__main__":
     plt.vlines([targ_p[2, 0]], yes_data.min(), yes_data.max(), color='black')
     plt.show()
 
-
+'''import plotly.graph_objects as go
+fig = go.Figure(data=[go.Mesh3d(x=b2.vertices[:, 0], y=b2.vertices[:, 1], z=b2.vertices[:, 2], i=b2.faces[:, 0],
+                                j=b2.faces[:, 1], k=b2.faces[:, 2]),
+                      go.Mesh3d(x=villa.vertices[:, 0], y=villa.vertices[:, 1], z=villa.vertices[:, 2],
+                                i=villa.faces[:, 0], j=villa.faces[:, 1], k=villa.faces[:, 2], intensity=villa.vertices[:, 2], colorscale='solar')])
+fig.update_layout(scene=dict(camera=dict(eye=dict(x=e.mean(), y=-1400, z=u.mean()), center=dict(x=bbox[:, 0].mean(), y=bbox[:, 1].mean(), z=bbox[:, 2].mean())), aspectmode='manual', aspectratio=dict(x=90, y=90, z=.5)))
+fig.show()'''
 
 
 
