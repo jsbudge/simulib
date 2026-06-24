@@ -6,56 +6,84 @@
 import numpy as np  # Packing of structures in C-compatible format
 from config import load_yaml_config
 from mesh_utils import BaseMesh
-from scene_tracer import build_tracer, trace_scene
-from simulib.simulib.simulation_functions import db, genChirp, genTaylorWindow, azelToVec, upsamplePulse, enu2llh, llh2enu
-from simulib.simulib.platform_helper import RadarPlatform, SDRPlatform
-from simulib.simulib.utils import c0, DTR, _float, _complex_float, getRadarAndEnvironment
+from scene_tracer import build_tracer, trace_reflector_scene
+from simulib.simulib.simulation_functions import db, upsamplePulse, enu2llh, llh2enu, azelToVec, getElevationMap, genChirp
 from simulib.simulib.sim_objects import AESA
+from simulib.simulib.utils import c0, DTR, _float, _complex_float, getRadarAndEnvironment
 from scipy.spatial import Delaunay
 from scipy.interpolate import RegularGridInterpolator
 from sdrparse.SDRV2Parsing import load
-from simulib.simulib.grid_helper import SDREnvironment
 from backproject_utils import backprojectPulseStream
 import trimesh as tri
 import matplotlib.pyplot as plt
 from PIL import Image
-from matplotlib.gridspec import GridSpec
 from tqdm import tqdm
 import plotly.io as pio
 import plotly.express as px
-import pickle
 import requests
-from urllib.request import Request, urlopen, urlretrieve
-from itertools import product
+from itertools import product, repeat
 from io import BytesIO
-import pandas as pd
 import mmap
 import shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import array
+import time
 pio.renderers.default = 'browser'
 
 GECOEFF = 156543.03392
 TILE_SIZE = 256
 
 
-def calcGoogleCoords(a_origin, lats, lons, mpp):
-    center_lat = a_origin[0]
-    center_lon = a_origin[1]
-    zoomlevel = int(np.round(np.log2(GECOEFF * np.cos(center_lat * np.pi / 180.) / mpp)))
-    gmpp = GECOEFF * np.cos(center_lat * np.pi / 180.) / (2 ** zoomlevel)
+def renderBlock(a_ptimes, a_rp, a_tracer, a_chirps, a_bw_az, a_bw_el, a_points,
+                a_point_power, a_nsam, a_fc, a_fs, a_near_range_s, far_range, a_nray_sqrt, transmit_power, rx_gain,
+                tx_gain, rec_gain, noise_figure, operating_temp, a_fft_len, add_noise, has_aesa, near_range_cutoff):
+    if has_aesa:
+        bore = azelToVec(a_rp.tx.az_aesa_iner(a_ptimes), a_rp.tx.el_aesa_iner(a_ptimes))
+    else:
+        bore = a_rp.tx.boresight(a_ptimes)
+    # aesa_bore = azelToVec(a_rp.tx.az_iner(a_ptimes), a_rp.tx.el_iner(a_ptimes))
+    txposes = a_rp.txpos(a_ptimes).swapaxes(0, 1).swapaxes(1, 2)
+    rxposes = a_rp.rxpos(a_ptimes).swapaxes(0, 1).swapaxes(1, 2)
+    a_bd = trace_reflector_scene(a_tracer, a_chirps, txposes, rxposes, a_bw_az, a_bw_el, a_rp.tx.boresight(a_ptimes[0]),
+                       bore, a_rp.att(a_ptimes)[:, 1], a_points, a_point_power, a_ptimes, a_nsam,
+                       a_fc, a_fs, a_near_range_s, far_range, a_nray_sqrt, a_nray_sqrt, transmit_power, rx_gain, tx_gain,
+                       rec_gain, noise_figure, operating_temp, a_fft_len, add_noise=add_noise, add_chirp=True)[0, 0]
+    a_bd = np.fft.fft(np.fft.ifft(a_bd, axis=1)[:, near_range_cutoff:a_nsam], a_fft_len, axis=1)
+    return a_bd
+
+
+def saveToFile(a_bd, a_nsam, a_atts, a_copy_path, a_frames, a_scale):
+    save_data = np.fft.ifft(a_bd, axis=1, norm='ortho')[:, :a_nsam]
+    # save_int_data = np.zeros((*save_data.shape, 2)).astype(np.int16)
+    ndata = (save_data.astype(np.complex64).view('(2,)float32') / 10 ** (
+            a_atts[:, None, None] / 20))
+    ndata = (-1 + (ndata - -a_scale) * 1 / a_scale) * 32768
+    save_int_data = ndata.astype(np.int16)
+    # save_data /= old_tmax * 32768
+    with open(a_copy_path, 'r+b') as fin:
+        with mmap.mmap(fin.fileno(), 0) as mm:
+            for fr_idx, fr in enumerate(a_frames):
+                # ndata = (save_data[fr_idx].astype(np.complex64).view('(2,)float32') / 10**(atts[fr] / 20)).astype(np.int16)
+                tmp_data = array.array('h', save_int_data[fr_idx].astype(np.int16).flatten())
+                tmp_data.byteswap()
+                mm.seek(ref_pts[fr])
+                mm.write(bytes(tmp_data))
+    return True
+
+
+def calcGoogleCoords(a_origin: tuple[float, float], a_lats: float | np.ndarray, a_lons: float | np.ndarray,
+                     mpp: float):
+    zoomlevel = int(np.round(np.log2(GECOEFF * np.cos(a_origin[0] * DTR) / mpp)))
 
     # Use a left shift to get the power of 2
     # i.e. a zoom level of 2 will have 2^2 = 4 tiles
-    scale = 1 << zoomlevel
+    m_scale = 1 << zoomlevel
 
-    box_coords = np.array([lats, lons]).T
-    pix_coords = np.zeros_like(box_coords)
-    sy = np.sin(box_coords[:, 0] * np.pi / 180.0)
-    pix_coords[:, 0] = (TILE_SIZE / 2. + box_coords[
-        :, 1] * TILE_SIZE / 360) * scale  # // TILE_SIZE # np.floor(TILE_SIZE * (.5 + box_coords[:, 1] / 360.) * scale)
-    pix_coords[:, 1] = ((TILE_SIZE / 2) + .5 * np.log((1 + sy) / (1 - sy)) * -(
-                TILE_SIZE / (2 * np.pi))) * scale  # // TILE_SIZE
+    pix_coords = np.zeros((len(a_lats), 2))
+    sy = np.sin(a_lats * DTR)
+    pix_coords[:, 0] = (TILE_SIZE / 2. + a_lons * TILE_SIZE / 360) * m_scale
+    pix_coords[:, 1] = ((TILE_SIZE / 2) + .5 * np.log((1 + sy) / (1 - sy)) * -(TILE_SIZE / (2 * np.pi))) * m_scale
 
     tile_coords = pix_coords // TILE_SIZE
 
@@ -68,8 +96,9 @@ def calcGoogleCoords(a_origin, lats, lons, mpp):
     return tile_coords, zoomlevel, im_x, im_y
 
 
-def resampleGoogleMap(lats, lons, mpp):
-    tile_coords, zoomlevel, im_x, im_y = calcGoogleCoords(((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), lats, lons, mpp)
+def resampleGoogleMap(a_lats: float | np.ndarray, a_lons: float | np.ndarray, mpp: float):
+    tile_coords, zoomlevel, im_x, im_y = calcGoogleCoords(((a_lats.max() + a_lats.min()) / 2,
+                                                           (a_lons.max() + a_lons.min()) / 2), a_lats, a_lons, mpp)
 
     start_x = int(tile_coords[:, 0].min())
     start_y = int(tile_coords[:, 1].min())
@@ -86,8 +115,8 @@ def resampleGoogleMap(lats, lons, mpp):
     for x, y in tqdm(product(range(tile_width), range(tile_height))):
         url = f'https://mt1.google.com/vt?lyrs=s&x={start_x + x}&y={start_y + y}&z={zoomlevel}'
         response = requests.get(url=url, headers={'User-Agent': 'Mozilla/5.0'})
-        im = Image.open(BytesIO(response.content))
-        map_img.paste(im, (x * TILE_SIZE, y * TILE_SIZE))
+        im_google = Image.open(BytesIO(response.content))
+        map_img.paste(im_google, (x * TILE_SIZE, y * TILE_SIZE))
 
     return map_img, im_x, im_y
 
@@ -97,18 +126,22 @@ if __name__ == "__main__":
     cfig = load_yaml_config('/home/jeff/repo/optix_radartracer/simulib/scripts/anduril_params.yaml')
     npulses = 512
     upsample = 1
+    near_range_ppp = .3
     show_plots = True
-    origin = (40.098902, -111.659862, 1399.)
-    save_file = False
+    save_file = True
     randomize_pts = True
-    add_target = False
 
-    pix_width = 512
-    pix_height = 512
-    nray_sqrt = 1000
+    max_pix = 512
+    pix_res: float = 2.
+    nray_sqrt = 3000
     nrays = nray_sqrt * nray_sqrt
 
-    fnme = '/home/jeff/SDR_DATA/RAW/10282025/SAR_10282025_112741.sar'
+    start_time = time.time()
+
+    # fnme = '/home/jeff/SDR_DATA/RAW/10282025/SAR_10282025_112741.sar'
+    # fnme = '/home/jeff/SDR_DATA/RAW/12112025/SAR_12112025_144929.sar'
+    # fnme = '/home/jeff/SDR_DATA/RAW/12192025/SAR_12192025_110646.sar'
+    fnme = '/home/jeff/SDR_DATA/RAW/11112025/SAR_11112025_145023.sar'
 
     # Copy/paste another file into the same directory
     if save_file:
@@ -148,48 +181,90 @@ if __name__ == "__main__":
         path = sdr[sdr_dataset].path
         ref_pts = ival.packet_points[path]
         atts = ival.atts[path]
-    except:
+    except AttributeError:
         ref_pts = sdr[sdr_dataset].packet_points
         atts = sdr[sdr_dataset].atts
 
-    # origin = ()
-    bg, rp = getRadarAndEnvironment(sdr)
-
-    origin = bg.origin
-
     wavelength = c0 / sdr[sdr_dataset].fc
     fs = sdr[sdr_dataset].fs
-    rp.fs = fs
-    fc = rp.fc
-
-    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp.getRadarParams(0., 0., upsample)
-    grid_height_m = (granges[-1] - granges[0]) / 2
-    grid_width_m = np.linalg.norm(rp.pos(rp.gpst[0]) - rp.pos(rp.gpst[-1])) - ranges[-1] * np.tan(rp.az_half_bw)
-
-    chirps = sdr[sdr_dataset].cal_chirp.reshape((1, -1)).astype(_complex_float)
-    mf_chirps = sdr.genReciprocalRipple(0, 0, 0).reshape((1, -1)).astype(_complex_float)
+    fc = sdr[sdr_dataset].fc
 
     # Design the antenna
-    ant = AESA(rp.fc, 10, 2, 1, 1)
+    '''az_elements = 100
+    el_elements = 100
+    ant = AESA(fc, az_elements, el_elements, 1, 1)
     bw_az, bw_el = ant.calc_beamwidth(0., 0.)
+    tx_num = sdr[0].trans_num if not sdr.is_v2 else sdr[0].tx_num
+    while bw_az > sdr.ant[sdr.port[tx_num].assoc_ant].az_bw * 2:
+        az_elements += 1
+        ant = AESA(fc, az_elements, 1, 1, 1)
+        bw_az, bw_el = ant.calc_beamwidth(0., 0.)
+    while bw_el > sdr.ant[sdr.port[tx_num].assoc_ant].el_bw * 2:
+        el_elements += 1
+        ant = AESA(fc, az_elements, el_elements, 1, 1)
+        bw_az, bw_el = ant.calc_beamwidth(0., 0.)'''
+
+    # origin = ()
+    if sdr.has_aesa:
+        ant = AESA(fc, 1, 1, 1, 1)
+        bg, rp = getRadarAndEnvironment(sdr, platform_args=dict(tx_offset=ant.phase_center_offsets, rx_offset=ant.phase_center_offsets))
+    else:
+        bg, rp = getRadarAndEnvironment(sdr)
+    rp.fs = fs
+    origin = bg.origin
+    bw_az = rp.az_half_bw * 2
+    bw_el = rp.el_half_bw * 2
+
+    nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = rp.getRadarParams(0., 0.0, near_range_ppp, 0., upsample)
+    aug_nsam = nsam + int(nr * near_range_ppp)
+
+    # This is for backprojection inside of script and shouldn't affect the final file
+    grid_ranges = rp.calcRanges(0, 0, 0., 0.)
+    # ((gx, gy, gz), bg_transform), grid_width_m, grid_height_m, origin = bg.gridFromSwath(*grid_ranges, beamwidth=rp.az_half_bw)
+    grid_height_m = np.sqrt(grid_ranges[1]**2 - rp.pos(rp.gpst)[:, 2].mean()**2) - np.sqrt(grid_ranges[0]**2 - rp.pos(rp.gpst)[:, 2].mean()**2)
+    grid_width_m = np.linalg.norm(rp.pos(rp.gpst[0]) - rp.pos(rp.gpst[-1]))
+    # near_range_s -= 1e-6
+    sample_height_m = grid_height_m * 3.
+    sample_width_m = np.linalg.norm(rp.pos(rp.gpst[0]) - rp.pos(rp.gpst[-1])) * 1.1
+
+    chirps = sdr[sdr_dataset].cal_chirp.reshape((1, -1)).astype(_complex_float)
+    # chirps = genChirp(nr, fs, fc, sdr[0].bw).reshape((1, -1)).astype(_complex_float)
+    mf_chirps = sdr.genReciprocalRipple(0, 0, 0).reshape((1, -1)).astype(_complex_float)
+    # mf_chirps = np.fft.fft(chirps, fft_len, axis=1).conj()
 
     pulse_times = sdr[sdr_dataset].pulse_time
 
-    # gx, gy, gz = bg.gridFromSwath(0, 0, bw_az, 1500e6)
 
-    gx, gy, gz = bg.getGrid(origin, width=grid_height_m, height=grid_width_m, nrows=pix_width, ncols=pix_height, az=bg.heading)
-    gz[:] = gz.mean()
+    if show_plots:
+        pix_width = min(max_pix, int(sample_width_m / pix_res))
+        pix_height = min(max_pix, int(sample_height_m / pix_res))
+        (gx, gy, gz), bg_transform = bg.getGrid(origin, along_track_m=grid_width_m, cross_track_m=grid_height_m,
+                                                nrows=pix_height, ncols=pix_width, cross_track_angle=bg.cross_track_angle)
+
+    bpj_grid = np.zeros(gx.shape, dtype=_complex_float)
+
+
+    point_grid_sz = (int(sample_width_m / pix_res), int(sample_height_m / pix_res))
+    (bgx, bgy, bgz), bbg_transform = bg.getGrid(origin, along_track_m=sample_width_m, cross_track_m=sample_height_m,
+                                            nrows=point_grid_sz[0],
+                                            ncols=point_grid_sz[1], cross_track_angle=bg.cross_track_angle)
+
+    # ((gx, gy, gz), bg_transform), grid_width_m, grid_height_m, origin = bg.gridFromSwath()
+
+    # gx, gy, gz = bg.getGrid(origin, along_track_m=grid_width_m + 20., cross_track_m=grid_height_m + 20., nrows=pix_height,
+    #                         ncols=pix_width, cross_track_angle=bg.cross_track_angle)
+    # gz[:] = gz.mean()
 
     print('Getting Google Maps grid...')
-    res_mpp = max((gx.max() - gx.min()) / pix_height, (gy.max() - gy.min()) / pix_height)
-    lats, lons, alts = enu2llh(gx.flatten(), gy.flatten(), gz.flatten(), bg.ref)
+    res_mpp = max((bgx.max() - bgx.min()) / point_grid_sz[1], (bgy.max() - bgy.min()) / point_grid_sz[0])
+    lats, lons, alts = enu2llh(bgx.flatten(), bgy.flatten(), bgz.flatten(), bg.ref)
     im, imx, imy = resampleGoogleMap(lats, lons, res_mpp)
     # Google image is transposed compared to what we expect in SDREnvironment
     im = np.array(im).sum(axis=2).T
-    im = ((im - im.min()) * 1 / (im.max() - im.min())) + .001
+    im = ((im - im.min()) * .95 / (im.max() - im.min()))
     npts = nrays
 
-    grid_pts = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
+    grid_pts = np.array([bgx[::10, ::10].flatten(), bgy[::10, ::10].flatten(), bgz[::10, ::10].flatten()]).T
     tris_2d = Delaunay(grid_pts[:, :2])
     elevation_mesh = tri.Trimesh(vertices=grid_pts, faces=tris_2d.simplices)
     el_mats = np.zeros((elevation_mesh.triangles.shape[0], 2))
@@ -197,31 +272,17 @@ if __name__ == "__main__":
     el_mats[:, 1] = .017
     grid_int = RegularGridInterpolator((np.arange(im.shape[0]), np.arange(im.shape[1])), im)
 
-    if add_target:
-        b2 = tri.load('/home/jeff/Documents/target_meshes/piper_pa18.obj', force='mesh')
-        b2.apply_transform(
-            tri.transformations.rotation_matrix(np.pi / 2, np.array([1., 0., 0]), np.array([0, 0, 0.])))
 
-        # Move the target to be on top of the scene mesh in the random location
-        pos_in_scene = np.array(llh2enu(*origin, bg.ref))
-        pos_in_scene = pos_in_scene + (pos_in_scene - np.array(llh2enu(40.098447, -111.659208, 1399., bg.ref)))
-        pos_in_scene[2] = gz.mean() + 1.
-        b2.apply_translation(-b2.bounding_box.bounds.mean(axis=0) + pos_in_scene)
-        b2_mats = np.zeros((b2.triangles.shape[0], 2))
-        b2_mats[:, 0] = 1e6
-        b2_mats[:, 1] = .017
-        b2_mesh = BaseMesh(b2, b2_mats, motion_keys=None)
-
-    bpj_grid = np.zeros(gx.shape, dtype=_complex_float)
 
     # Build a trimesh of the elevation map
     # Set points for rays
     if randomize_pts:
-        # Rejection sampling, since it's easier
-        points = np.random.rand(npts, 3) * np.array([grid_width_m - .1, grid_height_m - .1, 0]) - np.array([grid_width_m / 2, grid_height_m / 2, -1.])
-        bg_transform = bg.transforms + 0.
-        bg_transform[:2, 2] = llh2enu(*origin, bg.ref)[:2]
-        points = points @ bg_transform.T
+        # Rotate uniform points to lay on top of grid
+        points = (np.random.rand(npts, 3) * np.array([point_grid_sz[0] - .1, point_grid_sz[1] - .1, 0.]) -
+                  np.array([point_grid_sz[0] / 2, point_grid_sz[1] / 2, -1.]))
+        points = points @ bbg_transform.T
+        plats, plons, _ = enu2llh(*points.T, bg.ref)
+        points[:, 2] = getElevationMap(plats, plons) - bg.ref[2]
     else:
         points = np.array([gx.flatten(), gy.flatten(), gz.flatten()]).T
 
@@ -230,79 +291,41 @@ if __name__ == "__main__":
 
     _, _, iimx, iimy = calcGoogleCoords(((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), plats, plons, res_mpp)
     point_power = grid_int((iimx, iimy)).astype(_float)
-    # point_power = im.flatten().astype(_float)
 
-    # Get the location to place it randomly
-    query_points = points[:, :2]
-
-    # Create vertical rays starting from above the mesh
-    # Start high up (z=max_z + margin) and shoot down (-z)
-    ray_origins = np.column_stack([query_points, np.full(len(query_points), elevation_mesh.bounds[1][2] + 1500.0)])
-    ray_directions = np.tile([0, 0, -1], (len(query_points), 1))
-    locations, index_ray, index_tri = elevation_mesh.ray.intersects_location(
-        ray_origins=ray_origins,
-        ray_directions=ray_directions,
-        multiple_hits=False,
-    )
-
-    points[index_ray, 2] = locations[:, 2]
-
-    if add_target:
-        targlocations, targindex_ray, targindex_tri = b2.ray.intersects_location(
-            ray_origins=ray_origins,
-            ray_directions=ray_directions,
-            multiple_hits=False,
-        )
-        points[targindex_ray, 2] = targlocations[:, 2]
-        point_power[targindex_ray] = 1.
-
-    meshes = [BaseMesh(elevation_mesh, el_mats, motion_keys=None), b2_mesh] if add_target else [BaseMesh(elevation_mesh, el_mats, motion_keys=None)]
-
-    tracer = build_tracer(meshes, 'sar_trace.cu', pulse_times=pulse_times)
+    tracer = build_tracer([BaseMesh(elevation_mesh, el_mats, motion_keys=None)], 'anduril_trace.cu', pulse_times=pulse_times)
 
     print(f'Launching {npts} rays.')
+    ptimes = [pulse_times[frame[0]:frame[0] + npulses] for frame in list(zip(*(iter(range(0, len(pulse_times), npulses)),)))]
+    '''results = [renderBlock(p, rp, tracer, chirps, bw_az, bw_el, points, point_power, nsam, fc, fs, near_range_s, ranges[-1], nray_sqrt,
+                           cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain, cfig.ant_params.rec_gain,
+                           cfig.ant_params.noise_figure, cfig.ant_params.operating_temperature, fft_len, True) for p in ptimes]'''
 
-    for frame in tqdm(list(zip(*(iter(range(0, len(pulse_times), npulses)),)))):
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        ex_map = executor.map(renderBlock, ptimes, repeat(rp), repeat(tracer), repeat(chirps), repeat(bw_az),
+                              repeat(bw_el), repeat(points), repeat(point_power), repeat(aug_nsam), repeat(fc), repeat(fs),
+                              repeat(near_range_s), repeat(ranges[-1]), repeat(nray_sqrt),
+                              repeat(cfig.ant_params.transmit_power), repeat(cfig.ant_params.rx_gain),
+                              repeat(cfig.ant_params.tx_gain), repeat(cfig.ant_params.rec_gain),
+                              repeat(cfig.ant_params.noise_figure), repeat(cfig.ant_params.operating_temperature),
+                              repeat(fft_len), repeat(False), repeat(sdr.has_aesa), repeat(int(nr * near_range_ppp)))
+
+        results = list(ex_map)
+
+    if save_file:
+        scale = max([abs(d).max() for d in results])
+        print(f'Saving file as {copy_path}...')
+        frames = [np.arange(frame[0], min(frame[0] + npulses, len(pulse_times))) for frame in list(zip(*(iter(range(0, len(pulse_times), npulses)),)))]
+        att_list = [atts[frame[0]:frame[0] + npulses] for frame in list(zip(*(iter(range(0, len(pulse_times), npulses)),)))]
+        with ProcessPoolExecutor(max_workers=15) as executor:
+            ex_map = executor.map(saveToFile, results, repeat(nsam), att_list, repeat(copy_path), frames, repeat(scale))
+            saves = list(ex_map)
+
+    grids = []
+    for bd, frame in tqdm(zip(results, list(zip(*(iter(range(0, len(pulse_times), npulses)),))))):
         ptimes = pulse_times[frame[0]:frame[0] + npulses]
 
-        aesa_bore = azelToVec(rp.tx.az_aesa_iner(ptimes), rp.tx.el_aesa_iner(ptimes))
-        # Compute the AESA phi and theta angles for commanding it
-        aesa_phi_r, aesa_theta_r = rp.tx.aesa_frame_phi_theta(ptimes[0])
-        # Get the element weights for the designed AESA phi and theta
-        weights_tx = ant.get_weights(aesa_phi_r, aesa_theta_r)
-        weights_rx = ant.get_weights(aesa_phi_r, aesa_theta_r)
-        txposes = rp.txpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
-        rxposes = rp.rxpos(ptimes).swapaxes(0, 1).swapaxes(1, 2)
-        block_data = trace_scene(tracer, chirps, txposes, rxposes, weights_tx, weights_rx,
-                               rp.tx.boresight(ptimes[0]), aesa_bore, points, point_power,
-                               ptimes, nsam, fc, fs, near_range_s, ranges[-1], bw_az / 2, bw_el,
-                               nray_sqrt, nray_sqrt,
-                               cfig.ant_params.transmit_power, cfig.ant_params.rx_gain,
-                               cfig.ant_params.tx_gain,
-                               cfig.ant_params.rec_gain, cfig.ant_params.noise_figure,
-                               cfig.ant_params.operating_temperature, fft_len, add_noise=True, add_chirp=True)[0, 0]
-
-        block_data[np.isnan(block_data)] = 0.
-
-        if save_file:
-            save_data = np.fft.ifft(block_data, axis=1, norm='ortho')[:, :nsam]
-            # save_int_data = np.zeros((*save_data.shape, 2)).astype(np.int16)
-            ndata = (save_data.astype(np.complex64).view('(2,)float32') / 10 ** (atts[frame[0]:frame[0] + len(ptimes)][:, None, None] / 20))
-            ndata = (-1 + (ndata - ndata.min()) * 2 / (ndata.max() - ndata.min())) * 32768
-            save_int_data = ndata.astype(np.int16)
-            # save_data /= old_tmax * 32768
-            with open(copy_path, 'r+b') as fin:
-                with mmap.mmap(fin.fileno(), 0) as mm:
-                    for fr_idx, fr in enumerate(np.arange(frame[0], frame[0] + len(ptimes))):
-                        # ndata = (save_data[fr_idx].astype(np.complex64).view('(2,)float32') / 10**(atts[fr] / 20)).astype(np.int16)
-                        tmp_data = array.array('h', save_int_data[fr_idx].astype(np.int16).flatten())
-                        tmp_data.byteswap()
-                        mm.seek(ref_pts[fr])
-                        mm.write(bytes(tmp_data))
-
-
         if show_plots:
-            if save_file:
+            '''if save_file:
                 new_data = np.zeros((len(ptimes), nsam), dtype=np.complex128)
                 # tmp_data = bytes(save_int_data[fr_idx].flatten())
                 for fr_idx, fr in enumerate(np.arange(frame[0], frame[0] + len(ptimes))):
@@ -312,16 +335,22 @@ if __name__ == "__main__":
                     # re_data.byteswap()
                     re_data = np.array(re_data)
                     new_data[fr_idx] = (re_data[:nsam * 2:2] + 1j * re_data[1:nsam * 2:2]) * 10 ** (atts[fr] / 20)
-                block_data = np.fft.fft(new_data, fft_len, axis=1)
-            # block_data = np.fft.fft((save_int_data[..., 0] + 1j * save_int_data[..., 1]) * 10 ** (31 / 20), fft_len, axis=1)
+                bd = np.fft.fft(new_data, fft_len, axis=1)'''
+            # bd = np.fft.fft((save_int_data[..., 0] + 1j * save_int_data[..., 1]) * 10 ** (31 / 20), fft_len, axis=1)
 
-            rpi_data = upsamplePulse(block_data * mf_chirps, fft_len, upsample, is_freq=True,
+            rpi_data = upsamplePulse(bd * mf_chirps, fft_len, upsample, is_freq=True,
                                      time_len=nsam).astype(_complex_float)
-            bpj_grid += backprojectPulseStream([rpi_data], [rp.tx.az_aesa_iner(ptimes)],
-                                                   [rp.rxpos(ptimes).mean(axis=(1, 2))],
-                                                   [rp.txpos(ptimes).mean(axis=(1, 2))], gz, _float(wavelength),
+            grids.append(backprojectPulseStream([rpi_data], [rp.tx.az_aesa_iner(ptimes) if sdr.has_aesa else rp.tx.az_iner(ptimes)],
+                                                   [rp.rxpos(ptimes)[:, 0, 0]],
+                                                   [rp.txpos(ptimes)[:, 0, 0]], gz, _float(wavelength),
                                                    _float(near_range_s), _float(fs * upsample), _float(rp.az_half_bw),
-                                                   gx=gx, gy=gy)
+                                                   gx=gx, gy=gy))
+    bpj_grid = sum(grids)
+
+    end_time = time.time()
+
+    print(f"Final timing is {end_time - start_time}s for a {sdr[0].pulse_time[-1] - sdr[0].pulse_time[0]}s collect "
+          f"({(end_time - start_time) / (sdr[0].pulse_time[-1] - sdr[0].pulse_time[0])}x).")
 
     if save_file:
         print(f'File saved as {copy_path}.')
@@ -342,11 +371,11 @@ if __name__ == "__main__":
         plt.figure('Backprojection vs. Map')
         plt.subplot(2, 1, 1)
         plt.title('Backprojection')
-        plt.imshow(db(scaled_bpj), extent=(lats.min(), lats.max(), lons.min(), lons.max()), cmap='gray')
+        plt.imshow(db(scaled_bpj), cmap='gray')
         plt.axis('tight')
         plt.subplot(2, 1, 2)
         plt.title('Map')
-        plt.imshow(grid_int((imx, imy)).reshape(gx.shape), cmap='gray')
+        plt.imshow(grid_int((imx, imy)).reshape(bgx.shape), cmap='gray')
         # plt.imshow(im, cmap='gray')
         plt.axis('tight')
         plt.show()
@@ -368,5 +397,7 @@ if __name__ == "__main__":
         plt.plot(db(np.fft.fft(chirps[0], fft_len)))
         plt.plot(db(mf_chirps[0]))
 
-
+        plt.figure('Data')
+        plt.imshow(db(np.fft.ifft(results[0] * mf_chirps, axis=1)[:, :nsam]))
+        plt.axis('tight')
 

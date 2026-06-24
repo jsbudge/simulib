@@ -189,7 +189,7 @@ def getElevation(lat: float, lon: float, und: bool = True):
 
 
 def llh2enu(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.ndarray,
-            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     """
     Converts from Lat/Lon/Alt to local tangent plane ENU
     :param lat: Latitude values.
@@ -203,7 +203,7 @@ def llh2enu(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.ndar
 
 
 def enu2llh(e: float | np.ndarray, n: float | np.ndarray, u: float | np.ndarray,
-            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     """
     Converts from ENU to Lat/Lon/Alt.
     :param e: Easting values.
@@ -217,7 +217,7 @@ def enu2llh(e: float | np.ndarray, n: float | np.ndarray, u: float | np.ndarray,
 
 
 def enu2ecef(e: float | np.ndarray, n: float | np.ndarray, u: float | np.ndarray,
-            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+            refllh: tuple[float, float, float] | np.ndarray) -> tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     """
     Converts from ENU to ECEF.
     :param e: Easting values.
@@ -241,7 +241,8 @@ def enu2ecef(e: float | np.ndarray, n: float | np.ndarray, u: float | np.ndarray
     return ecef[0], ecef[1], ecef[2]
 
 
-def llh2ecef(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.ndarray) -> tuple[float, float, float]:
+def llh2ecef(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.ndarray) \
+        -> tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     """
     Compute the Geocentric (Cartesian) Coordinates X, Y, Z
     given the Geodetic Coordinates lat, lon + Ellipsoid Height h
@@ -255,7 +256,8 @@ def llh2ecef(lat: float | np.ndarray, lon: float | np.ndarray, h: float | np.nda
     return X, Y, Z
 
 
-def ecef2llh(x: float | np.ndarray, y: float | np.ndarray, z: float | np.ndarray) -> tuple[float, float, float]:
+def ecef2llh(x: float | np.ndarray, y: float | np.ndarray, z: float | np.ndarray) \
+        -> tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     # This is the Heikkinen application of the Ferrari solution to Bowring's irrational
     # geodetic-latitude equation to get a geodetic latitude and height.
     # Longitude remains the same between the two.
@@ -279,7 +281,7 @@ def ecef2llh(x: float | np.ndarray, y: float | np.ndarray, z: float | np.ndarray
 
 
 def ecef2enu(x: float | np.ndarray, y: float | np.ndarray, z: float | np.ndarray,
-             refllh: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
+             refllh: tuple[float, float, float] | np.ndarray) -> tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     latr = refllh[0] * np.pi / 180
     lonr = refllh[1] * np.pi / 180
     rx, ry, rz = llh2ecef(*refllh)

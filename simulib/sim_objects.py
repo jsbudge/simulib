@@ -68,33 +68,34 @@ class Antenna:
                                range(elem_weights.shape[0])] for x in xs], axis=0)
 
     def get_full_pattern(self, phi: float, theta: float, grid_phi: int = 128, grid_theta: int = 128):
-        phis, thetas = np.meshgrid(np.linspace(0., 2 * np.pi, grid_phi), np.linspace(-np.pi / 2, np.pi / 2, grid_theta))
-        phis = phis.flatten()
-        thetas = thetas.flatten()
-        elements = self.element_pattern(phis, thetas)
+        m_phis, m_thetas = np.meshgrid(np.linspace(0., 2 * np.pi, grid_phi), np.linspace(-np.pi / 2, np.pi / 2, grid_theta))
+        m_phis = m_phis.flatten()
+        m_thetas = m_thetas.flatten()
+        elements = self.element_pattern(m_phis, m_thetas)
         weights = self.get_weights(phi, theta)
-        return db(np.sum(self.af(phis, thetas, weights) * elements[None, None, :], axis=(0, 1)))
+        return db(np.sum(self.af(m_phis, m_thetas, weights) * elements[None, None, :], axis=(0, 1)))
 
-    def get_slice(self, phi: float, theta: float, slice_phi: float = None, slice_theta: float = None, num_pts: int = 128):
+    def get_slice(self, phi: float, theta: float, slice_phi: float | None = None,
+                  slice_theta: float | None = None, num_pts: int = 128):
         if slice_phi is not None:
-            thetas = np.linspace(-np.pi / 2, np.pi / 2, num_pts)
-            phis = np.zeros_like(thetas) + slice_phi
+            m_thetas = np.linspace(-np.pi / 2, np.pi / 2, num_pts)
+            m_phis = np.zeros_like(m_thetas) + slice_phi
         elif slice_theta is not None:
-            phis = np.linspace(0, 2 * np.pi, num_pts)
-            thetas = np.zeros_like(phis) + slice_theta
-        elements = self.element_pattern(phis, thetas)
+            m_phis = np.linspace(0, 2 * np.pi, num_pts)
+            m_thetas = np.zeros_like(m_phis) + slice_theta
+        elements = self.element_pattern(m_phis, m_thetas)
         weights = self.get_weights(phi, theta)
-        return abs(np.sum(self.af(phis, thetas, weights) * elements[None, None, :], axis=(0, 1)))
+        return abs(np.sum(self.af(m_phis, m_thetas, weights) * elements[None, None, :], axis=(0, 1)))
 
     def calc_beamwidth(self, phi: float, theta: float, null2null: bool = True):
         # This calculates the half beamwidth in azimuth and elevation
         weights = self.get_weights(phi, theta)
-        max_gain = db(np.sum(self.af(phi, theta, weights) * self.element_pattern(phi, theta)))
+        m_max_gain = db(np.sum(self.af(phi, theta, weights) * self.element_pattern(phi, theta)))
         dv = -1e6
         adv = -1e6
         step = .02
         v = theta
-        min_func = lambda x: max_gain - db(np.sum(self.af(0., x, weights) * self.element_pattern(0., x))) - 3
+        min_func = lambda x: m_max_gain - db(np.sum(self.af(0., x, weights) * self.element_pattern(0., x))) - 3
         while abs(dv) > .01:
             step = step if np.sign(adv) == np.sign(dv) else -step / (10 * (1 + abs(dv - adv)))
             v += step
@@ -107,7 +108,7 @@ class Antenna:
         adv = -1e6
         step = .02
         v = phi
-        min_func = lambda x: max_gain - db(np.sum(self.af(np.pi / 2, x, weights) * self.element_pattern(np.pi / 2, x))) - 3
+        min_func = lambda x: m_max_gain - db(np.sum(self.af(np.pi / 2, x, weights) * self.element_pattern(np.pi / 2, x))) - 3
         while abs(dv) > .01:
             step = step if np.sign(adv) == np.sign(dv) else -step / (10 * (1 + abs(dv - adv)))
             v += step
@@ -135,7 +136,7 @@ class AESA(Antenna):
         elem_positions, width, height, elem_width = (
             design_element_positions(a_design_freq_hz, a_sub_num_elements_wide, a_sub_num_elements_high,
                                      a_num_sub_wide, a_num_sub_high))
-        wavelength = c0 / a_design_freq_hz
+        wavelength: float = c0 / a_design_freq_hz
 
         # Default element pattern is a half-wave dipole oriented in z
         element_pattern = element_pattern if element_pattern is not None else \
@@ -195,10 +196,10 @@ def design_element_positions(
 
 
 def get_aesa_phi_theta(
-        a_boresight_aesa_frame: np.ndarray) -> tuple[float, float]:
+        a_boresight_aesa_frame: np.ndarray):
     phi = np.arctan2(
-        a_boresight_aesa_frame.item(1), a_boresight_aesa_frame.item(0))
-    theta = np.arccos(a_boresight_aesa_frame.item(2))
+        a_boresight_aesa_frame[1], a_boresight_aesa_frame[0])
+    theta = np.arccos(a_boresight_aesa_frame[2])
     return phi, theta
 
 
@@ -226,13 +227,13 @@ def get_element_phases(
 
 if __name__ == '__main__':
     cen_freq_hz = 9.6e9
-    wavelength = c0 / cen_freq_hz
+    exp_wavelength = c0 / cen_freq_hz
 
     # Compute the AESA phi and theta angles for commanding it
     aesa_phi_r, aesa_theta_r = get_aesa_phi_theta(
         np.array([0., 0., 1.]))
 
-    ant = Antenna(cen_freq_hz, 5, 4, 4, 2)
+    ant = AESA(cen_freq_hz, 15, 4, 4, 2)
     print(ant)
     bw_az, bw_el = ant.calc_beamwidth(aesa_phi_r, aesa_theta_r)
     kv_check = ant.kv(aesa_phi_r, aesa_theta_r)

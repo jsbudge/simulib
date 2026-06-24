@@ -1,6 +1,6 @@
 ant_params:
-  tx_gain: 25.
-  rx_gain: 25.
+  tx_gain: 35.
+  rx_gain: 35.
   rec_gain: 80.
   transmit_power: 220.
   az_bw: 2.

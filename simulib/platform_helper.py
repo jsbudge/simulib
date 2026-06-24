@@ -649,7 +649,7 @@ class RadarPlatform(Platform):
             frange = ranges[1]
             return int((np.ceil((2 * frange / c0) * TAC) - np.floor(2 * nrange / c0 * TAC)) * self.fs / TAC)
 
-    def calcRangeBins(self, height, upsample=1, plp=1., ranges=None, **kwargs):
+    def calcRangeBins(self, height, upsample=1, near_range_ppp=0., far_range_ppp=0., ranges=None, **kwargs):
         """
         Calculates the range bins for a given pulse.
         :param ranges: 2-tuple. (Near range, Far range) for range override if desired.
@@ -665,7 +665,7 @@ class RadarPlatform(Platform):
         MPP = c0 / self.fs / upsample / 2
         return nrange + np.arange(self.calcNumSamples(height, plp, ranges) * upsample) * MPP + c0 / self.fs
 
-    def getRadarParams(self, fdelay, plp, upsample=1, a_ranges=None):
+    def getRadarParams(self, fdelay, pulse_length_percent = 0., near_range_ppp = 0., far_range_ppp = 0., upsample=1, a_ranges=None):
         """
         A function to get many relevant radar parameters gathered in one spot.
 
@@ -684,13 +684,13 @@ class RadarPlatform(Platform):
             fft_len: The calculated FFT length.
             up_fft_len: The calculated upsampled FFT length.
         """
-        nsam = self.calcNumSamples(fdelay, plp, a_ranges)
-        nr = self.calcPulseLength(fdelay, plp, True, a_ranges[0] if a_ranges is not None else None)
-        ranges = self.calcRangeBins(fdelay, upsample, plp, a_ranges)
-        ranges_sampled = self.calcRangeBins(fdelay, 1, plp, a_ranges)
+        nsam = self.calcNumSamples(fdelay, pulse_length_percent, a_ranges)
+        nr = self.calcPulseLength(fdelay, pulse_length_percent, True, a_ranges[0] if a_ranges is not None else None)
+        fft_len = int(2 ** (np.ceil(np.log2(nsam + nr))))
+        ranges = self.calcRangeBins(fdelay, upsample, near_range_ppp, far_range_ppp, a_ranges)
+        ranges_sampled = self.calcRangeBins(fdelay, 1, near_range_ppp, far_range_ppp, a_ranges)
         near_range_s = ranges[0] / c0
         granges = ranges * np.cos(self.dep_ang)
-        fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True, nrange=a_ranges[0] if a_ranges is not None else None)))))
         up_fft_len = fft_len * upsample
         return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
 
@@ -819,7 +819,8 @@ class SDRPlatform(RadarPlatform):
         self.origin = origin
         self._channel = channel
 
-    def getRadarParams(self, fdelay, plp, upsample=1, a_ranges=None):
+    def getRadarParams(self, fdelay, pulse_length_percent = 0., near_range_ppp = 0., far_range_ppp = 0.,
+                       upsample=1, a_ranges=None):
         """
         A function to get many relevant radar parameters gathered in one spot.
 
@@ -838,31 +839,35 @@ class SDRPlatform(RadarPlatform):
             fft_len: The calculated FFT length.
             up_fft_len: The calculated upsampled FFT length.
         """
-        nsam = self.calcNumSamples(fdelay, plp, a_ranges)
-        nr = self.calcPulseLength(fdelay, plp, True, a_ranges[0] if a_ranges is not None else None)
-        ranges = self.calcRangeBins(fdelay, upsample, plp, a_ranges)
-        ranges_sampled = self.calcRangeBins(fdelay, 1, plp, a_ranges)
-        near_range_s = ranges[0] / c0
+        nsam = self.calcNumSamples(fdelay, pulse_length_percent, a_ranges)
+        nr = self.calcPulseLength(fdelay, pulse_length_percent, True, a_ranges[0] if a_ranges is not None else None)
+        fft_len = int(2 ** (np.ceil(np.log2(nsam + nr))))
+        ranges = self.calcRangeBins(fdelay, upsample, pulse_length_percent, near_range_ppp, far_range_ppp, a_ranges)
+        ranges_sampled = self.calcRangeBins(fdelay, 1, pulse_length_percent, near_range_ppp, far_range_ppp, a_ranges)
+        near_range_s = ranges[0] / c0 * 2
         granges = ranges * np.cos(self.dep_ang)
-        fft_len = int(2 ** (np.ceil(np.log2(nsam + self.calcPulseLength(fdelay, plp, use_tac=True, nrange=a_ranges[0] if a_ranges is not None else None)))))
         up_fft_len = fft_len * upsample
         return nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len
 
-    def calcRanges(self, fdelay, partial_pulse_percent=1., **kwargs):
+    def calcRanges(self, fdelay, partial_pulse_percent=1., near_range_ppp = 0., far_range_ppp = 0., a_ranges=None, **kwargs):
         """
         Calculate near and far ranges for this collect using the SAR file.
         :param fdelay: float. FDelay desired in TAC.
         :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
         :return: tuple of near and far ranges in meters.
         """
-        try:
-            nrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC) * c0 / 2
-            frange = ((self._sdr[0].receive_off_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC -
-                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        except AttributeError:
-            nrange = ((self._sdr[0].Receive_On_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC) * c0 / 2
-            frange = ((self._sdr[0].Receive_Off_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC -
-                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
+        if a_ranges is not None:
+            nrange, frange = a_ranges
+        else:
+            nsam = self.calcNumSamples(fdelay, partial_pulse_percent, a_ranges)
+            nr = self.calcPulseLength(fdelay, partial_pulse_percent, True, a_ranges[0] if a_ranges is not None else None)
+            # fft_len = int(2 ** (np.ceil(np.log2(nsam + nr))))
+            try:
+                firstrange = ((self._sdr[0].receive_on_TAC - self._sdr[self._channel].transmit_on_TAC - fdelay) / TAC) * c0 / 2
+            except AttributeError:
+                firstrange = ((self._sdr[0].Receive_On_TAC - self._sdr[self._channel].Transmit_On_TAC - fdelay) / TAC) * c0 / 2
+            nrange = firstrange - near_range_ppp * nr / self.fs * c0 / 2.
+            frange = firstrange + (nsam / self.fs - nr / self.fs * (1 - far_range_ppp)) * c0 / 2.
         return nrange, frange
 
     def calcPulseLength(self, height=0, pulse_length_percent=1., use_tac=False, nrange=None, **kwargs):
@@ -884,7 +889,7 @@ class SDRPlatform(RadarPlatform):
         """
         return self._sdr[self._channel].nsam
 
-    def calcRangeBins(self, fdelay, upsample=1, plp=1., ranges=None, **kwargs):
+    def calcRangeBins(self, fdelay, upsample=1, pulse_length_percent=1., near_range_ppp = 0., far_range_ppp = 0., ranges=None, **kwargs):
         """
         Calculate range bins for a pulse/collect.
         :param fdelay: float. FDelay desired for this pulse in TAC.
@@ -892,7 +897,8 @@ class SDRPlatform(RadarPlatform):
         :param partial_pulse_percent: float, <1. Percentage of maximum pulse length to use in radar.
         :return: array of range bins in meters.
         """
-        nrange, frange = self.calcRanges(fdelay, partial_pulse_percent=plp)
+        nrange, frange = self.calcRanges(fdelay, partial_pulse_percent=pulse_length_percent, near_range_ppp=near_range_ppp,
+                                         far_range_ppp=far_range_ppp, a_ranges=ranges)
         MPP = c0 / self.fs / upsample
         return (nrange * 2 + np.arange(self.calcNumSamples() * upsample) * MPP) / 2
 

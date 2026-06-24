@@ -186,7 +186,7 @@ if optimize:
         f'Could not find {e}'
         bpj_wavelength = c0 / (sdr_opt[channel].fc - sdr_opt[channel].bw / 2 - 5e6)
 
-    gx, gy, gz = bg.getGrid(origin, 10, 10, 200, 200, bg.heading, use_elevation=True)
+    gx, gy, gz = bg.getGrid(origin, 10, 10, 200, 200, bg.cross_track_angle, use_elevation=True)
     maxpos = np.where(mag_data == mag_data.max())
     maxpt = np.array([gx[maxpos], gy[maxpos], gz[maxpos]]).flatten()
     nsam, nr, ranges, ranges_sampled, near_range_s, granges, fft_len, up_fft_len = (

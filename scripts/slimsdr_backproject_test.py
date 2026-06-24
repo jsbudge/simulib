@@ -51,7 +51,7 @@ if __name__ == "__main__":
         mfilt = sdr.genReciprocalRipple(0, 0, 0, fft_len=fft_len)  # np.fft.fft(sdr[0].cal_chirp, fft_len).conj()
         nbpj_pts = [512, 512]
 
-        gx, gy, gz = bg.getGrid(origin, 200, 200, nrows=nbpj_pts[0], ncols=nbpj_pts[1], az=bg.heading)
+        gx, gy, gz = bg.getGrid(origin, 200, 200, nrows=nbpj_pts[0], ncols=nbpj_pts[1], cross_track_angle=bg.cross_track_angle)
         gz[:] = gz.mean()
         bpj_grid = np.zeros(gx.shape, dtype=_complex_float)
 

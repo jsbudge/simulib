@@ -23,22 +23,26 @@ class Environment(object):
         if rmat is not None:
             self.setGrid(reflectivity, rmat)
 
-    def getGridParams(self, pos: tuple[float, float, float] | np.ndarray, width: float,
-                      height: float, npts: tuple[int, ...], az=0.) -> np.ndarray:
+    def getGridParams(self, pos: tuple[float, float, float] | np.ndarray, along_track_m: float,
+                      cross_track_m: float, npts: tuple[int, ...], cross_track_angle=0.) -> np.ndarray:
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
-        corr_az = np.pi / 2 - az
+
+        # Shift the math such that it rotates from the Y axis clockwise
+        cross_corr = cross_track_angle - np.pi / 2
+
         # Translation
         rmat = np.array([[1, 0, shift_x],
                          [0, 1, shift_y],
                          [0, 0, 1]])
         # Rotation
-        rmat = rmat.dot(np.array([[np.cos(corr_az), -np.sin(corr_az), 0],
-                                  [np.sin(corr_az), np.cos(corr_az), 0],
+        rmat = rmat.dot(np.array([[np.cos(cross_corr), np.sin(cross_corr), 0],
+                                  [-np.sin(cross_corr), np.cos(cross_corr), 0],
                                   [0, 0, 1.]]))
         # Scaling
         # The -1 offsets the fact that the number of points is one more than the array element index
-        w_k = width / (npts[0] - 1)
-        h_k = height / (npts[1] - 1)
+        # npts is (ncols, nrows)
+        w_k = along_track_m / (npts[0] - 1)
+        h_k = cross_track_m / (npts[1] - 1)
         rmat = rmat.dot(np.diag([h_k, w_k, 1]))
 
         self.rps = h_k
@@ -46,18 +50,18 @@ class Environment(object):
 
         return rmat
 
-    def getGrid(self, pos: tuple[float, float, float] | None = None, width: float | None = None,
-                height: float | None = None, nrows: int = 0, ncols: int = 0, az: float = 0,
+    def getGrid(self, pos: tuple[float, float, float] | None = None, along_track_m: float | None = None,
+                cross_track_m: float | None = None, nrows: int = 0, ncols: int = 0, cross_track_angle: float = 0,
                 use_elevation: str | None = None) -> tuple:
         # This grid is independent of the refgrid or stored transforms
         npts = self.shape if nrows == 0 else (ncols, nrows)
-        if pos is None and width is None and height is None and nrows == 0 and ncols == 0 and az == 0:
+        if pos is None and along_track_m is None and cross_track_m is None and nrows == 0 and ncols == 0 and cross_track_angle == 0:
             rmat = self.transforms
         else:
             pos = self.origin if pos is None else pos
-            width = self.shape[0] if width is None else width
-            height = self.shape[1] if height is None else height
-            rmat = self.getGridParams(pos, width, height, npts, az)
+            along_track_m = self.shape[0] if along_track_m is None else along_track_m
+            cross_track_m = self.shape[1] if cross_track_m is None else cross_track_m
+            rmat = self.getGridParams(pos, along_track_m, cross_track_m, npts, cross_track_angle)
         gxx = np.linspace(npts[0] / 2, -npts[0] / 2, npts[0])
         gyy = np.linspace(-npts[1] / 2, npts[1] / 2, npts[1])
         gy, gx = np.meshgrid(gxx, gyy)
@@ -79,7 +83,7 @@ class Environment(object):
                 gz = (getElevationTIFF(use_elevation, latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
             except FileNotFoundError:
                 gz = np.zeros(px.shape)
-        return px, py, gz
+        return (px, py, gz), rmat
 
     def getRefGrid(self, pos: tuple[float, float, float] | None = None, width: float | None = None,
                    height: float | None = None, nrows: int = 0, ncols: int = 0, az: float = 0,
@@ -195,7 +199,7 @@ class MapEnvironment(Environment):
 class SDREnvironment(Environment):
     rps: float = 1
     cps: float = 1
-    heading: float = 0.
+    cross_track_angle: float = 0.
 
     def __init__(self, sdr, local_grid: np.ndarray | None = None,
                  origin: tuple[float, float, float] | np.ndarray | None = None):
@@ -220,17 +224,11 @@ class SDREnvironment(Environment):
             grid = asi
         self._sdr = sdr
         self._asi = asi
-        self.heading = np.arctan2(sdr.gps_ve.mean(), sdr.gps_vn.mean())
+        self.cross_track_angle = np.arctan2(sdr.gps_ve.mean(), sdr.gps_vn.mean()) - np.pi / 2
         if sdr.ash is None:
-            try:
-                hght = sdr.xml.Flight_Line.Flight_Line_Altitude_M
-                pt = ((sdr.xml.Flight_Line.Start_Latitude_D + sdr.xml.Flight_Line.Stop_Latitude_D) / 2,
-                      (sdr.xml.Flight_Line.Start_Longitude_D + sdr.xml.Flight_Line.Stop_Longitude_D) / 2)
-                alt = getElevation(*pt)
-            except KeyError:
-                pt = (sdr.gps_lat.mean(), sdr.gps_lon.mean())
-                alt = getElevation(*pt)
-                hght = sdr.gps_alt.mean() - alt
+            pt = (sdr.gps_lat.mean(), sdr.gps_lon.mean())
+            alt = getElevation(*pt)
+            hght = sdr.gps_alt.mean() - alt
             try:
                 nrange = ((sdr[0].receive_on_TAC - sdr[0].transmit_on_TAC) / TAC) * c0 / 2
                 frange = ((sdr[0].receive_off_TAC - sdr[0].transmit_on_TAC) / TAC -
@@ -241,10 +239,10 @@ class SDREnvironment(Environment):
                           sdr[0].pulse_length_S) * c0 / 2
             mrange = np.sqrt(((frange + nrange) / 2)**2 - hght**2)
             if origin is None:
-                ref_llh = origin = enu2llh(mrange * np.sin(self.heading - np.pi / 2), mrange * np.cos(self.heading - np.pi / 2), 0.,
+                ref_llh = origin = enu2llh(mrange * np.sin(self.cross_track_angle), mrange * np.cos(self.cross_track_angle), 0.,
                                            (pt[0], pt[1], alt))
             else:
-                ref_llh = enu2llh(mrange * np.sin(self.heading - np.pi / 2), mrange * np.cos(self.heading - np.pi / 2), 0.,
+                ref_llh = enu2llh(mrange * np.sin(self.cross_track_angle), mrange * np.cos(self.cross_track_angle), 0.,
                                   (pt[0], pt[1], alt))
         else:
             if origin is None:
@@ -254,7 +252,7 @@ class SDREnvironment(Environment):
                        sdr.ash['geo']['hRef'])
             self.rps = sdr.ash['geo']['rowPixelSizeM']
             self.cps = sdr.ash['geo']['colPixelSizeM']
-            self.heading = sdr.ash['flight']['flnHdg'] * DTR
+            self.cross_track_angle = sdr.ash['flight']['flnHdg'] * DTR - np.pi / 2
 
         self.origin = np.array(origin)
         self.ref = np.array(ref_llh)
@@ -262,33 +260,25 @@ class SDREnvironment(Environment):
         grid = local_grid if local_grid is not None else grid
 
         rmat = self.getGridParams(self.origin, grid.shape[0] * self.cps, grid.shape[1] * self.rps, grid.shape,
-                                         self.heading)
+                                  self.cross_track_angle)
 
         super().__init__(rmat=rmat, reflectivity=grid)
 
-    def gridFromSwath(self, partial_pulse_percent: float = 0., fdelay: float = 0.,
-                      beamwidth: float = 0., bandwidth: float = 1.):
-        try:
-            nrange = ((self._sdr[0].receive_on_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC) * c0 / 2
-            frange = ((self._sdr[0].receive_off_TAC - self._sdr[0].transmit_on_TAC - fdelay) / TAC -
-                      self._sdr[self._channel].pulse_length_S * partial_pulse_percent) * c0 / 2
-        except AttributeError:
-            nrange = ((self._sdr[0].Receive_On_TAC - self._sdr[0].Transmit_On_TAC - fdelay) / TAC) * c0 / 2
-            frange = ((self._sdr[0].Receive_Off_TAC - self._sdr[0].Transmit_On_TAC - fdelay) / TAC -
-                      self._sdr[0].pulse_length_S * partial_pulse_percent) * c0 / 2
+    def gridFromSwath(self, near_range, far_range, bandwidth: float = 6.6e8, beamwidth: float = 0.):
         alt = self._sdr.gps_alt.mean() - getElevation(self._sdr.gps_lat.mean(), self._sdr.gps_lon.mean())
-        nrange = np.sqrt(nrange**2 - alt**2)
-        frange = np.sqrt(frange**2 - alt**2)
+        nrange = np.sqrt(near_range**2 - alt**2)
+        frange = np.sqrt(far_range**2 - alt**2)
         bottom_enu = llh2enu(self._sdr.gps_lat[0], self._sdr.gps_lon[0], self._sdr.gps_alt[0], self.ref)
         top_enu = llh2enu(self._sdr.gps_lat[-1], self._sdr.gps_lon[-1], self._sdr.gps_alt[-1], self.ref)
-        bottom_corner = np.array([bottom_enu[0] + nrange * np.sin(self.heading + np.pi / 2), bottom_enu[0] + nrange * np.cos(self.heading + np.pi / 2), 0])
-        top_corner = np.array([top_enu[0] + frange * np.sin(self.heading + np.pi / 2), top_enu[0] + frange * np.cos(self.heading + np.pi / 2), 0])
+        bottom_corner = np.array([bottom_enu[0] + nrange * np.sin(self.cross_track_angle), bottom_enu[1] + nrange * np.cos(self.cross_track_angle), 0])
+        top_corner = np.array([top_enu[0] + frange * np.sin(self.cross_track_angle), top_enu[1] + frange * np.cos(self.cross_track_angle), 0])
         resolution = 1.2 * c0 / (2 * bandwidth)
         origin_enu = (bottom_corner + top_corner) / 2.
         origin_llh = enu2llh(*origin_enu, self.ref)
-        width = np.linalg.norm(np.array(bottom_enu) - np.array(top_enu)) - 2 * np.tan(beamwidth / 2) * frange
+        width = np.linalg.norm(np.array(bottom_enu) - np.array(top_enu)) - 2 * np.tan(beamwidth) * far_range
         height = float(np.sqrt(np.linalg.norm(bottom_corner - top_corner)**2 - width**2))
-        return self.getGrid(origin_llh, height, width, min(1000, int(width / resolution)), min(1000, int(height / resolution)), self.heading)
+        return self.getGrid(origin_llh, width, height, min(512, int(width / resolution)), min(512, int(height / resolution)),
+                            cross_track_angle=self.cross_track_angle), width, height, origin_llh
 
     @property
     def sdr(self):

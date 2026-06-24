@@ -22,9 +22,12 @@ inch_to_m = .0254
 m_to_ft = 3.2808
 
 
-def getRadarAndEnvironment(sdr_file: SDRParse | str, a_channel: int = 0, is_sdr: bool = True) -> tuple | None:
+def getRadarAndEnvironment(sdr_file: SDRParse | str, a_channel: int = 0, is_sdr: bool = True, env_args: dict | None = None,
+                           platform_args: dict | None = None) -> tuple | None:
     from .platform_helper import SDRPlatform, SARPlatform
     from .grid_helper import SDREnvironment
+    env_args = env_args or {}
+    platform_args = platform_args or {}
 
     # Load SAR file into SDRParse object
     if isinstance(sdr_file, str):
@@ -36,11 +39,11 @@ def getRadarAndEnvironment(sdr_file: SDRParse | str, a_channel: int = 0, is_sdr:
     else:
         a_sdr = sdr_file
     # Load environment
-    a_bg = SDREnvironment(a_sdr)
+    a_bg = SDREnvironment(a_sdr, **env_args)
 
     # Load the platform
 
-    a_rp = SDRPlatform(a_sdr, a_bg.ref, channel=a_channel) if is_sdr else SARPlatform(a_sdr, a_bg.ref, channel=a_channel)
+    a_rp = SDRPlatform(a_sdr, a_bg.ref, channel=a_channel, **platform_args) if is_sdr else SARPlatform(a_sdr, a_bg.ref, channel=a_channel, **platform_args)
     return a_bg, a_rp
 
 
