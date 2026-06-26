@@ -209,22 +209,27 @@ class SDREnvironment(Environment):
             grid = abs(asi)
         except KeyError:
             print('ASI not found.')
-            asi = np.random.rand(2000, 2000)
-            asi[250, 250] = 10
-            asi[750, 750] = 10
+            asi = np.random.rand(200, 200)
+            asi[25, 25] = 10
+            asi[75, 75] = 10
             grid = asi
         except TypeError:
             asi = sdr.loadASI(sdr.files['asi'][0])
             grid = abs(asi)
         except FileNotFoundError:
             print('ASI not found.')
-            asi = np.random.rand(2000, 2000)
-            asi[250, 250] = 10
-            asi[750, 750] = 10
+            asi = np.random.rand(200, 200)
+            asi[25, 25] = 10
+            asi[75, 75] = 10
             grid = asi
         self._sdr = sdr
         self._asi = asi
-        self.cross_track_angle = np.arctan2(sdr.gps_ve.mean(), sdr.gps_vn.mean()) - np.pi / 2
+        if sdr.gim is not None:
+            look_angle = np.pi / 2 if sdr.gim.look_side == 'Right' else -np.pi / 2
+            look_angle += sdr.gim.squint_angle * DTR
+        else:
+            look_angle = -np.pi / 2
+        self.cross_track_angle = np.arctan2(sdr.gps_ve.mean(), sdr.gps_vn.mean()) + look_angle
         if sdr.ash is None:
             pt = (sdr.gps_lat.mean(), sdr.gps_lon.mean())
             alt = getElevation(*pt)

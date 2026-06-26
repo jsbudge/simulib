@@ -12,7 +12,7 @@ from simulib.simulib.sim_objects import AESA
 from simulib.simulib.utils import c0, DTR, _float, _complex_float, getRadarAndEnvironment
 from scipy.spatial import Delaunay
 from scipy.interpolate import RegularGridInterpolator
-from sdrparse.SDRV2Parsing import load
+from sdrparse.SDRParsing import load
 from backproject_utils import backprojectPulseStream
 import trimesh as tri
 import matplotlib.pyplot as plt
@@ -37,16 +37,40 @@ TILE_SIZE = 256
 
 def renderBlock(a_ptimes, a_rp, a_tracer, a_chirps, a_bw_az, a_bw_el, a_points,
                 a_point_power, a_nsam, a_fc, a_fs, a_near_range_s, far_range, a_nray_sqrt, transmit_power, rx_gain,
-                tx_gain, rec_gain, noise_figure, operating_temp, a_fft_len, add_noise, has_aesa, near_range_cutoff):
-    if has_aesa:
-        bore = azelToVec(a_rp.tx.az_aesa_iner(a_ptimes), a_rp.tx.el_aesa_iner(a_ptimes))
-    else:
-        bore = a_rp.tx.boresight(a_ptimes)
-    # aesa_bore = azelToVec(a_rp.tx.az_iner(a_ptimes), a_rp.tx.el_iner(a_ptimes))
+                tx_gain, rec_gain, noise_figure, operating_temp, a_fft_len, add_noise, near_range_cutoff):
+    """
+    Render a block of pulses inside the simulation.
+    :param a_ptimes: Pulse times.
+    :param a_rp: Instance of SDRPlatform that provides boresight, attitude and position information.
+    :param a_tracer: Instance of a raytracing program for CUDA.
+    :param a_chirps: Basebanded chirp used for final convolution. Time domain data.
+    :param a_bw_az: Half-bandwidth for azimuth in radians.
+    :param a_bw_el: Half-bandwidth for elevation in radians.
+    :param a_points: (X, Y, Z) positions of points to simulate.
+    :param a_point_power: Power values of points to simulate.
+    :param a_nsam: Number of samples in the range gate.
+    :param a_fc: Center frequency of the chirp in Hz.
+    :param a_fs: Sampling frequency of the system in Hz.
+    :param a_near_range_s: This is the timing of the near range gate in seconds.
+    :param far_range:
+    :param a_nray_sqrt: Square root of the number of rays to send out.
+    :param transmit_power: Transmit power of antenna in watts.
+    :param rx_gain: Receiver gain in dB.
+    :param tx_gain: Transmitter gain in dB.
+    :param rec_gain: Internal gains from power amplifiers in dB.
+    :param noise_figure: Noise figure of the radar.
+    :param operating_temp: Operating temperature in K.
+    :param a_fft_len: FFT length for convolution with chirp.
+    :param add_noise: If True, adds thermal noise to final results.
+    :param near_range_cutoff: Amount of data to cut off the beginning of a pulse, in bins. Used to simulate partial pulse
+        returns from the beginning of a range gate.
+    :return: Frequency spectrum data of simulated radar returns.
+    """
+    # Swap position axes around to get data into a format the tracer expects
     txposes = a_rp.txpos(a_ptimes).swapaxes(0, 1).swapaxes(1, 2)
     rxposes = a_rp.rxpos(a_ptimes).swapaxes(0, 1).swapaxes(1, 2)
-    a_bd = trace_reflector_scene(a_tracer, a_chirps, txposes, rxposes, a_bw_az, a_bw_el, a_rp.tx.boresight(a_ptimes[0]),
-                       bore, a_rp.att(a_ptimes)[:, 1], a_points, a_point_power, a_ptimes, a_nsam,
+    a_bd = trace_reflector_scene(a_tracer, a_chirps, txposes, rxposes, a_bw_az, a_bw_el,
+                       a_rp.tx.boresight(a_ptimes), a_rp.att(a_ptimes)[:, 1], a_points, a_point_power, a_ptimes, a_nsam,
                        a_fc, a_fs, a_near_range_s, far_range, a_nray_sqrt, a_nray_sqrt, transmit_power, rx_gain, tx_gain,
                        rec_gain, noise_figure, operating_temp, a_fft_len, add_noise=add_noise, add_chirp=True)[0, 0]
     a_bd = np.fft.fft(np.fft.ifft(a_bd, axis=1)[:, near_range_cutoff:a_nsam], a_fft_len, axis=1)
@@ -124,7 +148,7 @@ def resampleGoogleMap(a_lats: float | np.ndarray, a_lons: float | np.ndarray, mp
 
 if __name__ == "__main__":
     cfig = load_yaml_config('/home/jeff/repo/optix_radartracer/simulib/scripts/anduril_params.yaml')
-    npulses = 512
+    npulses = 64
     upsample = 1
     near_range_ppp = .3
     show_plots = True
@@ -132,8 +156,8 @@ if __name__ == "__main__":
     randomize_pts = True
 
     max_pix = 512
-    pix_res: float = 2.
-    nray_sqrt = 3000
+    pix_res: float = 1.
+    nray_sqrt = 5000
     nrays = nray_sqrt * nray_sqrt
 
     start_time = time.time()
@@ -141,15 +165,17 @@ if __name__ == "__main__":
     # fnme = '/home/jeff/SDR_DATA/RAW/10282025/SAR_10282025_112741.sar'
     # fnme = '/home/jeff/SDR_DATA/RAW/12112025/SAR_12112025_144929.sar'
     # fnme = '/home/jeff/SDR_DATA/RAW/12192025/SAR_12192025_110646.sar'
-    fnme = '/home/jeff/SDR_DATA/RAW/11112025/SAR_11112025_145023.sar'
+    # fnme = '/home/jeff/SDR_DATA/RAW/11112025/SAR_11112025_145023.sar'
+    # fnme = '/home/jeff/SDR_DATA/RAW/04292025/SAR_04292025_111051.sar'  # This is the weird one
+    fnme = '/home/jeff/SDR_DATA/RAW/06032025/SAR_06032025_124843.sar'
 
     # Copy/paste another file into the same directory
     if save_file:
+        # Create a copy that we mess with, so the original data is untouched.
         source_path = Path(fnme)
         source_xml_path = f'{source_path.parent}/{source_path.stem}.xml'
         copy_path = f'{source_path.parent}/{source_path.stem}_copy.sar'
         copy_xml_path = f'{source_path.parent}/{source_path.stem}_copy.xml'
-
         try:
             shutil.copy2(source_path, copy_path)
             print(f"File copied successfully to {copy_path}")
@@ -176,6 +202,7 @@ if __name__ == "__main__":
 
     sdr = load(fnme, progress_tracker=True)
     sdr_dataset = 0
+    # If working with V2, try this (except case is for V1 data)
     try:
         ival = sdr.intervals[sdr[sdr_dataset].interval]
         path = sdr[sdr_dataset].path
@@ -189,29 +216,11 @@ if __name__ == "__main__":
     fs = sdr[sdr_dataset].fs
     fc = sdr[sdr_dataset].fc
 
-    # Design the antenna
-    '''az_elements = 100
-    el_elements = 100
-    ant = AESA(fc, az_elements, el_elements, 1, 1)
-    bw_az, bw_el = ant.calc_beamwidth(0., 0.)
-    tx_num = sdr[0].trans_num if not sdr.is_v2 else sdr[0].tx_num
-    while bw_az > sdr.ant[sdr.port[tx_num].assoc_ant].az_bw * 2:
-        az_elements += 1
-        ant = AESA(fc, az_elements, 1, 1, 1)
-        bw_az, bw_el = ant.calc_beamwidth(0., 0.)
-    while bw_el > sdr.ant[sdr.port[tx_num].assoc_ant].el_bw * 2:
-        el_elements += 1
-        ant = AESA(fc, az_elements, el_elements, 1, 1)
-        bw_az, bw_el = ant.calc_beamwidth(0., 0.)'''
-
-    # origin = ()
-    if sdr.has_aesa:
-        ant = AESA(fc, 1, 1, 1, 1)
-        bg, rp = getRadarAndEnvironment(sdr, platform_args=dict(tx_offset=ant.phase_center_offsets, rx_offset=ant.phase_center_offsets))
-    else:
-        bg, rp = getRadarAndEnvironment(sdr)
+    # Grab Platform and Environment
+    bg, rp = getRadarAndEnvironment(sdr)
     rp.fs = fs
     origin = bg.origin
+    # SDR uses 3db beamwidth and simulator uses null-to-null, hence the doubling
     bw_az = rp.az_half_bw * 2
     bw_el = rp.el_half_bw * 2
 
@@ -223,37 +232,33 @@ if __name__ == "__main__":
     # ((gx, gy, gz), bg_transform), grid_width_m, grid_height_m, origin = bg.gridFromSwath(*grid_ranges, beamwidth=rp.az_half_bw)
     grid_height_m = np.sqrt(grid_ranges[1]**2 - rp.pos(rp.gpst)[:, 2].mean()**2) - np.sqrt(grid_ranges[0]**2 - rp.pos(rp.gpst)[:, 2].mean()**2)
     grid_width_m = np.linalg.norm(rp.pos(rp.gpst[0]) - rp.pos(rp.gpst[-1]))
-    # near_range_s -= 1e-6
-    sample_height_m = grid_height_m * 3.
+
+    # Set sampling to be just bigger than expected swath
+    sample_height_m = grid_height_m * 2.
     sample_width_m = np.linalg.norm(rp.pos(rp.gpst[0]) - rp.pos(rp.gpst[-1])) * 1.1
 
     chirps = sdr[sdr_dataset].cal_chirp.reshape((1, -1)).astype(_complex_float)
     # chirps = genChirp(nr, fs, fc, sdr[0].bw).reshape((1, -1)).astype(_complex_float)
-    mf_chirps = sdr.genReciprocalRipple(0, 0, 0).reshape((1, -1)).astype(_complex_float)
-    # mf_chirps = np.fft.fft(chirps, fft_len, axis=1).conj()
+    # mf_chirps = sdr.genReciprocalRipple(0, 0, 0).reshape((1, -1)).astype(_complex_float)
+    mf_chirps = np.fft.fft(chirps, fft_len, axis=1).conj()
 
     pulse_times = sdr[sdr_dataset].pulse_time
 
 
     if show_plots:
+        # Smaller grid for backprojection inside of script
         pix_width = min(max_pix, int(sample_width_m / pix_res))
         pix_height = min(max_pix, int(sample_height_m / pix_res))
         (gx, gy, gz), bg_transform = bg.getGrid(origin, along_track_m=grid_width_m, cross_track_m=grid_height_m,
                                                 nrows=pix_height, ncols=pix_width, cross_track_angle=bg.cross_track_angle)
 
-    bpj_grid = np.zeros(gx.shape, dtype=_complex_float)
+        bpj_grid = np.zeros(gx.shape, dtype=_complex_float)
 
-
+    # This is the grid we use to sample points for simulation
     point_grid_sz = (int(sample_width_m / pix_res), int(sample_height_m / pix_res))
     (bgx, bgy, bgz), bbg_transform = bg.getGrid(origin, along_track_m=sample_width_m, cross_track_m=sample_height_m,
                                             nrows=point_grid_sz[0],
                                             ncols=point_grid_sz[1], cross_track_angle=bg.cross_track_angle)
-
-    # ((gx, gy, gz), bg_transform), grid_width_m, grid_height_m, origin = bg.gridFromSwath()
-
-    # gx, gy, gz = bg.getGrid(origin, along_track_m=grid_width_m + 20., cross_track_m=grid_height_m + 20., nrows=pix_height,
-    #                         ncols=pix_width, cross_track_angle=bg.cross_track_angle)
-    # gz[:] = gz.mean()
 
     print('Getting Google Maps grid...')
     res_mpp = max((bgx.max() - bgx.min()) / point_grid_sz[1], (bgy.max() - bgy.min()) / point_grid_sz[0])
@@ -262,22 +267,21 @@ if __name__ == "__main__":
     # Google image is transposed compared to what we expect in SDREnvironment
     im = np.array(im).sum(axis=2).T
     im = ((im - im.min()) * .95 / (im.max() - im.min()))
+    grid_int = RegularGridInterpolator((np.arange(im.shape[0]), np.arange(im.shape[1])), im)
     npts = nrays
 
+    # This is only here to be compatible with Optix tracer; it can be pretty small, we don't use it
     grid_pts = np.array([bgx[::10, ::10].flatten(), bgy[::10, ::10].flatten(), bgz[::10, ::10].flatten()]).T
     tris_2d = Delaunay(grid_pts[:, :2])
     elevation_mesh = tri.Trimesh(vertices=grid_pts, faces=tris_2d.simplices)
     el_mats = np.zeros((elevation_mesh.triangles.shape[0], 2))
     el_mats[:, 0] = 1e6
     el_mats[:, 1] = .017
-    grid_int = RegularGridInterpolator((np.arange(im.shape[0]), np.arange(im.shape[1])), im)
 
-
-
-    # Build a trimesh of the elevation map
     # Set points for rays
+    print('Getting points for rays...')
     if randomize_pts:
-        # Rotate uniform points to lay on top of grid
+        # Uniform random sampling, then rotate points to lay on top of grid
         points = (np.random.rand(npts, 3) * np.array([point_grid_sz[0] - .1, point_grid_sz[1] - .1, 0.]) -
                   np.array([point_grid_sz[0] / 2, point_grid_sz[1] / 2, -1.]))
         points = points @ bbg_transform.T
@@ -289,6 +293,7 @@ if __name__ == "__main__":
     print('Sampling Google Map...')
     plats, plons, _ = enu2llh(*points.T, bg.ref)
 
+    # Get power values for random points by using interpolation of Google Maps data
     _, _, iimx, iimy = calcGoogleCoords(((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), plats, plons, res_mpp)
     point_power = grid_int((iimx, iimy)).astype(_float)
 
@@ -300,6 +305,7 @@ if __name__ == "__main__":
                            cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain, cfig.ant_params.rec_gain,
                            cfig.ant_params.noise_figure, cfig.ant_params.operating_temperature, fft_len, True) for p in ptimes]'''
 
+    render_time = time.time()
     with ThreadPoolExecutor(max_workers=15) as executor:
         ex_map = executor.map(renderBlock, ptimes, repeat(rp), repeat(tracer), repeat(chirps), repeat(bw_az),
                               repeat(bw_el), repeat(points), repeat(point_power), repeat(aug_nsam), repeat(fc), repeat(fs),
@@ -307,9 +313,9 @@ if __name__ == "__main__":
                               repeat(cfig.ant_params.transmit_power), repeat(cfig.ant_params.rx_gain),
                               repeat(cfig.ant_params.tx_gain), repeat(cfig.ant_params.rec_gain),
                               repeat(cfig.ant_params.noise_figure), repeat(cfig.ant_params.operating_temperature),
-                              repeat(fft_len), repeat(False), repeat(sdr.has_aesa), repeat(int(nr * near_range_ppp)))
-
+                              repeat(fft_len), repeat(False), repeat(int(nr * near_range_ppp)))
         results = list(ex_map)
+    print(f'Rendered simulation in {time.time() - render_time} seconds.')
 
     if save_file:
         scale = max([abs(d).max() for d in results])
@@ -320,32 +326,20 @@ if __name__ == "__main__":
             ex_map = executor.map(saveToFile, results, repeat(nsam), att_list, repeat(copy_path), frames, repeat(scale))
             saves = list(ex_map)
 
-    grids = []
-    for bd, frame in tqdm(zip(results, list(zip(*(iter(range(0, len(pulse_times), npulses)),))))):
-        ptimes = pulse_times[frame[0]:frame[0] + npulses]
-
-        if show_plots:
-            '''if save_file:
-                new_data = np.zeros((len(ptimes), nsam), dtype=np.complex128)
-                # tmp_data = bytes(save_int_data[fr_idx].flatten())
-                for fr_idx, fr in enumerate(np.arange(frame[0], frame[0] + len(ptimes))):
-                    ndata = bytes(save_int_data[fr_idx].flatten())
-                    # ndata = tmp_data[fr_idx:fr_idx + nsam * 4]
-                    re_data = array.array('h', ndata)
-                    # re_data.byteswap()
-                    re_data = np.array(re_data)
-                    new_data[fr_idx] = (re_data[:nsam * 2:2] + 1j * re_data[1:nsam * 2:2]) * 10 ** (atts[fr] / 20)
-                bd = np.fft.fft(new_data, fft_len, axis=1)'''
-            # bd = np.fft.fft((save_int_data[..., 0] + 1j * save_int_data[..., 1]) * 10 ** (31 / 20), fft_len, axis=1)
+    if show_plots:
+        print('Running backprojection of data...')
+        grids = []
+        for bd, frame in tqdm(zip(results, list(zip(*(iter(range(0, len(pulse_times), npulses)),))))):
+            ptimes = pulse_times[frame[0]:frame[0] + npulses]
 
             rpi_data = upsamplePulse(bd * mf_chirps, fft_len, upsample, is_freq=True,
                                      time_len=nsam).astype(_complex_float)
-            grids.append(backprojectPulseStream([rpi_data], [rp.tx.az_aesa_iner(ptimes) if sdr.has_aesa else rp.tx.az_iner(ptimes)],
+            grids.append(backprojectPulseStream([rpi_data], [rp.tx.az_iner(ptimes)],
                                                    [rp.rxpos(ptimes)[:, 0, 0]],
                                                    [rp.txpos(ptimes)[:, 0, 0]], gz, _float(wavelength),
                                                    _float(near_range_s), _float(fs * upsample), _float(rp.az_half_bw),
                                                    gx=gx, gy=gy))
-    bpj_grid = sum(grids)
+        bpj_grid = sum(grids)
 
     end_time = time.time()
 
@@ -382,10 +376,11 @@ if __name__ == "__main__":
 
         base_pos = rp.pos(pulse_times[::100])
 
-        fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten(),)
-        fig.add_scatter3d(x=base_pos[:, 0], y=base_pos[:, 1], z=base_pos[:, 2])
-        fig.add_scatter3d(x=points[:, 0], y=points[:, 1], z=points[:, 2], mode='markers', marker=dict(color=point_power))
-        fig.show()
+        if points.shape[0] < 512**2:
+            fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten(),)
+            fig.add_scatter3d(x=base_pos[:, 0], y=base_pos[:, 1], z=base_pos[:, 2])
+            fig.add_scatter3d(x=points[:, 0], y=points[:, 1], z=points[:, 2], mode='markers', marker=dict(color=point_power))
+            fig.show()
 
         from scipy.spatial import delaunay_plot_2d
 
