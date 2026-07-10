@@ -52,7 +52,7 @@ class Environment(object):
 
     def getGrid(self, pos: tuple[float, float, float] | None = None, along_track_m: float | None = None,
                 cross_track_m: float | None = None, nrows: int = 0, ncols: int = 0, cross_track_angle: float = 0,
-                use_elevation: str | None = None) -> tuple:
+                use_elevation: str | bool = True) -> tuple:
         # This grid is independent of the refgrid or stored transforms
         npts = self.shape if nrows == 0 else (ncols, nrows)
         if pos is None and along_track_m is None and cross_track_m is None and nrows == 0 and ncols == 0 and cross_track_angle == 0:
@@ -70,14 +70,17 @@ class Environment(object):
         py = rmat[1, 0] * gx + rmat[1, 1] * gy + rmat[1, 2]
         latg, long, altg = enu2llh(px.ravel(), py.ravel(), np.zeros(px.shape[0] * px.shape[1]), self.ref)
         sh = gx.shape
-        if use_elevation is None:
-            try:
-                gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
-            except FileNotFoundError:
+        if isinstance(use_elevation, bool):
+            if use_elevation:
+                try:
+                    gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
+                except FileNotFoundError:
+                    gz = np.zeros(px.shape)
+                except Exception as e:
+                    gz = np.zeros(px.shape)
+                    print(f'Error found: {e}')
+            else:
                 gz = np.zeros(px.shape)
-            except Exception as e:
-                gz = np.zeros(px.shape)
-                print(f'Error found: {e}')
         else:
             try:
                 gz = (getElevationTIFF(use_elevation, latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
