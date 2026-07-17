@@ -12,7 +12,7 @@ tracer_params:
 
 sim_params:
   max_pixels: 512
-  pix_resolution: 2
+  pix_resolution: 1
   near_range_ppp: .2
   show_plots: False
   save_file: True

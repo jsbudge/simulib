@@ -25,6 +25,9 @@ import mmap
 import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import warp as wp
+import cupy as cp
+from warp_kernels import simple_simulation
 import array
 import time
 import matplotlib.transforms as mtrans
@@ -74,6 +77,27 @@ def renderBlock(a_ptimes, a_rp, a_tracer, a_chirps, a_bw_az, a_bw_el, a_gridheig
                                  rec_gain, noise_figure, operating_temp, a_fft_len, add_noise=add_noise, add_chirp=True)[0, 0]
     a_bd = np.fft.fft(np.fft.ifft(a_bd, axis=1)[:, near_range_cutoff:a_nsam], a_fft_len, axis=1)
     return a_bd
+
+
+def renderWarp(a_rcs, grid, tx, rx, a_az, a_el,
+               bw_az, bw_el, near_range_s, fs, wavelength, radar_coeff,
+               nsam, fft_chirp):
+    txpos = cp.array(tx, dtype='f4')
+    rxpos = cp.array(rx, dtype='f4')
+    az = cp.array(a_az, dtype='f4')
+    el = cp.array(a_el, dtype='f4')
+    idata = cp.zeros((len(a_az), nsam), dtype='f4')
+    qdata = cp.zeros((len(a_az), nsam), dtype='f4')
+    rcs = cp.array(a_rcs, dtype='f4')
+    loc_grid = cp.array(grid, dtype='f4')
+    wp.launch(
+        kernel=simple_simulation,
+        dim=(grid.shape[0], grid.shape[1]),
+        inputs=[rcs, loc_grid, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, wavelength, radar_coeff,
+                idata, qdata],
+    )
+    return cp.asnumpy(cp.fft.fft(idata + 1j * qdata, fft_chirp.shape[-1], axis=-1)) * fft_chirp
+
 
 
 def saveToFile(a_bd, a_nsam, a_atts, a_copy_path, a_frames, a_scale, a_ref_pts):
@@ -266,7 +290,7 @@ def runSimulation(cfig, fnme):
     (bgx, bgy, bgz), bbg_transform = bg.getGrid(origin, along_track_m=sample_width_m, cross_track_m=sample_height_m,
                                                 nrows=point_grid_sz, ncols=point_grid_sz,
                                                 cross_track_angle=bg.cross_track_angle, use_elevation=False)
-    # bgz[:] = 0.
+    bgz[:] = 0.
 
     print('Getting Google Maps grid...')
     res_mpp = max((bgx.max() - bgx.min()) / point_grid_sz, (bgy.max() - bgy.min()) / point_grid_sz)
@@ -284,25 +308,26 @@ def runSimulation(cfig, fnme):
     # Get power values for random points by using interpolation of Google Maps data
     _, _, iimx, iimy = calcGoogleCoords(((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), plats, plons,
                                         res_mpp)
-    point_power = grid_int((iimx, iimy)).astype(_float)
+    point_power = grid_int((iimx, iimy)).astype(_float).reshape(bgz.shape)
     # point_power[:] = 0
-    # point_power[::2000] = 10
+    # point_power[233, 233] = 10
 
     # im = grid
     npts = len(point_power)
-
-    # This is only here to be compatible with Optix tracer; it can be pretty small, we don't use it
-    grid_pts = np.array([[0, 0, 0], [0, 1, 0], [1, 1, 0.]])
-    elevation_mesh = tri.Trimesh(vertices=grid_pts, faces=np.array([[0, 1, 2]]))
-    el_mats = np.zeros((elevation_mesh.triangles.shape[0], 2))
-    tracer = build_tracer([BaseMesh(elevation_mesh, el_mats, motion_keys=None)], 'anduril_trace.cu',
-                          pulse_times=pulse_times)
 
     print(f'Launching {npts} rays.')
     ptimes = [pulse_times[frame[0]:frame[0] + npulses] for frame in
               list(zip(*(iter(range(0, len(pulse_times), npulses)),)))]
 
     render_time = time.time()
+
+    # This is only here to be compatible with Optix tracer; it can be pretty small, we don't use it
+    '''grid_pts = np.array([[0, 0, 0], [0, 1, 0], [1, 1, 0.]])
+    elevation_mesh = tri.Trimesh(vertices=grid_pts, faces=np.array([[0, 1, 2]]))
+    el_mats = np.zeros((elevation_mesh.triangles.shape[0], 2))
+    tracer = build_tracer([BaseMesh(elevation_mesh, el_mats, motion_keys=None)], 'anduril_trace.cu',
+                          pulse_times=pulse_times)
+
     with ThreadPoolExecutor(max_workers=15) as executor:
         ex_map = executor.map(renderBlock, ptimes, repeat(rp), repeat(tracer), repeat(fft_chirp), repeat(bw_az),
                               repeat(bw_el), repeat(bgz.flatten()), repeat(point_power), repeat(bbg_transform),
@@ -312,8 +337,34 @@ def runSimulation(cfig, fnme):
                               repeat(cfig.ant_params.rx_gain),
                               repeat(cfig.ant_params.tx_gain), repeat(cfig.ant_params.rec_gain),
                               repeat(cfig.ant_params.noise_figure), repeat(cfig.ant_params.operating_temperature),
-                              repeat(fft_len), repeat(True), repeat(near_range_cutoff))
-        results = list(ex_map)
+                              repeat(fft_len), repeat(False), repeat(near_range_cutoff))
+        results = list(ex_map)'''
+
+
+    rcs = wp.array(point_power, dtype=wp.float32, device='cuda:0')
+    radar_coeff = getRadarCoeff(fc, cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
+                                cfig.ant_params.rec_gain)
+    loc_grid = wp.array(np.stack([bgx, bgy, bgz], axis=-1), dtype=wp.vec3f, device='cuda:0')
+    results = []
+    idata = wp.zeros((npulses, fft_len), dtype=wp.vec2f, device='cuda:0')
+    chirp_gpu = cp.array(fft_chirp, dtype=_complex_float)
+    for p in tqdm(ptimes):
+        txpos = wp.array(rp.txpos(p)[:, 0, 0, :], dtype=wp.vec3f, device='cuda:0')
+        rxpos = wp.array(rp.rxpos(p)[:, 0, 0, :], dtype=wp.vec3f, device='cuda:0')
+        az = wp.array(rp.az_iner(p), dtype=wp.float32, device='cuda:0')
+        el = wp.array(rp.el_iner(p), dtype=wp.float32, device='cuda:0')
+        idata.zero_()
+        # qdata = wp.zeros((len(p), aug_nsam), dtype=wp.float32, device='cuda:0')
+        wp.launch(
+            kernel=simple_simulation,
+            dim=bgx.shape,
+            inputs=[rcs, loc_grid, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, 2 * np.pi / wavelength, radar_coeff,
+                    aug_nsam, len(p), idata],
+        )
+        # wp.synchronize()
+        results.append(cp.asnumpy(cp.fft.fft(cp.fft.ifft(cp.fft.fft(cp.array(idata.view(wp.float64)).view(_complex_float), axis=-1) * chirp_gpu,
+                                              axis=-1)[:len(p), near_range_cutoff:aug_nsam], fft_len, axis=-1)))
+
     print(f'Rendered simulation in {time.time() - render_time} seconds.')
 
     if save_file:
@@ -339,7 +390,7 @@ def runSimulation(cfig, fnme):
             grids.append(backprojectPulseStream([rpi_data], [rp.tx.az_iner(ptimes)],
                                                 [rp.rxpos(ptimes)[:, 0, 0]],
                                                 [rp.txpos(ptimes)[:, 0, 0]], gz, _float(wavelength),
-                                                _float(bpj_near_range_s), _float(fs * upsample), _float(rp.az_half_bw),
+                                                _float(bpj_near_range_s), _float(fs * upsample), _float(rp.az_half_bw * 2),
                                                 gx=gx, gy=gy))
         bpj_grid = sum(grids)
 
@@ -421,6 +472,7 @@ if __name__ == "__main__":
                   '/home/jeff/SDR_DATA/RAW/05072025/SAR_05072025_144041.sar',
                   '/home/jeff/SDR_DATA/RAW/07232025/SAR_07232025_144305.sar',
                   '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_112906.sar']
+    # test_files = ['/home/jeff/SDR_DATA/RAW/06032025/SAR_06032025_124843.sar']
 
     success_files = []
 
