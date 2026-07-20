@@ -27,7 +27,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import warp as wp
 import cupy as cp
-from warp_kernels import simple_simulation
+from warp_kernels import simple_simulation, runBackproject
 import array
 import time
 import matplotlib.transforms as mtrans
@@ -299,7 +299,7 @@ def runSimulation(cfig, fnme):
     # Google image is transposed compared to what we expect in SDREnvironment
     im = np.array(im).sum(axis=2).T
     im = ((im - im.min()) * .95 / (im.max() - im.min()))
-    grid_int = RegularGridInterpolator((np.arange(im.shape[0]), np.arange(im.shape[1])), im)
+    grid_int = RegularGridInterpolator((np.arange(im.shape[0]), np.arange(im.shape[1])), im, bounds_error=False, fill_value=0.)
     points = np.array([bgx.T.flatten(), bgy.T.flatten(), bgz.flatten()]).T
 
     print('Sampling Google Map...')
@@ -344,7 +344,8 @@ def runSimulation(cfig, fnme):
     rcs = wp.array(point_power, dtype=wp.float32, device='cuda:0')
     radar_coeff = getRadarCoeff(fc, cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
                                 cfig.ant_params.rec_gain)
-    loc_grid = wp.array(np.stack([bgx, bgy, bgz], axis=-1), dtype=wp.vec3f, device='cuda:0')
+    # loc_grid = wp.array(np.stack([bgx, bgy, bgz], axis=-1), dtype=wp.vec3f, device='cuda:0')
+    grid_transform = wp.array(bbg_transform, dtype=wp.mat33f, device='cuda:0')
     results = []
     idata = wp.zeros((npulses, fft_len), dtype=wp.vec2f, device='cuda:0')
     chirp_gpu = cp.array(fft_chirp, dtype=_complex_float)
@@ -358,8 +359,8 @@ def runSimulation(cfig, fnme):
         wp.launch(
             kernel=simple_simulation,
             dim=bgx.shape,
-            inputs=[rcs, loc_grid, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, 2 * np.pi / wavelength, radar_coeff,
-                    aug_nsam, len(p), idata],
+            inputs=[rcs, grid_transform, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, 2 * np.pi / wavelength, radar_coeff,
+                    aug_nsam, idata],
         )
         # wp.synchronize()
         results.append(cp.asnumpy(cp.fft.fft(cp.fft.ifft(cp.fft.fft(cp.array(idata.view(wp.float64)).view(_complex_float), axis=-1) * chirp_gpu,
@@ -383,15 +384,20 @@ def runSimulation(cfig, fnme):
         mf_chirps = sdr.genMatchedFilter(0, fft_len=fft_len).reshape((1, -1)).astype(
             _complex_float)  # np.fft.fft(chirps, fft_len, axis=1).conj()
         grids = []
+        pass_grid = np.stack([bgx, bgy, bgz], axis=-1)
         for bd, frame in tqdm(zip(results, list(zip(*(iter(range(0, len(pulse_times), npulses)),))))):
             ptimes = pulse_times[frame[0]:frame[0] + npulses]
             rpi_data = upsamplePulse(bd * mf_chirps, fft_len, upsample, is_freq=True,
                                      time_len=nsam).astype(_complex_float)
-            grids.append(backprojectPulseStream([rpi_data], [rp.tx.az_iner(ptimes)],
+            txpos = rp.txpos(ptimes)[:, 0, 0, :]
+            rxpos = rp.rxpos(ptimes)[:, 0, 0, :]
+            az = rp.az_iner(ptimes)
+            grids.append(runBackproject(rpi_data, pass_grid, txpos, rxpos, az, bw_az, bw_el, near_range_s, fs * upsample, 2 * np.pi / wavelength))
+            '''grids.append(backprojectPulseStream([rpi_data], [rp.tx.az_iner(ptimes)],
                                                 [rp.rxpos(ptimes)[:, 0, 0]],
                                                 [rp.txpos(ptimes)[:, 0, 0]], gz, _float(wavelength),
                                                 _float(bpj_near_range_s), _float(fs * upsample), _float(rp.az_half_bw * 2),
-                                                gx=gx, gy=gy))
+                                                gx=gx, gy=gy))'''
         bpj_grid = sum(grids)
 
     end_time = time.time()
@@ -473,6 +479,7 @@ if __name__ == "__main__":
                   '/home/jeff/SDR_DATA/RAW/07232025/SAR_07232025_144305.sar',
                   '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_112906.sar']
     # test_files = ['/home/jeff/SDR_DATA/RAW/06032025/SAR_06032025_124843.sar']
+    test_files = ['/home/jeff/SDR_DATA/RAW/04292025/SAR_04292025_111051.sar']
 
     success_files = []
 
