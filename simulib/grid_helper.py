@@ -25,30 +25,39 @@ class Environment(object):
 
     def getGridParams(self, pos: tuple[float, float, float] | np.ndarray, along_track_m: float,
                       cross_track_m: float, npts: tuple[int, ...], cross_track_angle=0.) -> np.ndarray:
+        """
+        This generates a transformation matrix that shifts, rotates, and scales a grid of points (arange(npts[0]), arange(npts[1]))
+        to fit the distances and at the points specified.
+        :param pos:
+        :param along_track_m:
+        :param cross_track_m:
+        :param npts:
+        :param cross_track_angle:
+        :return:
+        """
         shift_x, shift_y, _ = llh2enu(*pos, self.ref)
 
         # Shift the math such that it rotates from the Y axis clockwise
-        cross_corr = cross_track_angle - np.pi / 2
+        rot_angle = cross_track_angle - np.pi / 2
 
-        # Translation
-        rmat = np.array([[1, 0, shift_x],
-                         [0, 1, shift_y],
-                         [0, 0, 1]])
-        # Rotation
-        rmat = rmat.dot(np.array([[np.cos(cross_corr), np.sin(cross_corr), 0],
-                                  [-np.sin(cross_corr), np.cos(cross_corr), 0],
-                                  [0, 0, 1.]]))
-        # Scaling
-        # The -1 offsets the fact that the number of points is one more than the array element index
-        # npts is (ncols, nrows)
+        # origin shift
+        origin_shift = np.array([[1, 0., -(npts[0] - 1) / 2.],
+                                 [0, 1., -(npts[1] - 1) / 2.],
+                                 [0, 0, 1.]])
+        rotation = np.array([[np.cos(rot_angle), np.sin(rot_angle), 0],
+                             [-np.sin(rot_angle), np.cos(rot_angle), 0],
+                             [0, 0, 1.]])
         w_k = along_track_m / (npts[0] - 1)
         h_k = cross_track_m / (npts[1] - 1)
-        rmat = rmat.dot(np.diag([h_k, w_k, 1]))
+        scaling = np.diag([w_k, h_k, 1.])
+        point_shift = np.array([[1, 0., shift_x],
+                                [0, 1., shift_y],
+                                [0, 0, 1.]])
 
         self.rps = h_k
         self.cps = w_k
 
-        return rmat
+        return origin_shift.T @ rotation.T @ scaling.T @ point_shift.T
 
     def getGrid(self, pos: tuple[float, float, float] | None = None, along_track_m: float | None = None,
                 cross_track_m: float | None = None, nrows: int = 0, ncols: int = 0, cross_track_angle: float = 0,
@@ -62,18 +71,18 @@ class Environment(object):
             along_track_m = self.shape[0] if along_track_m is None else along_track_m
             cross_track_m = self.shape[1] if cross_track_m is None else cross_track_m
             rmat = self.getGridParams(pos, along_track_m, cross_track_m, npts, cross_track_angle)
-        gxx = np.linspace(npts[0] / 2, -npts[0] / 2, npts[0])
-        gyy = np.linspace(-npts[1] / 2, npts[1] / 2, npts[1])
-        gy, gx = np.meshgrid(gxx, gyy)
-
-        px = rmat[0, 0] * gx + rmat[0, 1] * gy + rmat[0, 2]
-        py = rmat[1, 0] * gx + rmat[1, 1] * gy + rmat[1, 2]
-        latg, long, altg = enu2llh(px.ravel(), py.ravel(), np.zeros(px.shape[0] * px.shape[1]), self.ref)
-        sh = gx.shape
+        # gxx = np.linspace(npts[0] / 2, -npts[0] / 2, npts[0])
+        # gyy = np.linspace(-npts[1] / 2, npts[1] / 2, npts[1])
+        gx, gy = np.meshgrid(np.arange(npts[0]), np.arange(npts[1]))
+        pts = np.stack([gx.ravel(), gy.ravel(), np.ones(gx.shape[0] * gx.shape[1])], axis=-1)
+        px, py, p0 = (pts @ rmat).T
+        latg, long, altg = enu2llh(px, py, p0 * 0, self.ref)
+        px = px.reshape(gx.shape)
+        py = py.reshape(gx.shape)
         if isinstance(use_elevation, bool):
             if use_elevation:
                 try:
-                    gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
+                    gz = (getElevationMap(latg, long, interp_method='splinef2d') - self.ref[2]).reshape(gx.shape)
                 except FileNotFoundError:
                     gz = np.zeros(px.shape)
                 except Exception as e:
@@ -83,7 +92,7 @@ class Environment(object):
                 gz = np.zeros(px.shape)
         else:
             try:
-                gz = (getElevationTIFF(use_elevation, latg, long, interp_method='splinef2d') - self.ref[2]).reshape(sh)
+                gz = (getElevationTIFF(use_elevation, latg, long, interp_method='splinef2d') - self.ref[2]).reshape(gx.shape)
             except FileNotFoundError:
                 gz = np.zeros(px.shape)
         return (px, py, gz), rmat
@@ -209,22 +218,15 @@ class SDREnvironment(Environment):
         print('SDR loaded')
         try:
             asi = sdr.loadASI(sdr.files['asi'])
-            grid = abs(asi)
         except KeyError:
             print('ASI not found.')
             asi = np.random.rand(200, 200)
-            asi[25, 25] = 10
-            asi[75, 75] = 10
-            grid = asi
         except TypeError:
             asi = sdr.loadASI(sdr.files['asi'][0])
-            grid = abs(asi)
         except FileNotFoundError:
             print('ASI not found.')
             asi = np.random.rand(200, 200)
-            asi[25, 25] = 10
-            asi[75, 75] = 10
-            grid = asi
+        grid = abs(asi)
         self._sdr = sdr
         self._asi = asi
         if sdr.gim is not None:

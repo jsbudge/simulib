@@ -79,24 +79,26 @@ def renderBlock(a_ptimes, a_rp, a_tracer, a_chirps, a_bw_az, a_bw_el, a_gridheig
     return a_bd
 
 
-def renderWarp(a_rcs, grid, tx, rx, a_az, a_el,
+def renderWarp(a_rcs, grid_transform, tx, rx, a_az, a_el,
                bw_az, bw_el, near_range_s, fs, wavelength, radar_coeff,
-               nsam, fft_chirp):
-    txpos = cp.array(tx, dtype='f4')
-    rxpos = cp.array(rx, dtype='f4')
-    az = cp.array(a_az, dtype='f4')
-    el = cp.array(a_el, dtype='f4')
-    idata = cp.zeros((len(a_az), nsam), dtype='f4')
-    qdata = cp.zeros((len(a_az), nsam), dtype='f4')
-    rcs = cp.array(a_rcs, dtype='f4')
-    loc_grid = cp.array(grid, dtype='f4')
+               aug_nsam, near_range_cutoff, chirp_gpu):
+    txpos = wp.array(tx, dtype=wp.vec3f, device='cuda:0')
+    rxpos = wp.array(rx, dtype=wp.vec3f, device='cuda:0')
+    az = wp.array(a_az, dtype=wp.float32, device='cuda:0')
+    el = wp.array(a_el, dtype=wp.float32, device='cuda:0')
+    idata = wp.zeros((len(a_az), len(chirp_gpu)), dtype=wp.vec2f, device='cuda:0')
+    # qdata = wp.zeros((len(p), aug_nsam), dtype=wp.float32, device='cuda:0')
     wp.launch(
         kernel=simple_simulation,
-        dim=(grid.shape[0], grid.shape[1]),
-        inputs=[rcs, loc_grid, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, wavelength, radar_coeff,
-                idata, qdata],
+        dim=(a_rcs.shape[0] - 1, a_rcs.shape[1] - 1),
+        inputs=[a_rcs, grid_transform, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, 2 * np.pi / wavelength,
+                radar_coeff,
+                aug_nsam, idata],
     )
-    return cp.asnumpy(cp.fft.fft(idata + 1j * qdata, fft_chirp.shape[-1], axis=-1)) * fft_chirp
+    wp.synchronize()
+    return cp.asnumpy(
+        cp.fft.fft(cp.fft.ifft(cp.fft.fft(cp.array(idata.view(wp.float64)).view(_complex_float), axis=-1) * chirp_gpu,
+                               axis=-1)[:, near_range_cutoff:aug_nsam], len(chirp_gpu), axis=-1))
 
 
 
@@ -291,24 +293,24 @@ def runSimulation(cfig, fnme):
                                                 nrows=point_grid_sz, ncols=point_grid_sz,
                                                 cross_track_angle=bg.cross_track_angle, use_elevation=False)
     bgz[:] = 0.
+    points = np.array([bgx.flatten(), bgy.flatten(), bgz.flatten()])
 
     print('Getting Google Maps grid...')
     res_mpp = max((bgx.max() - bgx.min()) / point_grid_sz, (bgy.max() - bgy.min()) / point_grid_sz)
-    lats, lons, alts = enu2llh(bgx.flatten(), bgy.flatten(), bgz.flatten(), bg.ref)
+    lats, lons, alts = enu2llh(*points, bg.ref)
     im, imx, imy = resampleGoogleMap(lats, lons, res_mpp)
     # Google image is transposed compared to what we expect in SDREnvironment
     im = np.array(im).sum(axis=2).T
     im = ((im - im.min()) * .95 / (im.max() - im.min()))
     grid_int = RegularGridInterpolator((np.arange(im.shape[0]), np.arange(im.shape[1])), im, bounds_error=False, fill_value=0.)
-    points = np.array([bgx.T.flatten(), bgy.T.flatten(), bgz.flatten()]).T
 
     print('Sampling Google Map...')
-    plats, plons, _ = enu2llh(*points.T, bg.ref)
+    plats, plons, _ = enu2llh(*points, bg.ref)
 
     # Get power values for random points by using interpolation of Google Maps data
     _, _, iimx, iimy = calcGoogleCoords(((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), plats, plons,
                                         res_mpp)
-    point_power = grid_int((iimx, iimy)).astype(_float).reshape(bgz.shape)
+    point_power = grid_int((iimx, iimy)).astype(_float).reshape(bgz.shape).T
     # point_power[:] = 0
     # point_power[233, 233] = 10
 
@@ -321,34 +323,26 @@ def runSimulation(cfig, fnme):
 
     render_time = time.time()
 
-    # This is only here to be compatible with Optix tracer; it can be pretty small, we don't use it
-    '''grid_pts = np.array([[0, 0, 0], [0, 1, 0], [1, 1, 0.]])
-    elevation_mesh = tri.Trimesh(vertices=grid_pts, faces=np.array([[0, 1, 2]]))
-    el_mats = np.zeros((elevation_mesh.triangles.shape[0], 2))
-    tracer = build_tracer([BaseMesh(elevation_mesh, el_mats, motion_keys=None)], 'anduril_trace.cu',
-                          pulse_times=pulse_times)
-
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        ex_map = executor.map(renderBlock, ptimes, repeat(rp), repeat(tracer), repeat(fft_chirp), repeat(bw_az),
-                              repeat(bw_el), repeat(bgz.flatten()), repeat(point_power), repeat(bbg_transform),
-                              repeat(aug_nsam), repeat(fc), repeat(fs), repeat(near_range_s), repeat(ranges[-1]),
-                              repeat(bgx.shape[0]),
-                              repeat(bgx.shape[1]), repeat(cfig.ant_params.transmit_power),
-                              repeat(cfig.ant_params.rx_gain),
-                              repeat(cfig.ant_params.tx_gain), repeat(cfig.ant_params.rec_gain),
-                              repeat(cfig.ant_params.noise_figure), repeat(cfig.ant_params.operating_temperature),
-                              repeat(fft_len), repeat(False), repeat(near_range_cutoff))
-        results = list(ex_map)'''
-
-
     rcs = wp.array(point_power, dtype=wp.float32, device='cuda:0')
     radar_coeff = getRadarCoeff(fc, cfig.ant_params.transmit_power, cfig.ant_params.rx_gain, cfig.ant_params.tx_gain,
                                 cfig.ant_params.rec_gain)
-    # loc_grid = wp.array(np.stack([bgx, bgy, bgz], axis=-1), dtype=wp.vec3f, device='cuda:0')
-    grid_transform = wp.array(bbg_transform, dtype=wp.mat33f, device='cuda:0')
-    results = []
     idata = wp.zeros((npulses, fft_len), dtype=wp.vec2f, device='cuda:0')
     chirp_gpu = cp.array(fft_chirp, dtype=_complex_float)
+    grid_transform = wp.mat33f(bbg_transform)
+    results = []
+
+    '''txes = [rp.txpos(p)[:, 0, 0, :] for p in ptimes]
+    rxes = [rp.rxpos(p)[:, 0, 0, :] for p in ptimes]
+    azes = [rp.az_iner(p) for p in ptimes]
+    eles = [rp.el_iner(p) for p in ptimes]
+
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        ex_map = executor.map(renderWarp, repeat(rcs), repeat(grid_transform), txes, rxes,
+                              azes, eles, repeat(bw_az), repeat(bw_el),
+                              repeat(near_range_s), repeat(fs), repeat(wavelength), repeat(radar_coeff), repeat(aug_nsam),
+                              repeat(near_range_cutoff),
+                              repeat(chirp_gpu))
+        results = list(ex_map)'''
     for p in tqdm(ptimes):
         txpos = wp.array(rp.txpos(p)[:, 0, 0, :], dtype=wp.vec3f, device='cuda:0')
         rxpos = wp.array(rp.rxpos(p)[:, 0, 0, :], dtype=wp.vec3f, device='cuda:0')
@@ -358,7 +352,7 @@ def runSimulation(cfig, fnme):
         # qdata = wp.zeros((len(p), aug_nsam), dtype=wp.float32, device='cuda:0')
         wp.launch(
             kernel=simple_simulation,
-            dim=bgx.shape,
+            dim=(bgx.shape[0] - 1, bgx.shape[1] - 1, 2),
             inputs=[rcs, grid_transform, txpos, rxpos, az, el, bw_az, bw_el, near_range_s, fs, 2 * np.pi / wavelength, radar_coeff,
                     aug_nsam, idata],
         )
@@ -429,14 +423,13 @@ def runSimulation(cfig, fnme):
                                             glons, res_mpp)
         gpoint_power = grid_int((gimx, gimy)).astype(_float).reshape(gx.shape).T
 
-
-        disp_transform = bg_transform
+        disp_transform = bg_transform.T
 
         fig, ((ax0, ax1)) = plt.subplots(1, 2)
         fig.suptitle('BPJ cs. MAP')
-        do_plot(ax0, db(scaled_bpj), [-gx.shape[0] / 2, gx.shape[0] / 2, -gx.shape[1] / 2, gx.shape[1] / 2],
+        do_plot(ax0, db(scaled_bpj), [0, gx.shape[0] - 1, 0, gx.shape[1] - 1],
                 disp_transform)
-        do_plot(ax1, gpoint_power, [-gx.shape[0] / 2, gx.shape[0] / 2, -gx.shape[1] / 2, gx.shape[1] / 2],
+        do_plot(ax1, gpoint_power, [0, gx.shape[0] - 1, 0, gx.shape[1] - 1],
                 disp_transform)
 
         plt.figure()
@@ -447,10 +440,10 @@ def runSimulation(cfig, fnme):
 
         base_pos = rp.pos(pulse_times[::100])
 
-        if points.shape[0] < 512 ** 2:
+        if points.shape[1] < 512 ** 2:
             fig = px.scatter_3d(x=gx.flatten(), y=gy.flatten(), z=gz.flatten(), )
             fig.add_scatter3d(x=base_pos[:, 0], y=base_pos[:, 1], z=base_pos[:, 2])
-            fig.add_scatter3d(x=points[:, 0], y=points[:, 1], z=points[:, 2], mode='markers',
+            fig.add_scatter3d(x=points[0, :], y=points[1, :], z=points[2, :], mode='markers',
                               marker=dict(color=point_power))
             fig.show()
 
@@ -478,7 +471,7 @@ if __name__ == "__main__":
                   '/home/jeff/SDR_DATA/RAW/05072025/SAR_05072025_144041.sar',
                   '/home/jeff/SDR_DATA/RAW/07232025/SAR_07232025_144305.sar',
                   '/home/jeff/SDR_DATA/RAW/12172024/SAR_12172024_112906.sar']
-    # test_files = ['/home/jeff/SDR_DATA/RAW/06032025/SAR_06032025_124843.sar']
+    test_files = ['/home/jeff/SDR_DATA/RAW/06032025/SAR_06032025_124843.sar']
     test_files = ['/home/jeff/SDR_DATA/RAW/04292025/SAR_04292025_111051.sar']
 
     success_files = []
